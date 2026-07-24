@@ -39,9 +39,14 @@ termux_step_pre_configure() {
 	# Also clean src/Makefile (used for julia-codegen link step)
 	sed -i '/-lpthread/s/ -lpthread/ /g' src/Makefile
 
-	# Fix host flisp build: change BUILDDIR := . to BUILDDIR ?= . so the host
-	# Makefile's BUILDDIR setting isn't overridden when it includes this file.
+	# Fix BUILDDIR reset in flisp Makefile when used for host build
+	# (USE_CROSS_FLISP=1).  The host Makefile sets BUILDDIR before including
+	# this file, but line 3 resets it with := instead of ?=.
 	sed -i 's/^BUILDDIR := \.$/BUILDDIR ?= ./' src/flisp/Makefile
+	# Also fix the host flisp make invocation: when BUILDDIR is absolute the
+	# relative target name "flisp" does not match the absolute rule target
+	# $(BUILDDIR)/flisp.  Use the default make target (release) instead.
+	sed -i 's/ -C \$(BUILDDIR)\/host \$(EXENAME)$/ -C $(BUILDDIR)\/host/' src/flisp/Makefile
 
 	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
 	# and delete the separate LLVM version block entirely.  lld in Android's
