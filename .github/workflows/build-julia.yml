@@ -61,11 +61,11 @@ jobs:
           # Android NDK contiene el linker en libc.so (que es el linker en Android)
           NDK_DIR=$(ls -d /home/builder/lib/android-ndk-* 2>/dev/null | head -1)
           if [ -n "$NDK_DIR" ]; then
-            LINKER="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc.so"
+            LINKER=$(find "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android" -name "libc.so" 2>/dev/null | head -1)
             if [ -f "$LINKER" ]; then
               mkdir -p /system/bin 2>/dev/null || true
               ln -sf "$LINKER" /system/bin/linker64 && \
-                echo "linker64 symlink created: $LINKER" || \
+              echo "linker64 symlink created: $LINKER" || \
                 echo "WARNING: Could not create symlink"
             else
               echo "WARNING: NDK linker not found at $LINKER"
