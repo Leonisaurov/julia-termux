@@ -6,8 +6,8 @@ TERMUX_PKG_VERSION=1.14.0
 TERMUX_PKG_SRCURL=https://github.com/JuliaLang/julia/archive/refs/heads/master.tar.gz
 TERMUX_PKG_GIT_BRANCH=master
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_DEPENDS="libllvm, openblas, lapack, suitesparse, arpack-ng, gmp, mpfr, zlib, openssl, libssh2, libgit2, curl, nghttp2, pcre2, utf8proc, libuv, p7zip, libwhich"
-TERMUX_PKG_BUILD_DEPENDS="patchelf"
+# Dependencies installed via CI workflow before build (not declared here to avoid
+# buildorder.py looking up non-existent packages/ dir entries for each dep)
 TERMUX_PKG_NO_STRIP=false
 TERMUX_PKG_HOSTBUILD=true
 
