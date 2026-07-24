@@ -102,9 +102,10 @@ termux_step_pre_configure() {
 	# Adding ALLOW_FAILURE ($4) makes the rule warn instead of abort.
 	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile || echo "Warning: base/Makefile LIBM ALLOW_FAILURE sed failed" >&2
 
-	# Add Termux prefix to ldconfig so libwhich/dlopen can find system libraries
-	echo "$TERMUX_PREFIX/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
-	sudo ldconfig 2>/dev/null || true
+	# Nota: ldconfig se configura en el CI runner HOST (fuera de Docker) en el
+	# workflow .github/workflows/build-julia.yml → paso "Configure linker cache".
+	# No podemos usar sudo AQUÍ porque build-package.sh lo sobreescribe con una
+	# función que llama exit 1 (ver build-package.sh líneas 506-510).
 
 	# Make.host.user: compilador nativo del host para herramientas como flisp
 	# cuando USE_CROSS_FLISP=1 está activado. Esto permite compilar flisp

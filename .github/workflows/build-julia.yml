@@ -47,6 +47,11 @@ jobs:
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
 
+    - name: Configure linker cache for Termux prefix
+      run: |
+        echo "/data/data/com.termux/files/usr/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf
+        sudo ldconfig
+
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
