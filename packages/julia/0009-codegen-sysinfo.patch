@@ -1,0 +1,20 @@
+--- a/src/codegen.cpp	2026-07-24 04:18:06.081393067 -0600
++++ b/src/codegen.cpp	2026-07-24 04:18:06.241393067 -0600
+@@ -10640,7 +10640,7 @@
+ #else
+ #include <sys/resource.h>
+ #endif
+-#ifdef _OS_LINUX_
++#if defined(_OS_LINUX_) && !defined(__BIONIC__)
+ #include <sys/sysinfo.h>
+ #endif
+ 
+@@ -10669,7 +10669,7 @@
+         jl_safe_printf("this process: %" PRIu64 " MiB working set, %" PRIu64 " MiB commit charge\n",
+                        (uint64_t)(pmc.WorkingSetSize >> 20), (uint64_t)(pmc.PrivateUsage >> 20));
+ #else
+-#if defined(_OS_LINUX_)
++#if defined(_OS_LINUX_) && !defined(__BIONIC__)
+     struct sysinfo sinfo;
+     if (sysinfo(&sinfo) == 0)
+         jl_safe_printf("system memory: %" PRIu64 " MiB of %" PRIu64 " MiB physical available, "

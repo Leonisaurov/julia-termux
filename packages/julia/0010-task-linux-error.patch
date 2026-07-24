@@ -1,0 +1,11 @@
+--- a/src/task.c	2026-07-24 04:18:06.117393067 -0600
++++ b/src/task.c	2026-07-24 04:18:06.241393067 -0600
+@@ -1359,7 +1359,7 @@
+     if (unw_init_local(&c, t->ctx))
+         abort();
+     PUSH_RET(&c, stk);
+-#if defined __linux__
++#if defined __linux__ && !defined(__ANDROID__)
+ #error savannah nongnu libunwind is incapable of setting UNW_REG_SP, as required
+ #endif
+     if (unw_set_reg(&c, UNW_REG_SP, (uintptr_t)stk))

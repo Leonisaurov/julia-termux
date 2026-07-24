@@ -1,0 +1,11 @@
+--- a/src/debuginfo.cpp	2026-07-24 04:18:06.041393067 -0600
++++ b/src/debuginfo.cpp	2026-07-24 04:18:06.225393067 -0600
+@@ -57,7 +57,7 @@
+ };
+ }  // anonymous namespace
+ 
+-#if (defined(_OS_LINUX_) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) && defined(LLVM_SHLIB)))
++#if (defined(_OS_LINUX_) && !defined(__BIONIC__)) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) && defined(LLVM_SHLIB)))
+ extern "C" {
+     JL_DLLIMPORT extern void __register_frame(void*) JL_NOTSAFEPOINT;
+     JL_DLLIMPORT extern void __deregister_frame(void*) JL_NOTSAFEPOINT;

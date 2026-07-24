@@ -72,6 +72,24 @@ termux_step_pre_configure() {
 		fi
 	fi
 
+	# Fix A: Remove -lrt from OSLIBS (bionic has librt functions in libc)
+	sed -i '/^OSLIBS/s/ -lrt//' Make.inc
+
+	# Fix B: Disable ifunc detection on Android (bionic doesn't support ifunc)
+	sed -i '/IFUNC_DETECT_SRC/,/^endif/d' Make.inc
+
+	# Fix C: Skip copying glibc-specific CRT objects on Android
+	sed -i '/libc_nonshared.a/d' Makefile
+
+	# Fix D: Remove -static-libstdc++ for Android (uses libc++)
+	sed -i 's/-static-libstdc++//g' src/Makefile
+
+	# Fix E: libc_nonshared.a in deps/csl.mk
+	sed -i '/libc_nonshared.a/d' deps/csl.mk 2>/dev/null || true
+
+	# Fix F: Remove -latomic from OSLIBS
+	sed -i '/^OSLIBS/s/ -latomic//' Make.inc
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
