@@ -121,12 +121,12 @@ termux_step_make() {
 	make -C src/support \
 		BUILDDIR="$(pwd)/src/support/host" \
 		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
-		LIBUV_INC="$DUM_UV" libsupport.a
+		LIBUV_INC="$DUM_UV" FC_VERSION=dummy libsupport.a
 	make -C src/flisp \
 		BUILDDIR="$(pwd)/src/flisp/host" \
 		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
 		BUILDING_HOST_TOOLS=1 \
-		LIBUV_INC="$DUM_UV" release
+		LIBUV_INC="$DUM_UV" FC_VERSION=dummy release
 
 	# Now run the main cross-compilation build (USE_CROSS_FLISP picks up the
 	# host flisp we just built at src/flisp/host/flisp).
