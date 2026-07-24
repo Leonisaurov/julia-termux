@@ -38,7 +38,7 @@ for pkg in "${DEPS[@]}"; do
     continue
   fi
   deb_name="${filename##*/}"
-  local url="${REPO_BASE}/${filename}"
+  url="${REPO_BASE}/${filename}"
   echo "     Downloading $deb_name"
   echo "     URL: $url"
   HTTP_CODE=$(curl -sL -w "%{http_code}" "$url" -o "/tmp/$deb_name") || true
