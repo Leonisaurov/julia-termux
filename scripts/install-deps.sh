@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "=== Installing required tools ==="
-sudo apt-get update -qq
-sudo apt-get install -y -qq curl binutils > /dev/null 2>&1
-
 DEPS=(
   libllvm
   libopenblas blas-openblas
@@ -47,10 +43,8 @@ for pkg in "${DEPS[@]}"; do
     }
   fi
   echo "     Extracting"
-  cd /tmp
-  ar x "$deb_name"
-  tar xJf data.tar.xz --no-overwrite-dir -C / 2>/dev/null || true
-  rm -f data.tar.xz control.tar.xz debian-binary "$deb_name"
+  dpkg-deb -x "/tmp/$deb_name" / 2>/dev/null || true
+  rm -f "/tmp/$deb_name"
 done
 
 echo "=== All dependencies installed ==="
