@@ -150,6 +150,19 @@ termux_step_pre_configure() {
 		}' cli/loader_lib.c 2>/dev/null || true
 	fi
 
+	# Fix H04: Definir _OS_ANDROID_ cuando se detecta __ANDROID__.
+	if [ -f src/support/platform.h ]; then
+		sed -i '/^#define _OS_LINUX_$/a\
+#  if defined(__ANDROID__)\
+#    define _OS_ANDROID_\
+#  endif' src/support/platform.h 2>/dev/null || true
+	fi
+
+	# Fix H05: Incluir <link.h> también en bionic (patch 0004).
+	if [ -f src/dlload.c ]; then
+		sed -i 's/^#ifdef __GLIBC__/#if defined(__GLIBC__) || defined(__BIONIC__)/' src/dlload.c 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
