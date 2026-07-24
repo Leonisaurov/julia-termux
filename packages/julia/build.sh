@@ -100,9 +100,9 @@ termux_step_pre_configure() {
 	echo "$TERMUX_PREFIX/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
 	sudo ldconfig 2>/dev/null || true
 
-	# Make.host.user: compilador NATIVO del host (x86_64) para herramientas
-	# como flisp cuando USE_CROSS_FLISP=1. Sin esto, Julia compila flisp
-	# para aarch64 e intenta ejecutarlo en x86_64 (requiere QEMU).
+	# Make.host.user: compilador nativo del host para herramientas como flisp
+	# cuando USE_CROSS_FLISP=1 está activado. Esto permite compilar flisp
+	# para x86_64 (host) y ejecutarlo sin QEMU.
 	cat > Make.host.user <<-EOF
 	CC = gcc
 	CXX = g++
@@ -237,11 +237,12 @@ termux_step_pre_configure() {
 	USE_SYSTEM_MBEDTLS=0
 
 	USE_BINARYBUILDER=0
-	USE_CROSS_FLISP=1
 	DISABLE_LIBUNWIND=1
 	JULIA_THREADS=4
 	prefix=$TERMUX_PREFIX
 	LOCALBASE=$TERMUX_PREFIX
+
+	USE_CROSS_FLISP=1
 
 	override CXXFLAGS += -Wno-deprecated-declarations
 	override CFLAGS += -Wno-deprecated-declarations
@@ -259,7 +260,6 @@ termux_step_make() {
 	# Make.inc genera CC automáticamente como aarch64-linux-android-clang.
 	# Pasarlos explícitamente causa doble prefijo.
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
-		XC_HOST=aarch64-linux-android \
 		HOSTCC="gcc" \
 		HOSTCXX="g++" \
 		HOST_LDFLAGS="" \

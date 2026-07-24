@@ -41,11 +41,10 @@ jobs:
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
 
-    - name: Install QEMU for ARM binary execution
+    - name: Install system dependencies
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq qemu-user-static
-        echo "QEMU installed for ARM binary execution"
+        sudo apt-get install -y -qq
 
     - name: Install system dependencies
       env:
@@ -55,28 +54,7 @@ jobs:
     - name: Build Julia
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: |
-        ./scripts/run-docker.sh bash -c '
-          echo "=== Creating QEMU linker symlink from NDK ==="
-          # Android NDK contiene el linker en libc.so (que es el linker en Android)
-          NDK_DIR=$(ls -d /home/builder/lib/android-ndk-* 2>/dev/null | head -1)
-          if [ -n "$NDK_DIR" ]; then
-            LINKER=$(find "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android" -name "libc.so" 2>/dev/null | head -1)
-            if [ -f "$LINKER" ]; then
-              mkdir -p /system/bin 2>/dev/null || true
-              ln -sf "$LINKER" /system/bin/linker64 && \
-              echo "linker64 symlink created: $LINKER" || \
-                echo "WARNING: Could not create symlink"
-            else
-              echo "WARNING: NDK linker not found at $LINKER"
-              find /home/builder/lib -name "libc.so" -path "*/aarch64*" 2>/dev/null | head -3
-            fi
-          else
-            echo "WARNING: No NDK directory found in /home/builder/lib/"
-            ls -la /home/builder/lib/ 2>/dev/null || echo "(/home/builder/lib/ not accessible)"
-          fi
-          ./build-package.sh -s -a aarch64 --format pacman julia
-        '
+      run: ./scripts/run-docker.sh ./build-package.sh -s -a aarch64 --format pacman julia
 
     - name: Collect package files
       if: always()
