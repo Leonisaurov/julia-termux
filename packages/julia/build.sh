@@ -39,6 +39,10 @@ termux_step_pre_configure() {
 	# Also clean src/Makefile (used for julia-codegen link step)
 	sed -i '/-lpthread/s/ -lpthread/ /g' src/Makefile
 
+	# Fix host flisp build: change BUILDDIR := . to BUILDDIR ?= . so the host
+	# Makefile's BUILDDIR setting isn't overridden when it includes this file.
+	sed -i 's/^BUILDDIR := \.$/BUILDDIR ?= ./' src/flisp/Makefile
+
 	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
 	# and delete the separate LLVM version block entirely.  lld in Android's
 	# NDK rejects files with multiple named version blocks, and during cross-
