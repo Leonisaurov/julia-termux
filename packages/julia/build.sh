@@ -106,18 +106,13 @@ termux_step_pre_configure() {
 	cat > Make.host.user <<-EOF
 	CC = gcc
 	CXX = g++
-	AR = ar
-	RANLIB = ranlib
 	EOF
 
 	cat > Make.user <<-EOF
-	# CC/CXX are set here and also passed on the command line for the main
-	# build.  We must NOT use override so that sub-make invocations for host
-	# tools can set CC=gcc on the command line.
-	CC=$CC
-	CXX=$CXX
-	AR=$AR
-	RANLIB=$RANLIB
+	XC_HOST = aarch64-linux-android
+	# CC/CXX los genera Make.inc automáticamente con el prefijo CROSS_COMPILE
+	AR = llvm-ar
+	RANLIB = llvm-ranlib
 
 	USE_SYSTEM_LLVM=1
 	USE_SYSTEM_PCRE=1
@@ -167,6 +162,7 @@ termux_step_make() {
 	# in the CI workflow before the Docker container) lets the ARM flisp
 	# binary run on the x86_64 build host.
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
+		XC_HOST=aarch64-linux-android \
 		CC="$CC" CXX="$CXX" \
 		HOSTCC="gcc" \
 		HOSTCXX="g++" \
