@@ -90,6 +90,12 @@ termux_step_pre_configure() {
 	# Fix F: Remove -latomic from OSLIBS
 	sed -i '/^OSLIBS/s/ -latomic//' Make.inc
 
+	# Fix G: Make libm symlink ALLOW_FAILURE on Android/bionic.
+	# On bionic, libm is part of libc — no standalone libm.so exists.
+	# Julia's base/Makefile tries to locate it to create a runtime symlink.
+	# Adding ALLOW_FAILURE ($4) makes the rule warn instead of abort.
+	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
@@ -101,7 +107,7 @@ termux_step_pre_configure() {
 
 	USE_SYSTEM_LLVM=1
 	USE_SYSTEM_PCRE=1
-	USE_SYSTEM_LIBM=0
+	USE_SYSTEM_LIBM=1
 	USE_SYSTEM_OPENBLAS=1
 	USE_SYSTEM_BLAS=1
 	USE_SYSTEM_LAPACK=1
