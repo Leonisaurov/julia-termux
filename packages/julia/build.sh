@@ -1,0 +1,89 @@
+TERMUX_PKG_HOMEPAGE=https://julialang.org
+TERMUX_PKG_DESCRIPTION="Julia programming language - Termux/Android build"
+TERMUX_PKG_LICENSE="MIT"
+TERMUX_PKG_MAINTAINER="@termux"
+TERMUX_PKG_VERSION=1.14.0
+TERMUX_PKG_SRCURL=https://github.com/JuliaLang/julia/archive/refs/heads/master.tar.gz
+TERMUX_PKG_GIT_BRANCH=master
+TERMUX_PKG_BUILD_IN_SRC=true
+TERMUX_PKG_DEPENDS="libllvm, openblas, lapack, suitesparse, arpack-ng, gmp, mpfr, zlib, openssl, libssh2, libgit2, curl, nghttp2, pcre2, utf8proc, libuv, p7zip, libwhich"
+TERMUX_PKG_BUILD_DEPENDS="patchelf"
+TERMUX_PKG_NO_STRIP=false
+TERMUX_PKG_HOSTBUILD=true
+
+termux_step_host_build() {
+	make -j$(nproc) \
+		HOSTCC="gcc" \
+		HOSTCXX="g++" \
+		HOST_LDFLAGS="" \
+		PREFIX="$TERMUX_PREFIX" \
+		BUILDROOT="$TERMUX_PKG_BUILDDIR" \
+		hostbuild
+}
+
+termux_step_pre_configure() {
+	cd "$TERMUX_PKG_SRCDIR"
+
+	cat > Make.user <<-EOF
+	CC=$CC
+	CXX=$CXX
+	AR=$AR
+	RANLIB=$RANLIB
+
+	USE_SYSTEM_LLVM=1
+	USE_SYSTEM_PCRE=1
+	USE_SYSTEM_LIBM=1
+	USE_SYSTEM_OPENBLAS=1
+	USE_SYSTEM_BLAS=1
+	USE_SYSTEM_LAPACK=1
+	USE_SYSTEM_GMP=1
+	USE_SYSTEM_MPFR=1
+	USE_SYSTEM_ARPACK=1
+	USE_SYSTEM_LIBSUITESPARSE=1
+	USE_SYSTEM_LIBSSH2=1
+	USE_SYSTEM_CURL=1
+	USE_SYSTEM_LIBGIT2=1
+	USE_SYSTEM_PATCHELF=1
+	USE_SYSTEM_ZLIB=1
+	USE_SYSTEM_OPENSSL=1
+	USE_SYSTEM_NGHTTP2=1
+	USE_SYSTEM_LIBWHICH=1
+	USE_SYSTEM_P7ZIP=1
+	USE_SYSTEM_CSL=0
+	USE_SYSTEM_OPENLIBM=0
+	USE_SYSTEM_DSFMT=0
+	USE_SYSTEM_UTF8PROC=0
+	USE_SYSTEM_LIBUV=0
+	USE_SYSTEM_LIBUNWIND=0
+	USE_SYSTEM_LLD=1
+	USE_SYSTEM_LIBBLASTRAMPOLINE=0
+	USE_SYSTEM_MBEDTLS=0
+
+	USE_BINARYBUILDER=0
+	DISABLE_LIBUNWIND=1
+	JULIA_THREADS=4
+	prefix=$TERMUX_PREFIX
+	LOCALBASE=$TERMUX_PREFIX
+
+	override CXXFLAGS += -Wno-deprecated-declarations
+	override CFLAGS += -Wno-deprecated-declarations
+	EOF
+}
+
+termux_step_make() {
+	cd "$TERMUX_PKG_SRCDIR"
+	make -j${TERMUX_PKG_MAKE_PROCESSES} \
+		HOSTCC="gcc" \
+		HOSTCXX="g++" \
+		HOST_LDFLAGS="" \
+		PREFIX="$TERMUX_PREFIX" \
+		LOCALBASE="$TERMUX_PREFIX" \
+		release
+}
+
+termux_step_make_install() {
+	cd "$TERMUX_PKG_SRCDIR"
+	make install \
+		PREFIX="$TERMUX_PREFIX" \
+		LOCALBASE="$TERMUX_PREFIX"
+}

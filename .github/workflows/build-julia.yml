@@ -1,0 +1,73 @@
+name: Build Julia for Termux
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/julia/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Enable zram
+      uses: ./.github/actions/zram
+      with:
+        algorithm: zstd
+        size: 16G
+        priority: 100
+        device_name: /dev/zram0
+
+    - name: Restore build cache
+      uses: actions/cache@v4
+      id: build-cache
+      with:
+        path: ~/.termux-build
+        key: julia-${{ hashFiles('packages/julia/build.sh') }}
+        restore-keys: |
+          julia-
+
+    - name: Prepare cache directory
+      run: mkdir -p ~/.termux-build
+
+    - name: Build Julia
+      env:
+        TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
+      run: ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman julia
+
+    - name: Collect package files
+      if: always()
+      run: |
+        mkdir -p ./artifacts
+        mv output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
+
+    - name: Upload to GitHub Release
+      if: always()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        FILE=$(ls ./artifacts/*.pkg.tar.xz 2>/dev/null | head -1)
+        [ -f "$FILE" ] || exit 0
+        gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
+        gh release create julia-latest "$FILE" \
+          --repo "${{ github.repository }}" \
+          --title "julia-latest" \
+          --latest \
+          --notes "Julia ${{ github.sha }} for Termux aarch64"
+
+    - name: Store package files
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: julia-aarch64-${{ github.sha }}
+        path: ./artifacts/*

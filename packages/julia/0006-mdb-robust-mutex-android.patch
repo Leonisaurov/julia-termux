@@ -1,0 +1,18 @@
+diff --git a/libraries/liblmdb/mdb.c b/libraries/liblmdb/mdb.c
+index e3b3b5f..a70a70a 100644
+--- a/libraries/liblmdb/mdb.c
++++ b/libraries/liblmdb/mdb.c
+@@ -362,6 +362,13 @@
+ #endif /* !MDB_USE_ROBUST */
+ 
++/* Android's bionic libc lacks POSIX robust mutex API.
++ * Force-disable even when MDB_USE_ROBUST was externally defined via CPPFLAGS.
++ */
++#ifdef __ANDROID__
++#undef MDB_USE_ROBUST
++#define MDB_USE_ROBUST	0
++#endif
++
+ #if defined(MDB_USE_POSIX_MUTEX) && (MDB_USE_ROBUST)
+ /* glibc < 2.12 only provided _np API */
+ #  if (defined(__GLIBC__) && GLIBC_VER < 0x02000c) || \

@@ -1,0 +1,12 @@
+diff --git a/src/dlload.c b/src/dlload.c
+index ac22b6f..e56b67b 100644
+--- a/src/dlload.c
++++ b/src/dlload.c
+@@ -4,7 +4,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
+-#ifdef __GLIBC__
++#if defined(__GLIBC__) || defined(__BIONIC__)
+ #include <link.h>
+ #endif

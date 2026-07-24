@@ -1,0 +1,22 @@
+diff --git a/src/support/platform.h b/src/support/platform.h
+index 3659412..e848c2a 100644
+--- a/src/support/platform.h
++++ b/src/support/platform.h
+@@ -18,6 +18,7 @@
+  *          _OS_FREEBSD_
+  *          _OS_OPENBSD_
+  *          _OS_LINUX_
++ *          _OS_ANDROID_
+  *          _OS_WINDOWS_
+  *          _OS_DARWIN_
+  *          _OS_EMSCRIPTEN_
+@@ -87,6 +88,9 @@
+ #define _OS_OPENBSD_
+ #elif defined(__linux__)
+ #define _OS_LINUX_
++#  if defined(__ANDROID__)
++#    define _OS_ANDROID_
++#  endif
+ #elif defined(_WIN32) || defined(_WIN64)
+ #define _OS_WINDOWS_
+ #elif defined(__APPLE__) && defined(__MACH__)
