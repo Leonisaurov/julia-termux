@@ -108,6 +108,13 @@ termux_step_pre_configure() {
 	CXX = g++
 	EOF
 
+	# Fix H0: Excluir #error de libunwind en Android/bionic.
+	# LLVM libunwind sí soporta UNW_REG_SP, a diferencia de Savannah libunwind.
+	# Reemplaza patch 0010.
+	if [ -f src/task.c ]; then
+		sed -i 's/#if defined __linux__/#if defined __linux__ \&\& !defined(__ANDROID__)/' src/task.c 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
