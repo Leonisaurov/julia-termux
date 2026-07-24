@@ -25,17 +25,10 @@ termux_step_pre_configure() {
 	# compiled for the target, which fail on the build machine.
 	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk
 
-	# Fix libuv pthread_setcancelstate for Android/bionic: Julia's bundled
-	# patch (libuv-android-pthread-cancel.patch) is out of sync with the
-	# current libuv source.  Replace the broken patch invocation with a
-	# direct sed that adds the missing !defined(__ANDROID__) guard.
-	cat > deps/patches/fix-libuv-process.sh <<-'SHEOF'
-	#!/bin/bash
-	cd "$1" || exit 1
-	sed -i 's|#ifdef __linux__|#if defined(__linux__) \&\& !defined(__ANDROID__)|g' src/unix/process.c
-	SHEOF
-	chmod +x deps/patches/fix-libuv-process.sh
-	sed -i "s|patch -p1 -f < \$(SRCDIR)/patches/libuv-android-pthread-cancel.patch|\$(SRCDIR)/patches/fix-libuv-process.sh \$(SRCCACHE)/\$(LIBUV_SRC_DIR)|" deps/libuv.mk
+	# Fix libuv pthread_setcancelstate for Android/bionic: Julia removed the
+	# broken patch from libuv.mk entirely.  Insert a sed to add the missing
+	# !defined(__ANDROID__) guard before the configure step.
+	sed -i '/build-configured:.*source-extracted/a\\tcd \$(SRCCACHE)/\$(LIBUV_SRC_DIR) \&\& sed -i '"'"'s|#ifdef __linux__|#if defined(__linux__) \\&\\& !defined(__ANDROID__)|g'"'"' src/unix/process.c' deps/libuv.mk
 
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
