@@ -18,13 +18,17 @@ DEPS=(
 PACKAGES_URL="https://packages-cf.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages"
 REPO_BASE="https://packages-cf.termux.dev/apt/termux-main"
 
+get_stanza() {
+  awk -v pkg="$1" '/^Package: /{found=($2==pkg)} found{print} /^$/{if(found) exit}' /tmp/Packages
+}
+
 echo "=== Downloading Packages metadata ==="
 curl -sL "$PACKAGES_URL" -o /tmp/Packages
 
 echo "=== Installing dependencies ==="
 for pkg in "${DEPS[@]}"; do
   echo "  -> $pkg"
-  stanza=$(grep -A 20 "^Package: $pkg\$" /tmp/Packages || true)
+  stanza=$(get_stanza "$pkg")
   filename=$(echo "$stanza" | grep "^Filename:" | awk '{print $2}' || true)
   sha256=$(echo "$stanza" | grep "^SHA256:" | awk '{print $2}' || true)
   if [ -z "$filename" ]; then
