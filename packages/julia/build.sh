@@ -124,6 +124,18 @@ termux_step_pre_configure() {
 			src/codegen.cpp 2>/dev/null || true
 	fi
 
+	# Fix H01: Excluir __register_frame/__deregister_frame en Android/bionic.
+	# Estas funciones de libgcc_s no existen en bionic. Reemplaza patch 0008.
+	if [ -f src/debuginfo.cpp ]; then
+		sed -i 's/#if (defined(_OS_LINUX_) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) \&\& defined(LLVM_SHLIB)))/#if (defined(_OS_LINUX_) \&\& !defined(__BIONIC__)) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) \&\& defined(LLVM_SHLIB)))/' src/debuginfo.cpp 2>/dev/null || true
+	fi
+
+	# Fix H02: Usar pthread_get_stackaddr_np en Android/bionic.
+	# pthread_getattr_np no existe en bionic. Reemplaza patch 0007 (condición).
+	if [ -f src/init.c ]; then
+		sed -i 's/#  if defined(_OS_LINUX_) || defined(_OS_FREEBSD_)/#  if (defined(_OS_LINUX_) \&\& !defined(__BIONIC__)) || defined(_OS_FREEBSD_)/' src/init.c 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
