@@ -163,6 +163,34 @@ termux_step_pre_configure() {
 		sed -i 's/^#ifdef __GLIBC__/#if defined(__GLIBC__) || defined(__BIONIC__)/' src/dlload.c 2>/dev/null || true
 	fi
 
+	# Fix H06: Incluir <endian.h> en bionic y excluir uint_t duplicada (patch 0002).
+	if [ -f src/support/dtypes.h ]; then
+		sed -i \
+			-e 's/^#ifdef _OS_LINUX_$/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/' \
+			-e '/^#endif$/{
+			N
+			/^#endif\n#if defined(__APPLE__)/{
+			i\
+#if defined(__BIONIC__)\
+#include <endian.h>\
+/* bionic already defines LITTLE_ENDIAN, BIG_ENDIAN, BYTE_ORDER */\
+#endif
+			}
+		}' src/support/dtypes.h 2>/dev/null || true
+		sed -i 's/^typedef uint64_t uint_t;  \/\/ preferred int type on platform$/#ifndef __BIONIC__\ntypedef uint64_t uint_t;\n#endif/' src/support/dtypes.h 2>/dev/null || true
+		sed -i '/^#define NBITS 32$/,/^typedef int32_t int_t;$/{
+			/^typedef uint32_t uint_t;$/i\
+#ifndef __BIONIC__
+			/^typedef uint32_t uint_t;$/a\
+#endif
+		}' src/support/dtypes.h 2>/dev/null || true
+	fi
+
+	# Fix H07: Usar dl_iterate_phdr como fallback en Android/bionic (patch 0003).
+	if [ -f src/sys.c ]; then
+		sed -i 's/^#ifdef _OS_OPENBSD_$/#if defined(_OS_OPENBSD_) || defined(_OS_ANDROID_)/' src/sys.c 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
