@@ -30,6 +30,18 @@ termux_step_pre_configure() {
 	# !defined(__ANDROID__) guard before the configure step.
 	sed -i '/build-configured:.*source-extracted/a\\tcd \$(SRCCACHE)/\$(LIBUV_SRC_DIR) \&\& sed -i '"'"'s|#ifdef __linux__|#if defined(__linux__) \\&\\& !defined(__ANDROID__)|g'"'"' src/unix/process.c' deps/libuv.mk
 
+	# Remove -lpthread from linker flags (bionic has pthreads in libc)
+	# These use targeted patterns to avoid missing edge cases.
+	sed -i '/^OSLIBS/s/ -lpthread/ /g' Make.inc
+	sed -i '/^LOADER_LDFLAGS/s/ -lpthread/ /g' cli/Makefile
+	sed -i '/^LIBS/s/ -lpthread/ /g' src/flisp/Makefile
+	sed -i '/-lpthread/s/ -lpthread/ /g' src/support/Makefile
+
+	# Fix julia.expmap: change the LLVM version block to use the Julia version
+	# tag, keeping the LLVM symbols under the same version block.  lld rejects
+	# files with multiple named version blocks.
+	sed -i 's/^@LLVM_SHLIB_SYMBOL_VERSION@$/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in
+
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
 	# pass FC_VERSION=dummy on the make command line to bypass the check.
