@@ -46,6 +46,15 @@ termux_step_pre_configure() {
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
 	# pass FC_VERSION=dummy on the make command line to bypass the check.
+
+	# Pre-create the 7z symlink in build_private_libexecdir so that
+	# base/Makefile's symlink_p7zip rule always succeeds (its $(shell which 7z)
+	# may fail if PATH is scoped in a sub-make).  Even with
+	# USE_SYSTEM_P7ZIP=1, the deps are skipped, but JL_PRIVATE_EXES always
+	# lists "7z", so the file must exist at install time.
+	mkdir -p usr/libexec/julia
+	ln -sf "$(command -v 7z || command -v 7za)" usr/libexec/julia/7z
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
