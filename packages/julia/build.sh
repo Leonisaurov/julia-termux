@@ -30,29 +30,18 @@ termux_step_pre_configure() {
 	# !defined(__ANDROID__) guard before the configure step.
 	sed -i '/build-configured:.*source-extracted/a\\tcd \$(SRCCACHE)/\$(LIBUV_SRC_DIR) \&\& sed -i '"'"'s|#ifdef __linux__|#if defined(__linux__) \\&\\& !defined(__ANDROID__)|g'"'"' src/unix/process.c' deps/libuv.mk
 
-	# Remove -lpthread from linker flags (bionic has pthreads in libc)
-	# These use targeted patterns to avoid missing edge cases.
-	sed -i '/^OSLIBS/s/ -lpthread/ /g' Make.inc
-	sed -i '/^LOADER_LDFLAGS/s/ -lpthread/ /g' cli/Makefile
-	sed -i '/^LIBS/s/ -lpthread/ /g' src/flisp/Makefile
-	sed -i '/-lpthread/s/ -lpthread/ /g' src/support/Makefile
-	# Also clean src/Makefile (used for julia-codegen link step)
-	sed -i '/-lpthread/s/ -lpthread/ /g' src/Makefile
+	# Remove -lpthread from all Makefiles (bionic has pthread in libc)
+	sed -i '/^OSLIBS/s/ -lpthread//' Make.inc
+	sed -i '/^LOADER_LDFLAGS/s/ -lpthread//' cli/Makefile
+	sed -i '/^LIBS/s/ -lpthread//' src/flisp/Makefile
 
 	# The host flisp build path (USE_CROSS_FLISP=1 -> src/flisp/host/) has
 	# BUILDDIR/pattern bugs in GNU make.  We build host flisp manually below
 	# in termux_step_make() with an absolute BUILDDIR and explicit CC=gcc.
 
-	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
-	# and delete the separate LLVM version block entirely.  lld in Android's
-	# NDK rejects files with multiple named version blocks, and during cross-
-	# compilation LLVM_SHLIB_SYMBOL_VERSION is often empty (readelf fails),
-	# producing an anonymous block that lld also rejects.
-	# NOTE: the Makefile's sed (src/Makefile:560) then tries to substitute
-	# @LLVM_SHLIB_SYMBOL_VERSION@ — with the block deleted there's no occurrence
-	# left, so the empty variable is harmless.
-	sed -i '/MMTK_\*;$/a\    _ZN4llvm3Any6TypeId*;' src/julia.expmap.in
-	sed -i '/^@LLVM_SHLIB_SYMBOL_VERSION@ {/,/^};/d' src/julia.expmap.in
+	# Fix julia.expmap: replace LLVM version token with Julia version token
+	# so the generated file has a single version block (lld rejects multiple)
+	sed -i 's/@LLVM_SHLIB_SYMBOL_VERSION@/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in
 
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
