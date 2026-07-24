@@ -96,16 +96,29 @@ termux_step_pre_configure() {
 	# aarch64-linux-android-gcc to be used for host flisp (doesn't exist in NDK).
 	sed -i 's/^override CROSS_COMPILE:/CROSS_COMPILE:/' Make.inc || echo "Warning: CROSS_COMPILE override sed on Make.inc failed" >&2
 
+	# Fix: Reset CROSS_COMPILE when BUILDING_HOST_TOOLS=1 to prevent
+	# XC_HOST from leaking into host tool sub-makes. Without this, flisp
+	# host gets cross-compiled for aarch64 and can't execute on x86_64
+	# runner, failing with 'Could not open /system/bin/linker64'.
+	sed -i '/^CROSS_COMPILE:=\$(XC_HOST)-/a\
+\
+ifeq ($(BUILDING_HOST_TOOLS),1)\
+override CROSS_COMPILE:=\
+XC_HOST:=\
+endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed on Make.inc failed" >&2
+
 	# Fix G: Make libm symlink ALLOW_FAILURE on Android/bionic.
 	# On bionic, libm is part of libc — no standalone libm.so exists.
 	# Julia's base/Makefile tries to locate it to create a runtime symlink.
 	# Adding ALLOW_FAILURE ($4) makes the rule warn instead of abort.
 	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile || echo "Warning: base/Makefile LIBM ALLOW_FAILURE sed failed" >&2
 
-	# Nota: ldconfig se configura en el CI runner HOST (fuera de Docker) en el
-	# workflow .github/workflows/build-julia.yml → paso "Configure linker cache".
-	# No podemos usar sudo AQUÍ porque build-package.sh lo sobreescribe con una
-	# función que llama exit 1 (ver build-package.sh líneas 506-510).
+	# ldconfig dentro del contenedor Docker para que Julia encuentre las
+	# librerías del sistema Termux (libpcre2-8.so, etc.). Usamos 'command sudo'
+	# para bypassear el override de sudo() que build-package.sh define (que
+	# llama exit 1). 'command sudo' ejecuta el sudo real del sistema.
+	echo "/data/data/com.termux/files/usr/lib" | command sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
+	command sudo ldconfig 2>/dev/null || true
 
 	# Make.host.user: compilador nativo del host para herramientas como flisp
 	# cuando USE_CROSS_FLISP=1 está activado. Esto permite compilar flisp
