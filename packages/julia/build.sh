@@ -56,6 +56,22 @@ termux_step_pre_configure() {
 	ln -sf "${TERMUX_PREFIX}/bin/7z" usr/libexec/julia/7z 2>/dev/null || \
 		ln -sf "$(command -v 7z || command -v 7za)" usr/libexec/julia/7z 2>/dev/null || true
 
+	# System LLVM was extracted from .deb into $TERMUX_PREFIX, but
+	# llvm-config reports libdir relative to the build-time NDK sysroot
+	# cache.  Symlink each reported .so/.a from the prefix to the
+	# llvm-config-reported location so that Julia's Makefile can find
+	# them.
+	LLVM_CONFIG=$(command -v llvm-config || echo "$TERMUX_PREFIX/bin/llvm-config")
+	if [ -x "$LLVM_CONFIG" ]; then
+		LLVM_LIBDIR=$($LLVM_CONFIG --libdir)
+		if [ "$LLVM_LIBDIR" != "$TERMUX_PREFIX/lib" ]; then
+			mkdir -p "$LLVM_LIBDIR"
+			for lib in "$TERMUX_PREFIX/lib"/libLLVM*; do
+				[ -f "$lib" ] && ln -sf "$lib" "$LLVM_LIBDIR/"
+			done
+		fi
+	fi
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host

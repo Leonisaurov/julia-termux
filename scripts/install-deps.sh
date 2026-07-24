@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DEPS=(
-  libllvm
+  libllvm libllvm-static
   libopenblas blas-openblas
   suitesparse
   arpack-ng
