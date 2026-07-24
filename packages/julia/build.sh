@@ -36,6 +36,8 @@ termux_step_pre_configure() {
 	sed -i '/^LOADER_LDFLAGS/s/ -lpthread/ /g' cli/Makefile
 	sed -i '/^LIBS/s/ -lpthread/ /g' src/flisp/Makefile
 	sed -i '/-lpthread/s/ -lpthread/ /g' src/support/Makefile
+	# Also clean src/Makefile (used for julia-codegen link step)
+	sed -i '/-lpthread/s/ -lpthread/ /g' src/Makefile
 
 	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
 	# and delete the separate LLVM version block entirely.  lld in Android's
@@ -89,6 +91,9 @@ termux_step_pre_configure() {
 	USE_BINARYBUILDER=0
 	DISABLE_LIBUNWIND=1
 	JULIA_THREADS=4
+	# Cross-compilation: build flisp for the host (x86_64) so it can run on
+	# the build machine to generate julia_flisp.boot.
+	USE_CROSS_FLISP=1
 	prefix=$TERMUX_PREFIX
 	LOCALBASE=$TERMUX_PREFIX
 
