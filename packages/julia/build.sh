@@ -158,12 +158,15 @@ termux_step_pre_configure() {
 termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
 
-	# Now run the main cross-compilation build.  qemu-user-static (installed
-	# in the CI workflow before the Docker container) lets the ARM flisp
-	# binary run on the x86_64 build host.
+	# Now run the main cross-compilation build using Julia's native
+	# cross-compilation support (XC_HOST + USE_CROSS_FLISP=1).
+	# HOSTCC=gcc compila herramientas como flisp para x86_64 nativamente,
+	# eliminando la necesidad de QEMU para ejecutar binarios ARM.
+	# Nota: CC/CXX se omiten explícitamente porque con XC_HOST definido,
+	# Make.inc genera CC automáticamente como aarch64-linux-android-clang.
+	# Pasarlos explícitamente causa doble prefijo.
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
 		XC_HOST=aarch64-linux-android \
-		CC="$CC" CXX="$CXX" \
 		HOSTCC="gcc" \
 		HOSTCXX="g++" \
 		HOST_LDFLAGS="" \
