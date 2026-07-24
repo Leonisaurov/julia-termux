@@ -15,6 +15,11 @@ TERMUX_PKG_HOSTBUILD=false
 termux_step_pre_configure() {
 	cd "$TERMUX_PKG_SRCDIR"
 
+	# Fix LMDB for Android/bionic: the forced MDB_USE_ROBUST=1 bypasses mdb.c's
+	# built-in Android guard (lines 354-362), causing build failure on bionic.
+	# Remove the forced flag so the guard can work.
+	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk
+
 	cat > Make.user <<-EOF
 	CC=$CC
 	CXX=$CXX
