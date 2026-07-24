@@ -25,13 +25,102 @@ termux_step_pre_configure() {
 	# compiled for the target, which fail on the build machine.
 	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk
 
-	# Fix libuv pthread_setcancelstate for Android/bionic: Julia's patch
-	# (libuv-android-pthread-cancel.patch) has drifted from the current libuv
-	# source so it fails to apply. Replace it with a direct sed invocation.
-	cat > deps/patches/libuv-android-fix.sed <<-SEDEOF
-	s|#ifdef __linux__|#if defined(__linux__) \&\& !defined(__ANDROID__)|g
-	SEDEOF
-	sed -i "s|patch -p1 -f < \$(SRCDIR)/patches/libuv-android-pthread-cancel.patch|sed -i -f \$(SRCDIR)/patches/libuv-android-fix.sed src/unix/process.c|" deps/libuv.mk
+	# Fix libuv pthread_setcancelstate for Android/bionic: Julia's bundled
+	# patch (libuv-android-pthread-cancel.patch) has line numbers that are out
+	# of sync with the current libuv source, so it fails to apply under -f.
+	# Replace it with a freshly generated version for libuv commit e6b9850f.
+	cat > deps/patches/libuv-android-pthread-cancel.patch <<-PATCHEOF
+	--- a/src/unix/process.c
+	+++ b/src/unix/process.c
+	@@ -283,7 +283,7 @@
+	   return NULL;
+	 }
+	 
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	 static int uv__execvpe(const char *file, char *const argv[], char *const envp[]) {
+	   const char *p;
+	   const char *z;
+	@@ -382,13 +382,13 @@
+	 
+	 
+	 static void uv__write_int(
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	                             volatile int* fd,
+	 #else
+	                             int fd,
+	 #endif
+	                             int val) {
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	   *fd = val;
+	 #else
+	   ssize_t n;
+	@@ -405,7 +405,7 @@
+	 
+	 
+	 static void uv__write_errno(
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	                             volatile int* error_fd
+	 #else
+	                             int error_fd
+	@@ -416,7 +416,7 @@
+	 
+	 /* May share the parent's memory space. Do not alter global state. */
+	 static void uv__process_child_init(const uv_process_options_t* options,
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	                                    volatile int* error_fd,
+	 #else
+	                                    int error_fd,
+	@@ -568,7 +568,7 @@
+	   if (sigprocmask(SIG_SETMASK, &signewset, NULL) != 0)
+	     abort();
+	 
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	   if (options->env != NULL) {
+	     uv__execvpe(options->file, options->args, options->env);
+	   } else {
+	@@ -977,7 +977,7 @@
+	 #endif
+	 
+	 static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	                                          volatile int* error_fd,
+	 #else
+	                                          int error_fd,
+	@@ -1002,7 +1002,7 @@
+	   if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0)
+	     abort();
+	 
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	   *pid = vfork();
+	 #else
+	   *pid = fork();
+	@@ -1035,7 +1035,7 @@
+	     pid_t* pid) {
+	   int err;
+	   int status;
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	   volatile int exec_errorno;
+	   int cancelstate;
+	 #else
+	@@ -1074,7 +1074,7 @@
+	 
+	 #endif
+	 
+	-#ifdef __linux__
+	+#if defined(__linux__) && !defined(__ANDROID__)
+	   /* Acquire write lock to prevent opening new fds in worker threads */
+	   uv_rwlock_wrlock(&loop->cloexec_lock);
+	   pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancelstate);
+	PATCHEOF
 
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
