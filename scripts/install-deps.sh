@@ -1,5 +1,7 @@
 #!/bin/bash
 set -euo pipefail
+INSTALLED=0
+FAILED=0
 
 DEPS=(
   libllvm libllvm-static
@@ -36,8 +38,16 @@ for pkg in "${DEPS[@]}"; do
     continue
   fi
   deb_name="${filename##*/}"
+  local url="${REPO_BASE}/${filename}"
   echo "     Downloading $deb_name"
-  curl -sL "${REPO_BASE}/${filename}" -o "/tmp/$deb_name"
+  echo "     URL: $url"
+  HTTP_CODE=$(curl -sL -w "%{http_code}" "$url" -o "/tmp/$deb_name") || true
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "     ERROR: HTTP $HTTP_CODE for $pkg ($url)"
+    rm -f "/tmp/$deb_name"
+    FAILED=$((FAILED+1))
+    continue
+  fi
   if [ -n "$sha256" ]; then
     echo "     Verifying"
     echo "$sha256  /tmp/$deb_name" | sha256sum -c - > /dev/null 2>&1 || {
@@ -49,6 +59,11 @@ for pkg in "${DEPS[@]}"; do
   echo "     Extracting"
   dpkg-deb -x "/tmp/$deb_name" / 2>/dev/null || true
   rm -f "/tmp/$deb_name"
+  INSTALLED=$((INSTALLED+1))
 done
 
-echo "=== All dependencies installed ==="
+echo "=== Dependencies installation complete ==="
+echo "Installed: $INSTALLED, Failed: $FAILED"
+if [ "$FAILED" -gt 0 ]; then
+  echo "WARNING: Some dependencies failed to install"
+fi
