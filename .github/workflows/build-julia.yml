@@ -50,21 +50,7 @@ jobs:
     - name: Install system dependencies
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: |
-        ./scripts/run-docker.sh bash -c "
-          pacman -Syu --noconfirm \
-            libllvm \
-            openblas \
-            suitesparse \
-            arpack-ng \
-            gmp mpfr \
-            zlib openssl \
-            libssh2 libgit2 \
-            curl nghttp2 \
-            pcre2 utf8proc \
-            libuv p7zip \
-            patchelf
-        "
+      run: ./scripts/run-docker.sh bash ./scripts/install-deps.sh
 
     - name: Build Julia
       env:
