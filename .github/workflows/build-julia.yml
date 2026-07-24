@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'packages/julia/**'
+      - 'packages/termux-keyring/**'
   workflow_dispatch:
 
 permissions:
