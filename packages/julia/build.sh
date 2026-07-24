@@ -39,14 +39,9 @@ termux_step_pre_configure() {
 	# Also clean src/Makefile (used for julia-codegen link step)
 	sed -i '/-lpthread/s/ -lpthread/ /g' src/Makefile
 
-	# Fix BUILDDIR reset in flisp Makefile when used for host build
-	# (USE_CROSS_FLISP=1).  The host Makefile sets BUILDDIR before including
-	# this file, but line 3 resets it with := instead of ?=.
-	sed -i 's/^BUILDDIR := \.$/BUILDDIR ?= ./' src/flisp/Makefile
-	# Also fix the host flisp make invocation: when BUILDDIR is absolute the
-	# relative target name "flisp" does not match the absolute rule target
-	# $(BUILDDIR)/flisp.  Use the default make target (release) instead.
-	sed -i 's/ -C \$(BUILDDIR)\/host \$(EXENAME)$/ -C $(BUILDDIR)\/host/' src/flisp/Makefile
+	# The host flisp build path (USE_CROSS_FLISP=1 -> src/flisp/host/) has
+	# BUILDDIR/pattern bugs in GNU make.  We build host flisp manually below
+	# in termux_step_make() with an absolute BUILDDIR and explicit CC=gcc.
 
 	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
 	# and delete the separate LLVM version block entirely.  lld in Android's
@@ -63,8 +58,11 @@ termux_step_pre_configure() {
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
 	# pass FC_VERSION=dummy on the make command line to bypass the check.
 	cat > Make.user <<-EOF
-	override CC=$CC
-	override CXX=$CXX
+	# CC/CXX are set here and also passed on the command line for the main
+	# build.  We must NOT use override so that sub-make invocations for host
+	# tools can set CC=gcc on the command line.
+	CC=$CC
+	CXX=$CXX
 	AR=$AR
 	RANLIB=$RANLIB
 
@@ -113,13 +111,34 @@ termux_step_pre_configure() {
 
 termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
+
+	# Build host flisp (needed to generate julia_flisp.boot on x86_64 host).
+	# The USE_CROSS_FLISP path in the Makefile has BUILDDIR/pattern bugs with
+	# relative paths, so we build manual with absolute BUILDDIR and CC=gcc.
+	DUM_UV=$(pwd)/.dummy_uv_inc
+	mkdir -p "$DUM_UV"
+	echo > "$DUM_UV"/uv.h
+	make -C src/support \
+		BUILDDIR="$(pwd)/src/support/host" \
+		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
+		LIBUV_INC="$DUM_UV" libsupport.a
+	make -C src/flisp \
+		BUILDDIR="$(pwd)/src/flisp/host" \
+		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
+		BUILDING_HOST_TOOLS=1 \
+		LIBUV_INC="$DUM_UV" release
+
+	# Now run the main cross-compilation build (USE_CROSS_FLISP picks up the
+	# host flisp we just built at src/flisp/host/flisp).
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
+		CC="$CC" CXX="$CXX" \
 		HOSTCC="gcc" \
 		HOSTCXX="g++" \
 		HOST_LDFLAGS="" \
 		PREFIX="$TERMUX_PREFIX" \
 		LOCALBASE="$TERMUX_PREFIX" \
 		FC_VERSION=dummy \
+		USE_CROSS_FLISP=1 \
 		release
 }
 
