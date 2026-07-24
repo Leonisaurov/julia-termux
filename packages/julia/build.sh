@@ -25,6 +25,14 @@ termux_step_pre_configure() {
 	# compiled for the target, which fail on the build machine.
 	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk
 
+	# Fix libuv pthread_setcancelstate for Android/bionic: Julia's patch
+	# (libuv-android-pthread-cancel.patch) has drifted from the current libuv
+	# source so it fails to apply. Replace it with a direct sed invocation.
+	cat > deps/patches/libuv-android-fix.sed <<-SEDEOF
+	s|#ifdef __linux__|#if defined(__linux__) && !defined(__ANDROID__)|g
+	SEDEOF
+	sed -i "s|patch -p1 -f < \$(SRCDIR)/patches/libuv-android-pthread-cancel.patch|sed -i -f \$(SRCDIR)/patches/libuv-android-fix.sed src/unix/process.c|" deps/libuv.mk
+
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
 	# pass FC_VERSION=dummy on the make command line to bypass the check.
