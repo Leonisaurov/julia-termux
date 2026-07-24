@@ -34,9 +34,15 @@ jobs:
       id: build-cache
       with:
         path: ~/.termux-build
-        key: julia-${{ hashFiles('packages/julia/build.sh') }}
+        key: julia-build-${{ hashFiles('packages/julia/build.sh') }}-${{ github.run_id }}
         restore-keys: |
-          julia-
+          julia-build-${{ hashFiles('packages/julia/build.sh') }}-
+          julia-build-
+
+    - name: Check cache size
+      run: |
+        echo "Cache size: $(du -sh ~/.termux-build 2>/dev/null | cut -f1 || echo '0')"
+        echo "LLVM libs: $(ls ~/.termux-build/julia/_cache/libLLVM* 2>/dev/null | wc -l) files"
 
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
@@ -54,7 +60,17 @@ jobs:
     - name: Build Julia
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: ./scripts/run-docker.sh ./build-package.sh -s -a aarch64 --format pacman julia
+      run: ./scripts/run-docker.sh ./build-package.sh -Q -s -a aarch64 --format pacman julia
+
+    - name: Debug - Show build log on failure
+      if: failure()
+      run: |
+        echo "=== Build failed - collecting debug info ==="
+        ls -la ~/.termux-build/ 2>/dev/null || echo "No .termux-build dir"
+        find ~/.termux-build -name "*.log" -o -name "*.err" 2>/dev/null | head -20
+        cat ~/.termux-build/julia/config.log 2>/dev/null || echo "No config.log"
+        echo "=== Last 100 lines of build log ==="
+        find ~/.termux-build -name "*.log" -exec tail -100 {} \; 2>/dev/null || true
 
     - name: Collect package files
       if: always()

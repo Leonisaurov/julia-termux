@@ -18,22 +18,22 @@ termux_step_pre_configure() {
 	# Fix LMDB for Android/bionic: the forced MDB_USE_ROBUST=1 bypasses mdb.c's
 	# built-in Android guard (lines 354-362), causing build failure on bionic.
 	# Remove the forced flag so the guard can work.
-	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk
+	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk || echo "Warning: MDB_USE_ROBUST sed on lmdb.mk failed" >&2
 
 	# Fix libuv cross-compilation: the CI runner is x86_64, but the target is
 	# aarch64-linux-android. Without --host, configure tries to run test programs
 	# compiled for the target, which fail on the build machine.
-	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk
+	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk || echo "Warning: libuv.mk --host sed failed" >&2
 
 	# Fix libuv pthread_setcancelstate for Android/bionic: Julia removed the
 	# broken patch from libuv.mk entirely.  Insert a sed to add the missing
 	# !defined(__ANDROID__) guard before the configure step.
-	sed -i '/build-configured:.*source-extracted/a\\tcd \$(SRCCACHE)/\$(LIBUV_SRC_DIR) \&\& sed -i '"'"'s|#ifdef __linux__|#if defined(__linux__) \\&\\& !defined(__ANDROID__)|g'"'"' src/unix/process.c' deps/libuv.mk
+	sed -i '/build-configured:.*source-extracted/a\\tcd \$(SRCCACHE)/\$(LIBUV_SRC_DIR) \&\& sed -i '"'"'s|#ifdef __linux__|#if defined(__linux__) \\&\\& !defined(__ANDROID__)|g'"'"' src/unix/process.c' deps/libuv.mk || echo "Warning: libuv.mk pthread_cond var sed failed" >&2
 
 	# Remove -lpthread from all Makefiles (bionic has pthread in libc)
-	sed -i '/^OSLIBS/s/ -lpthread//' Make.inc
-	sed -i '/^LOADER_LDFLAGS/s/ -lpthread//' cli/Makefile
-	sed -i '/^LIBS/s/ -lpthread//' src/flisp/Makefile
+	sed -i '/^OSLIBS.*--no-as-needed/s/ -lpthread//' Make.inc || echo "Warning: Make.inc -lpthread sed failed" >&2
+	sed -i '/^LOADER_LDFLAGS/s/ -lpthread//' cli/Makefile || echo "Warning: cli/Makefile -lpthread sed failed" >&2
+	sed -i '/^LIBS/s/ -lpthread//' src/flisp/Makefile || echo "Warning: src/flisp/Makefile -lpthread sed failed" >&2
 
 	# The host flisp build path (USE_CROSS_FLISP=1 -> src/flisp/host/) has
 	# BUILDDIR/pattern bugs in GNU make.  We build host flisp manually below
@@ -41,7 +41,7 @@ termux_step_pre_configure() {
 
 	# Fix julia.expmap: replace LLVM version token with Julia version token
 	# so the generated file has a single version block (lld rejects multiple)
-	sed -i 's/@LLVM_SHLIB_SYMBOL_VERSION@/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in
+	sed -i 's/@LLVM_SHLIB_SYMBOL_VERSION@/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in || echo "Warning: julia.expmap.in LLVM version sed failed" >&2
 
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
@@ -73,28 +73,34 @@ termux_step_pre_configure() {
 	fi
 
 	# Fix A: Remove -lrt from OSLIBS (bionic has librt functions in libc)
-	sed -i '/^OSLIBS/s/ -lrt//' Make.inc
+	sed -i '/^OSLIBS.*--no-as-needed/s/ -lrt//' Make.inc || echo "Warning: Make.inc -lrt sed failed" >&2
 
 	# Fix B: Disable ifunc detection on Android (bionic doesn't support ifunc)
-	sed -i '/IFUNC_DETECT_SRC/,/^endif/d' Make.inc
+	sed -i '/IFUNC_DETECT_SRC/,/^endif/d' Make.inc || echo "Warning: Make.inc IFUNC_DETECT sed failed" >&2
 
 	# Fix C: Skip copying glibc-specific CRT objects on Android
-	sed -i '/libc_nonshared.a/d' Makefile
+	sed -i '/libc_nonshared.a/d' Makefile || echo "Warning: libc_nonshared.a sed on Makefile failed" >&2
 
 	# Fix D: Remove -static-libstdc++ for Android (uses libc++)
-	sed -i 's/-static-libstdc++//g' src/Makefile
+	sed -i 's/-static-libstdc++//g' src/Makefile || echo "Warning: src/Makefile -static-libstdc++ sed failed" >&2
 
 	# Fix E: libc_nonshared.a in deps/csl.mk
 	sed -i '/libc_nonshared.a/d' deps/csl.mk 2>/dev/null || true
 
 	# Fix F: Remove -latomic from OSLIBS
-	sed -i '/^OSLIBS/s/ -latomic//' Make.inc
+	sed -i '/^OSLIBS.*--no-as-needed/s/ -latomic//' Make.inc || echo "Warning: Make.inc -latomic sed failed" >&2
+
+	# Fix: Remove 'override' from CROSS_COMPILE to prevent MAKEOVERRIDES leakage
+	# into host tool sub-makes (BUILDING_HOST_TOOLS=1). Without this,
+	# CROSS_COMPILE=aarch64-linux-android- leaks via MAKEOVERRIDES, causing
+	# aarch64-linux-android-gcc to be used for host flisp (doesn't exist in NDK).
+	sed -i 's/^override CROSS_COMPILE:/CROSS_COMPILE:/' Make.inc || echo "Warning: CROSS_COMPILE override sed on Make.inc failed" >&2
 
 	# Fix G: Make libm symlink ALLOW_FAILURE on Android/bionic.
 	# On bionic, libm is part of libc — no standalone libm.so exists.
 	# Julia's base/Makefile tries to locate it to create a runtime symlink.
 	# Adding ALLOW_FAILURE ($4) makes the rule warn instead of abort.
-	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile
+	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile || echo "Warning: base/Makefile LIBM ALLOW_FAILURE sed failed" >&2
 
 	# Add Termux prefix to ldconfig so libwhich/dlopen can find system libraries
 	echo "$TERMUX_PREFIX/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true

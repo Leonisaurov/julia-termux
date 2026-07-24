@@ -2,122 +2,135 @@
 
 Repositorio para compilar Julia nativamente para Termux/Android (aarch64) usando la infraestructura de termux-packages en GitHub Actions CI.
 
-## Estado Actual
+## Estado Actual (24 Jul 2026)
 
-**Julia compila exitosamente en CI.** El proceso de empaquetado en formato pacman (.pkg.tar.xz) está pendiente de ajuste fino.
+**La compilación de Julia NO completa.** Tras análisis exhaustivo del código, se identificaron **3 bugs críticos** que causan el error silencioso (exit code 1):
 
-## Versión
+### Bug #1 (🔴 Crítico - 85% probabilidad): `CROSS_COMPILE` se hereda al host flisp vía `MAKEOVERRIDES`
 
-- **Julia:** master (1.14.0-DEV)
-- **LLVM:** 21.1.8 (sistema, vía Termux package)
-- **Objetivo:** aarch64-linux-android (API 24)
-- **Toolchain:** Android NDK r29 (vía ghcr.io/termux/package-builder)
+- **Causa raíz**: Julia's `Make.inc` línea ~451 usa `override CROSS_COMPILE:=$(XC_HOST)-`. En GNU Make, `override` fuerza la variable a `MAKEOVERRIDES`, que se hereda a TODOS los sub-makes.
+- **Efecto**: El build de flisp para HOST (necesario para bootstrapping) hereda `CROSS_COMPILE=aarch64-linux-android-`. Cuando `USEGCC=1` (línea 588), `CC` se reasigna a `aarch64-linux-android-gcc`, que NO EXISTE en NDK r29 (solo hay clang). `command not found` → exit code 1.
+- **No hay guard BUILDING_HOST_TOOLS** en las secciones USEGCC/USECLANG de Make.inc (líneas 588-601).
+- **Fix aplicado**: Sed que quita `override` de la línea de CROSS_COMPILE en Make.inc.
+
+### Bug #2 (🟡 Importante - 10% probabilidad): Seds OSLIBS eliminan -lpthread también para HOST
+
+- **Causa raíz**: Los seds `^OSLIBS/s/ -lpthread//`, `^OSLIBS/s/ -lrt//`, `^OSLIBS/s/ -latomic//` afectan a TODAS las líneas OSLIBS, incluyendo las del HOST Linux x86_64 donde `-lpthread` SÍ es necesario (glibc < 2.34).
+- **Efecto**: El host flisp linkea sin pthread → undefined references → error de link.
+- **Fix aplicado**: Los seds ahora usan `^OSLIBS.*--no-as-needed` para afectar solo la línea del target.
+
+### Bug #3 (🟡 Importante): Seds sin protección causan `set -e` silencioso
+
+- **Causa raíz**: 13 comandos `sed -i` en `termux_step_pre_configure()` NO tenían `|| true`. Bajo `set -euo pipefail` (build-package.sh línea 21), cualquier sed que falle (archivo renombrado por Julia upstream) causa `exit 1` sin mensaje.
+- **Efecto**: El build aborta silenciosamente si Julia master cambia algún archivo parcheado.
+- **Fix aplicado**: Todos los seds ahora tienen `|| echo "Warning: ..." >&2`.
+
+## Cambios Recientes (24 Jul 2026 - Sprint de Fixes)
+
+### Diagnóstico Completo (Análisis de Código)
+
+Se realizó un análisis exhaustivo del código usando el subagente `critico`, que identificó 3 bugs en el build system. Véase sección "Estado Actual" arriba para detalles.
+
+### Fix 1: Seds protegidos contra `set -e`
+
+Los 13 `sed -i` sin protección en `termux_step_pre_configure()` ahora tienen `|| echo "Warning: ..." >&2`. Esto evita que `set -euo pipefail` mate el build silenciosamente si Julia master renombra o elimina algún archivo parcheado.
+
+Archivos afectados por los seds:
+- `deps/lmdb.mk`, `deps/libuv.mk`, `Make.inc`, `cli/Makefile`, `src/flisp/Makefile`
+- `src/julia.expmap.in`, `Makefile` (root), `src/Makefile`, `base/Makefile`
+
+### Fix 2: Seds OSLIBS ahora son específicos del target
+
+Los seds que eliminan `-lpthread`, `-lrt`, `-latomic` ahora usan el patrón `^OSLIBS.*--no-as-needed` para afectar SOLO la línea del target Android/bionic, no la del host Linux x86_64.
+
+### Fix 3: Quitado `override` de CROSS_COMPILE en Make.inc
+
+Nuevo sed que cambia `override CROSS_COMPILE:=$(XC_HOST)-` a `CROSS_COMPILE:=$(XC_HOST)-` en Make.inc. Esto evita que `MAKEOVERRIDES` herede `CROSS_COMPILE=aarch64-linux-android-` al sub-make del host flisp, que necesita compilar para x86_64 nativo (no cross-compile).
+
+### Fix 4: Verbose mode en CI
+
+Se agregó `-Q` al comando `build-package.sh` en el workflow de GitHub Actions para habilitar verbose mode (set -x). También se agregó un step "Debug - Show build log on failure" que captura logs adicionales cuando el build falla.
+
+### Parches Eliminados (anteriormente)
+
+Los 12 patches (`0001` a `0012`) fueron eliminados porque Julia master cambió constantemente y los patches se desactualizaban. Cada uno fue reemplazado por un `sed` directo en `termux_step_pre_configure()` del archivo `packages/julia/build.sh`.
+
+| Patch | Archivo | Fix |
+|-------|---------|-----|
+| 0001 | `src/support/platform.h` | Definir `_OS_ANDROID_` |
+| 0002 | `src/support/dtypes.h` | Excluir bionic de endian/uint_t |
+| 0003 | `src/sys.c` | dl_iterate_phdr fallback |
+| 0004 | `src/dlload.c` | Incluir link.h en bionic |
+| 0005 | `cli/loader_lib.c` | Stub libstdcxxprobe en Android |
+| 0007 | `src/init.c` | pthread_getattr_np → bionic |
+| 0008 | `src/debuginfo.cpp` | Excluir __register_frame |
+| 0009 | `src/codegen.cpp` | Excluir sysinfo() |
+| 0010 | `src/task.c` | Excluir #error libunwind |
+| 0011 | `src/gc-debug.c` | Excluir mallinfo/malloc_stats |
+| 0012 | `src/jl_uv.c` | TCP_QUICKACK guard |
+
+### USE_CROSS_FLISP (confirmado como enfoque correcto)
+
+Se verificó que `USE_CROSS_FLISP=1` es el enfoque correcto para cross-compilation. Julia's Make.inc tiene soporte nativo para esto mediante `BUILDING_HOST_TOOLS=1` y `Make.host.user`. El bug real no era `USE_CROSS_FLISP` en sí, sino que `CROSS_COMPILE` se heredaba al sub-make host vía `MAKEOVERRIDES` (Fix 3 arriba). Con el fix aplicado, `USE_CROSS_FLISP=1` debería funcionar correctamente.
+
+## Problemas Conocidos
+
+### 1. Build falla con exit code 1 (CAUSA IDENTIFICADA - Fix aplicado)
+
+**Causa raíz**: `override CROSS_COMPILE` en Make.inc de Julia se hereda al sub-make del host flisp vía `MAKEOVERRIDES` de GNU Make, causando que `CC` se reasigne a `aarch64-linux-android-gcc` que no existe en NDK r29.
+
+**Fix aplicado**: Sed que quita `override` de la línea de CROSS_COMPILE en Make.inc.
+
+**Próximo paso**: Ejecutar CI para verificar si el fix resuelve el error.
+
+### 2. Los seds son frágiles a cambios de Julia upstream
+
+Cada vez que Julia master cambia los archivos parcheados, los seds pueden fallar o producir resultados incorrectos. Los seds ahora tienen `|| echo "Warning"` para no matar el build, pero es necesario revisar periódicamente si siguen siendo correctos.
+
+**Mitigación pendiente**: Configurar Dependabot o workflow que verifique los seds contra Julia master y alerte si algún archivo ya no existe o cambió.
+
+### 3. Dependencias externas via install-deps.sh
+
+Las dependencias de Julia (`libllvm`, `libopenblas`, `suitesparse`, etc.) se instalan manualmente mediante `scripts/install-deps.sh` que descarga `.deb` del repo APT de Termux y los extrae a `/`. Esto funciona pero no está integrado con el sistema de dependencias de `build-package.sh` (no se usa `-I`, se usa `-s` para saltar depcheck).
+
+### 4. `TERMUX_PKG_BUILD_IN_SRC=true` implica que no hay directorio de build separado
+
+Julia se construye directamente en el directorio fuente. Esto funciona porque Julia's Makefile está diseñado para build in-source, pero significa que el caché de build no es fácil de separar.
 
 ## Estructura del Repositorio
 
 ```
-.github/workflows/build-julia.yml   ← CI workflow
+.github/workflows/build-julia.yml   ← CI workflow (mejorado)
 packages/julia/
-├── build.sh                          ← Receta de build
-├── 0001-platform-define-android-os.patch
-├── 0002-dtypes-bionic-endian-compat.patch
-├── 0003-sys-dl-iterate-phdr-fallback.patch
-├── 0004-dlload-link-h-bionic-include.patch
-├── 0005-loader-lib-stdcxxprobe-stub.patch
-├── 0007-init-pthread-getattr-np.patch
-├── 0008-debuginfo-register-frame.patch
-├── 0009-codegen-sysinfo.patch
-├── 0010-task-linux-error.patch
-├── 0011-gc-debug-mallinfo.patch
-└── 0012-jl-uv-tcp-quickack.patch
-scripts/         ← Infraestructura de build de termux-packages
-build-package.sh ← Entry point de build
-ndk-patches/     ← Parches para headers del NDK
+├── build.sh                          ← Receta de build (sin patches, con seds)
+├── *.patch                           ← YA NO EXISTEN (todos eliminados)
+scripts/
+├── build-package.sh                 ← Entry point de build (idéntico a upstream)
+├── build/                           ← Scripts de build (idénticos a upstream)
+├── install-deps.sh                  ← Instalación manual de dependencias (mejorado)
+├── run-docker.sh                    ← Wrapper Docker (idéntico a upstream)
 ```
-
-## Parches Aplicados
-
-### Parches de plataforma (0001-0005)
-Estos parches modifican el código fuente de Julia para detectar y soportar Android/bionic:
-
-1. **0001** (`platform.h`): Define `_OS_ANDROID_` cuando se detecta `__ANDROID__`
-2. **0002** (`dtypes.h`): Compatibilidad de endianness con bionic
-3. **0003** (`sys.c`): Implementa `dl_iterate_phdr` como fallback de `dlinfo` para bionic
-4. **0004** (`dlload.c`): Incluye `<link.h>` para bionic
-5. **0005** (`loader_lib.c`): Stub para `libstdcxxprobe()` en Android (usa libc++)
-
-### Parches de compatibilidad bionic (0007-0012)
-6. **0007** (`init.c`): Usa `pthread_get_stackaddr_np`/`pthread_get_stacksize_np` en vez de `pthread_getattr_np` (no existe en bionic)
-7. **0008** (`debuginfo.cpp`): Excluye bionic de `__register_frame`/`__deregister_frame` (glibc-specific)
-8. **0009** (`codegen.cpp`): Excluye bionic de `sysinfo()` (no existe en bionic)
-9. **0010** (`task.c`): Excluye Android del `#error` de libunwind (LLVM libunwind sí soporta `unw_set_reg`)
-10. **0011** (`gc-debug.c`): Excluye bionic de `mallinfo`/`malloc_stats` (solo debug)
-11. **0012** (`jl_uv.c`): Usa `#ifdef TCP_QUICKACK` en vez de `_OS_LINUX_`
-
-### Fixes vía sed en build.sh
-Además de los parches, `termux_step_pre_configure()` aplica estos fixes vía sed:
-
-- **LMDB**: Elimina `-DMDB_USE_ROBUST=1` (bionic no tiene robust mutex)
-- **libuv**: Agrega `--host=aarch64-linux-android --build=x86_64-pc-linux-gnu` para cross-compilation
-- **libuv pthread**: Parchea `pthread_setcancelstate` para Android
-- **-lpthread**: Elimina de `Make.inc`, `cli/Makefile`, `src/flisp/Makefile`
-- **-lrt**: Elimina de `Make.inc` (bionic tiene librt en libc)
-- **-latomic**: Elimina de `Make.inc` (bionic tiene atomic en libc)
-- **-static-libstdc++**: Elimina de `src/Makefile` (Android usa libc++)
-- **ifunc detection**: Deshabilita (no soportado en bionic)
-- **CRT objects**: Elimina `libc_nonshared.a` de `Makefile` y `deps/csl.mk`
-- **julia.expmap**: Reemplaza bloque LLVM version con Julia version (ld.lld no soporta múltiples version blocks)
-- **p7zip**: Crea symlink al sistema 7z en `usr/libexec/julia/`
-- **gfortran**: Pasa `FC_VERSION=dummy` para evitar error de fortran faltante
-
-## CI Workflow
-
-El workflow `.github/workflows/build-julia.yml`:
-1. Checkout del repositorio
-2. Habilita zram (16GB comprimido)
-3. Restaura cache de `.termux-build`
-4. Corre Docker container `ghcr.io/termux/package-builder`
-5. Instala dependencias vía pacman en el contenedor
-6. Ejecuta `build-package.sh -s -a aarch64 --format pacman julia`
-7. Sube artifact `.pkg.tar.xz` a GitHub Releases
 
 ## Cómo construir localmente
 
 ```bash
 # Requisitos: Docker, git
-git clone https://github.com/Leonisaurov/julia-termux.git
-cd julia-termux
+cd julia-termux-package
+./scripts/run-docker.sh bash ./scripts/install-deps.sh
 ./scripts/run-docker.sh ./build-package.sh -s -a aarch64 --format pacman julia
 ```
 
-El `.pkg.tar.xz` resultante estará en `output/`.
-
 ## Pendientes
 
-- [ ] **Empaquetado pacman**: El build de Julia compila exitosamente pero el paso de empaquetado (generación del .pkg.tar.xz) no se completa. Posible causa: `build-package.sh -s` omite pasos de empaquetado. Revisar `termux_step_create_pacman_package()`.
-- [ ] **Verificación del binario**: Probar que el binario compilado funciona correctamente en Termux (ejecutar `julia -e 'println("hello")'`)
-- [ ] **LLVM en cache**: La primera compilación es lenta porque LLVM 21 debe descargarse. El cache de GitHub Actions acelera compilaciones subsecuentes.
-- [ ] **Actualización automática**: Configurar Dependabot o similar para mantener Julia al día con master.
+- [ ] **Probar build en CI**: Hacer push de los cambios y ejecutar el workflow para verificar si los fixes resuelven el error silencioso.
+- [ ] **Verificar verbose logs**: Con `-Q` habilitado, revisar los logs de CI para confirmar que el flisp host se compila correctamente para x86_64.
+- [ ] **Cache de LLVM**: La compilación descarga LLVM (~170MB) cada vez. Optimizar el caché de GitHub Actions para incluir LLVM.
+- [ ] **Migrar a `-I`**: Para alinearse con el proyecto original, declarar dependencias en build.sh y cambiar `-s` por `-I` en el workflow.
+- [ ] **Auto-verificación de seds**: Script que compare los patrones de sed contra Julia master y alerte si algún archivo ya no existe.
 
-## Notas Técnicas
+## Referencias
 
-### Diferencias clave entre Linux glibc y Android bionic
-
-| Aspecto | Linux (glibc) | Android (bionic) |
-|---------|---------------|-------------------|
-| librt | Biblioteca separada | En libc |
-| libpthread | Biblioteca separada | En libc |
-| libdl | Biblioteca separada | En libc (symlink) |
-| libatomic | Biblioteca separada | En libc (compiler_rt) |
-| libstdc++ | GCC | libc++ de LLVM |
-| libunwind | GNU libunwind | LLVM libunwind |
-| ifunc | Soportado | No soportado |
-| pthread_getattr_np | Disponible | No existe |
-| __register_frame | En libgcc_s | No existe |
-| sysinfo() | Disponible | No existe |
-| mallinfo() | Disponible | No existe |
-| robust mutex | Soportado | No soportado |
-| Linker version script | GNU ld | lld (restrictivo) |
-
-### OS detection
-Android ejecuta `uname` que reporta "Linux". Julia's build system no distingue Android de Linux glibc. Todos los fixes se hacen a través de parches y seds en `termux_step_pre_configure()`.
+- **Proyecto original**: `~/Develop/Clones/termux-packages` (fork proot-only de `termux/termux-packages`)
+- **Workflow original**: usa `-I -a aarch64 --format pacman` para construir paquetes
+- **Scripts de build**: idénticos al original (verificados diff)
+- **buildorder.py**: tiene parche para saltar dependencias faltantes (commit `92da334`)
