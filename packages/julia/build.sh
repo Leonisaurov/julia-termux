@@ -114,6 +114,10 @@ termux_step_pre_configure() {
 	# 0012-jl-uv-tcp-quickack.patch with a more robust sed approach.
 	sed -i 's/#ifdef _OS_LINUX_/#if defined(_OS_LINUX_) \&\& defined(TCP_QUICKACK)/g' src/jl_uv.c 2>/dev/null || true
 
+	# Fix I: Excluir mallinfo/malloc_stats en Android/bionic.
+	# Estas funciones de glibc no existen en bionic. Reemplaza patch 0011.
+	sed -i 's/#ifdef _OS_LINUX_/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/g' src/gc-debug.c 2>/dev/null || true
+
 	cat > Make.user <<-EOF
 	XC_HOST = aarch64-linux-android
 	# CC/CXX los genera Make.inc automáticamente con el prefijo CROSS_COMPILE
