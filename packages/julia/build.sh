@@ -9,17 +9,8 @@ TERMUX_PKG_BUILD_IN_SRC=true
 # Dependencies installed via CI workflow before build (not declared here to avoid
 # buildorder.py looking up non-existent packages/ dir entries for each dep)
 TERMUX_PKG_NO_STRIP=false
-TERMUX_PKG_HOSTBUILD=true
-
-termux_step_host_build() {
-	make -j$(nproc) \
-		HOSTCC="gcc" \
-		HOSTCXX="g++" \
-		HOST_LDFLAGS="" \
-		PREFIX="$TERMUX_PREFIX" \
-		BUILDROOT="$TERMUX_PKG_BUILDDIR" \
-		hostbuild
-}
+# Julia handles cross-compilation natively in its Makefile (no hostbuild target)
+TERMUX_PKG_HOSTBUILD=false
 
 termux_step_pre_configure() {
 	cd "$TERMUX_PKG_SRCDIR"
