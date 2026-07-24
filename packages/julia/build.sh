@@ -21,8 +21,8 @@ termux_step_pre_configure() {
 	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk
 
 	cat > Make.user <<-EOF
-	CC=$CC
-	CXX=$CXX
+	override CC=$CC
+	override CXX=$CXX
 	AR=$AR
 	RANLIB=$RANLIB
 
