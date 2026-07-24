@@ -98,9 +98,6 @@ termux_step_pre_configure() {
 	USE_BINARYBUILDER=0
 	DISABLE_LIBUNWIND=1
 	JULIA_THREADS=4
-	# Cross-compilation: build flisp for the host (x86_64) so it can run on
-	# the build machine to generate julia_flisp.boot.
-	USE_CROSS_FLISP=1
 	prefix=$TERMUX_PREFIX
 	LOCALBASE=$TERMUX_PREFIX
 
@@ -112,44 +109,14 @@ termux_step_pre_configure() {
 termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
 
-	# Build host flisp (needed to generate julia_flisp.boot on x86_64 host).
-	# We compile and link directly with gcc, bypassing Julia's Makefiles which
-	# have BUILDDIR/pattern bugs when cross-compiling.
-	HOST_FLISP_DIR="$(pwd)/src/flisp/host"
-	SUPPORT_SRCDIR="$(pwd)/src/support"
-	FLISP_SRCDIR="$(pwd)/src/flisp"
-	# ios.c needs uv.h (even if only on Windows). Provide a minimal stub.
-	echo 'typedef struct {} uv_loop_t;' > "$SUPPORT_SRCDIR"/uv.h
-	mkdir -p "$HOST_FLISP_DIR"
-	gcc -o "$HOST_FLISP_DIR/flisp" \
-		-I"$FLISP_SRCDIR" -I"$SUPPORT_SRCDIR" \
-		"$FLISP_SRCDIR"/flisp.c \
-		"$FLISP_SRCDIR"/builtins.c \
-		"$FLISP_SRCDIR"/string.c \
-		"$FLISP_SRCDIR"/equalhash.c \
-		"$FLISP_SRCDIR"/table.c \
-		"$FLISP_SRCDIR"/iostream.c \
-		"$FLISP_SRCDIR"/julia_extensions.c \
-		"$FLISP_SRCDIR"/flmain.c \
-		"$SUPPORT_SRCDIR"/hashing.c \
-		"$SUPPORT_SRCDIR"/timefuncs.c \
-		"$SUPPORT_SRCDIR"/ptrhash.c \
-		"$SUPPORT_SRCDIR"/strhash.c \
-		"$SUPPORT_SRCDIR"/operators.c \
-		"$SUPPORT_SRCDIR"/utf8.c \
-		"$SUPPORT_SRCDIR"/ios.c \
-		"$SUPPORT_SRCDIR"/htable.c \
-		"$SUPPORT_SRCDIR"/bitvector.c \
-		"$SUPPORT_SRCDIR"/int2str.c \
-		"$SUPPORT_SRCDIR"/libsupportinit.c \
-		"$SUPPORT_SRCDIR"/arraylist.c \
-		"$SUPPORT_SRCDIR"/strtod.c \
-		"$SUPPORT_SRCDIR"/rle.c \
-		"$SUPPORT_SRCDIR"/eytzinger.c \
-		-lm -lpthread 2>&1
+	# Install qemu-user-static to run the cross-compiled (ARM) flisp binary
+	# on the x86_64 build host for generating julia_flisp.boot.
+	if command -v sudo &>/dev/null; then
+		sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static 2>/dev/null || true
+	fi
 
-	# Now run the main cross-compilation build (USE_CROSS_FLISP picks up the
-	# host flisp we just built at src/flisp/host/flisp).
+	# Now run the main cross-compilation build.  qemu-user-static (installed
+	# above) lets the ARM flisp binary run on the x86_64 CI host.
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
 		CC="$CC" CXX="$CXX" \
 		HOSTCC="gcc" \
@@ -158,7 +125,6 @@ termux_step_make() {
 		PREFIX="$TERMUX_PREFIX" \
 		LOCALBASE="$TERMUX_PREFIX" \
 		FC_VERSION=dummy \
-		USE_CROSS_FLISP=1 \
 		release
 }
 
