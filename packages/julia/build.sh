@@ -20,6 +20,11 @@ termux_step_pre_configure() {
 	# Remove the forced flag so the guard can work.
 	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk
 
+	# Fix gfortran check: Make.inc errors when no gfortran is found even when
+	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set (variables
+	# may not be propagated at the time of the check). Remove the error lines.
+	sed -i '/ifneq.*USE_SYSTEM_OPENBLAS.*USE_SYSTEM_LIBSUITESPARSE/,+2d' Make.inc
+
 	cat > Make.user <<-EOF
 	override CC=$CC
 	override CXX=$CXX
