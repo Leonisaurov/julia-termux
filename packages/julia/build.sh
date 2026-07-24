@@ -136,6 +136,20 @@ termux_step_pre_configure() {
 		sed -i 's/#  if defined(_OS_LINUX_) || defined(_OS_FREEBSD_)/#  if (defined(_OS_LINUX_) \&\& !defined(__BIONIC__)) || defined(_OS_FREEBSD_)/' src/init.c 2>/dev/null || true
 	fi
 
+	# Fix H03: Stub libstdcxxprobe() en Android/bionic.
+	# Android usa libc++, no libstdc++.so.6. Reemplaza patch 0005.
+	if [ -f cli/loader_lib.c ]; then
+		sed -i '/^static const char \*libstdcxxprobe(void)$/,/^}$/{
+		/^{$/a\
+		#if defined(__ANDROID__)\
+		    (void)0;\
+		    return NULL;\
+		#else
+		/^}$/i\
+		#endif
+		}' cli/loader_lib.c 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
