@@ -109,14 +109,9 @@ termux_step_pre_configure() {
 termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
 
-	# Install qemu-user-static to run the cross-compiled (ARM) flisp binary
-	# on the x86_64 build host for generating julia_flisp.boot.
-	if command -v sudo &>/dev/null; then
-		sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static 2>/dev/null || true
-	fi
-
 	# Now run the main cross-compilation build.  qemu-user-static (installed
-	# above) lets the ARM flisp binary run on the x86_64 CI host.
+	# in the CI workflow before the Docker container) lets the ARM flisp
+	# binary run on the x86_64 build host.
 	make -j${TERMUX_PKG_MAKE_PROCESSES} \
 		CC="$CC" CXX="$CXX" \
 		HOSTCC="gcc" \

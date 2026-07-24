@@ -41,6 +41,12 @@ jobs:
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
 
+    - name: Install QEMU for ARM binary execution
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq qemu-user-static
+        sudo systemctl restart systemd-binfmt || true
+
     - name: Build Julia
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
