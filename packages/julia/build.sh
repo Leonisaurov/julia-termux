@@ -113,20 +113,40 @@ termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
 
 	# Build host flisp (needed to generate julia_flisp.boot on x86_64 host).
-	# The USE_CROSS_FLISP path in the Makefile has BUILDDIR/pattern bugs with
-	# relative paths, so we build manual with absolute BUILDDIR and CC=gcc.
-	DUM_UV=$(pwd)/.dummy_uv_inc
-	mkdir -p "$DUM_UV"
-	echo > "$DUM_UV"/uv.h
-	make -C src/support \
-		BUILDDIR="$(pwd)/src/support/host" \
-		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
-		LIBUV_INC="$DUM_UV" FC_VERSION=dummy libsupport.a
-	make -C src/flisp \
-		BUILDDIR="$(pwd)/src/flisp/host" \
-		CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
-		BUILDING_HOST_TOOLS=1 \
-		LIBUV_INC="$DUM_UV" FC_VERSION=dummy release
+	# We compile and link directly with gcc, bypassing Julia's Makefiles which
+	# have BUILDDIR/pattern bugs when cross-compiling.
+	HOST_FLISP_DIR="$(pwd)/src/flisp/host"
+	SUPPORT_SRCDIR="$(pwd)/src/support"
+	FLISP_SRCDIR="$(pwd)/src/flisp"
+	# ios.c needs uv.h (even if only on Windows). Provide a minimal stub.
+	echo 'typedef struct {} uv_loop_t;' > "$SUPPORT_SRCDIR"/uv.h
+	mkdir -p "$HOST_FLISP_DIR"
+	gcc -o "$HOST_FLISP_DIR/flisp" \
+		-I"$FLISP_SRCDIR" -I"$SUPPORT_SRCDIR" \
+		"$FLISP_SRCDIR"/flisp.c \
+		"$FLISP_SRCDIR"/builtins.c \
+		"$FLISP_SRCDIR"/string.c \
+		"$FLISP_SRCDIR"/equalhash.c \
+		"$FLISP_SRCDIR"/table.c \
+		"$FLISP_SRCDIR"/iostream.c \
+		"$FLISP_SRCDIR"/julia_extensions.c \
+		"$FLISP_SRCDIR"/flmain.c \
+		"$SUPPORT_SRCDIR"/hashing.c \
+		"$SUPPORT_SRCDIR"/timefuncs.c \
+		"$SUPPORT_SRCDIR"/ptrhash.c \
+		"$SUPPORT_SRCDIR"/strhash.c \
+		"$SUPPORT_SRCDIR"/operators.c \
+		"$SUPPORT_SRCDIR"/utf8.c \
+		"$SUPPORT_SRCDIR"/ios.c \
+		"$SUPPORT_SRCDIR"/htable.c \
+		"$SUPPORT_SRCDIR"/bitvector.c \
+		"$SUPPORT_SRCDIR"/int2str.c \
+		"$SUPPORT_SRCDIR"/libsupportinit.c \
+		"$SUPPORT_SRCDIR"/arraylist.c \
+		"$SUPPORT_SRCDIR"/strtod.c \
+		"$SUPPORT_SRCDIR"/rle.c \
+		"$SUPPORT_SRCDIR"/eytzinger.c \
+		-lm -lpthread 2>&1
 
 	# Now run the main cross-compilation build (USE_CROSS_FLISP picks up the
 	# host flisp we just built at src/flisp/host/flisp).
