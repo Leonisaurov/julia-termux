@@ -53,7 +53,8 @@ termux_step_pre_configure() {
 	# USE_SYSTEM_P7ZIP=1, the deps are skipped, but JL_PRIVATE_EXES always
 	# lists "7z", so the file must exist at install time.
 	mkdir -p usr/libexec/julia
-	ln -sf "$(command -v 7z || command -v 7za)" usr/libexec/julia/7z
+	ln -sf "${TERMUX_PREFIX}/bin/7z" usr/libexec/julia/7z 2>/dev/null || \
+		ln -sf "$(command -v 7z || command -v 7za)" usr/libexec/julia/7z 2>/dev/null || true
 
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
