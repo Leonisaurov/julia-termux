@@ -115,6 +115,15 @@ termux_step_pre_configure() {
 		sed -i 's/#if defined __linux__/#if defined __linux__ \&\& !defined(__ANDROID__)/' src/task.c 2>/dev/null || true
 	fi
 
+	# Fix H00: Excluir sys/sysinfo.h y sysinfo() en Android/bionic.
+	# Estas funciones de glibc no existen en bionic. Reemplaza patch 0009.
+	if [ -f src/codegen.cpp ]; then
+		sed -i \
+			-e 's/#ifdef _OS_LINUX_/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/' \
+			-e 's/^#if defined(_OS_LINUX_)$/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/' \
+			src/codegen.cpp 2>/dev/null || true
+	fi
+
 	# Fix H: TCP_QUICKACK guard for Android/bionic.
 	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
 	# available in kernel headers. This replaces the original patch
