@@ -120,6 +120,13 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed on Make.inc fail
 	echo "/data/data/com.termux/files/usr/lib" | command sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
 	command sudo ldconfig 2>/dev/null || true
 
+	# Crear symlinks de libpcre2-8.so para que Julia lo encuentre.
+	# Julia busca libpcre2-8.so via su sistema de symlinking de librerías.
+	if [ -f "${TERMUX_PREFIX}/lib/libpcre2-8.so" ]; then
+		ln -sf "${TERMUX_PREFIX}/lib/libpcre2-8.so" "${TERMUX_PKG_SRCDIR}/usr/lib/julia/libpcre2-8.so" 2>/dev/null || true
+		echo "libpcre2-8.so symlink created for Julia build"
+	fi
+
 	# Make.host.user: compilador nativo del host para herramientas como flisp
 	# cuando USE_CROSS_FLISP=1 está activado. Esto permite compilar flisp
 	# para x86_64 (host) y ejecutarlo sin QEMU.
@@ -272,6 +279,22 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed on Make.inc fail
 
 termux_step_make() {
 	cd "$TERMUX_PKG_SRCDIR"
+
+	# Build host flisp manually to avoid cross-compilation inheritance issues.
+	# USE_CROSS_FLISP=1 le dice a Julia que compile flisp para x86_64 host en
+	# src/flisp/host/, pero el sub-make hereda XC_HOST del make padre via
+	# MAKEOVERRIDES, causando cross-compilation para aarch64.
+	# Lo construimos aquí explícitamente con variables nativas.
+	mkdir -p src/flisp/host
+	make -C src/flisp/host -f "$PWD/src/flisp/Makefile" \
+		SRCDIR="$PWD/src/flisp" \
+		BUILDDIR="$PWD/src/flisp/host" \
+		BUILDING_HOST_TOOLS=1 \
+		XC_HOST="" \
+		CROSS_COMPILE="" \
+		CC="gcc" CXX="g++" \
+		AR="ar" RANLIB="ranlib" \
+		-j1 flisp 2>&1 || echo "Warning: host flisp manual build failed" >&2
 
 	# Now run the main cross-compilation build using Julia's native
 	# cross-compilation support (XC_HOST + USE_CROSS_FLISP=1).
