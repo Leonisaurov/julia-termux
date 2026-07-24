@@ -57,26 +57,24 @@ jobs:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
       run: |
         ./scripts/run-docker.sh bash -c '
-          echo "=== Creating QEMU linker symlink ==="
-          # /system may exist as file from previous operations
-          if [ -f /system ]; then rm -f /system; fi
-          mkdir -p /system/bin 2>/dev/null || true
-          if [ -f /data/data/com.termux/files/usr/lib/ld-android.so ]; then
-            ln -sf /data/data/com.termux/files/usr/lib/ld-android.so /system/bin/linker64 && \
-              echo "linker64 symlink created" || \
-              echo "WARNING: Could not create linker symlink"
-          else
-            echo "WARNING: ld-android.so not found, scanning for alternatives..."
-            # Fallback: search for any libc.so that can act as linker
-            LNK=$(find /data/data/com.termux -name "libc.so" -path "*/aarch64*" 2>/dev/null | head -1)
-            if [ -n "$LNK" ]; then
-              ln -sf "$LNK" /system/bin/linker64 && echo "linker64 symlink created (fallback)"
+          echo "=== Creating QEMU linker symlink from NDK ==="
+          # Android NDK contiene el linker en libc.so (que es el linker en Android)
+          NDK_DIR=$(ls -d /home/builder/lib/android-ndk-* 2>/dev/null | head -1)
+          if [ -n "$NDK_DIR" ]; then
+            LINKER="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc.so"
+            if [ -f "$LINKER" ]; then
+              mkdir -p /system/bin 2>/dev/null || true
+              ln -sf "$LINKER" /system/bin/linker64 && \
+                echo "linker64 symlink created: $LINKER" || \
+                echo "WARNING: Could not create symlink"
             else
-              echo "WARNING: No suitable linker found"
+              echo "WARNING: NDK linker not found at $LINKER"
+              find /home/builder/lib -name "libc.so" -path "*/aarch64*" 2>/dev/null | head -3
             fi
+          else
+            echo "WARNING: No NDK directory found in /home/builder/lib/"
+            ls -la /home/builder/lib/ 2>/dev/null || echo "(/home/builder/lib/ not accessible)"
           fi
-          # Ejecutar build
-          echo "=== Building Julia ==="
           ./build-package.sh -s -a aarch64 --format pacman julia
         '
 
