@@ -37,10 +37,17 @@ termux_step_pre_configure() {
 	sed -i '/^LIBS/s/ -lpthread/ /g' src/flisp/Makefile
 	sed -i '/-lpthread/s/ -lpthread/ /g' src/support/Makefile
 
-	# Fix julia.expmap: change the LLVM version block to use the Julia version
-	# tag, keeping the LLVM symbols under the same version block.  lld rejects
-	# files with multiple named version blocks.
-	sed -i 's/^@LLVM_SHLIB_SYMBOL_VERSION@$/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in
+	# Fix julia.expmap: merge the LLVM symbol into the Julia version block
+	# and delete the separate LLVM version block entirely.  lld in Android's
+	# NDK rejects files with multiple named version blocks, and during cross-
+	# compilation LLVM_SHLIB_SYMBOL_VERSION is often empty (readelf fails),
+	# producing an anonymous block that lld also rejects.
+	sed -i '/MMTK_\*;$/a\    _ZN4llvm3Any6TypeId*;' src/julia.expmap.in
+	sed -i '/^@LLVM_SHLIB_SYMBOL_VERSION@ {/,/^};/d' src/julia.expmap.in
+
+	# Fallback: if LLVM_SHLIB_SYMBOL_VERSION extraction still fails, use a
+	# dummy value so the expmap generation doesn't produce an anonymous block.
+	sed -i "/^LLVM_SHLIB_SYMBOL_VERSION/ s|sed -ne 's/.*@//p')|sed -ne 's/.*@//p') || echo \"JL_LLVM\"|" src/Makefile
 
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
