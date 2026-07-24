@@ -58,10 +58,23 @@ jobs:
       run: |
         ./scripts/run-docker.sh bash -c '
           echo "=== Creating QEMU linker symlink ==="
-          mkdir -p /system/bin
-          ln -sf /data/data/com.termux/files/usr/lib/ld-android.so /system/bin/linker64 2>/dev/null && \
-            echo "linker64 symlink created" || \
-            echo "WARNING: Could not create linker symlink, trying fallback..."
+          # /system may exist as file from previous operations
+          if [ -f /system ]; then rm -f /system; fi
+          mkdir -p /system/bin 2>/dev/null || true
+          if [ -f /data/data/com.termux/files/usr/lib/ld-android.so ]; then
+            ln -sf /data/data/com.termux/files/usr/lib/ld-android.so /system/bin/linker64 && \
+              echo "linker64 symlink created" || \
+              echo "WARNING: Could not create linker symlink"
+          else
+            echo "WARNING: ld-android.so not found, scanning for alternatives..."
+            # Fallback: search for any libc.so that can act as linker
+            LNK=$(find /data/data/com.termux -name "libc.so" -path "*/aarch64*" 2>/dev/null | head -1)
+            if [ -n "$LNK" ]; then
+              ln -sf "$LNK" /system/bin/linker64 && echo "linker64 symlink created (fallback)"
+            else
+              echo "WARNING: No suitable linker found"
+            fi
+          fi
           # Ejecutar build
           echo "=== Building Julia ==="
           ./build-package.sh -s -a aarch64 --format pacman julia

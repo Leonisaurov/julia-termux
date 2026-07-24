@@ -108,6 +108,12 @@ termux_step_pre_configure() {
 	CXX = g++
 	EOF
 
+	# Fix H: TCP_QUICKACK guard for Android/bionic.
+	# On Android, _OS_LINUX_ is defined but TCP_QUICKACK may not be
+	# available in kernel headers. This replaces the original patch
+	# 0012-jl-uv-tcp-quickack.patch with a more robust sed approach.
+	sed -i 's/#ifdef _OS_LINUX_/#if defined(_OS_LINUX_) \&\& defined(TCP_QUICKACK)/g' src/jl_uv.c 2>/dev/null || true
+
 	cat > Make.user <<-EOF
 	XC_HOST = aarch64-linux-android
 	# CC/CXX los genera Make.inc automáticamente con el prefijo CROSS_COMPILE
