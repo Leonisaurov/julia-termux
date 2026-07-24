@@ -210,6 +210,7 @@ termux_step_pre_configure() {
 
 	cat > Make.user <<-EOF
 	XC_HOST = aarch64-linux-android
+	OS = Linux
 	# CC/CXX los genera Make.inc automáticamente con el prefijo CROSS_COMPILE
 	AR = llvm-ar
 	RANLIB = llvm-ranlib
