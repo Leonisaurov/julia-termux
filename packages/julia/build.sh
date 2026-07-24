@@ -20,6 +20,11 @@ termux_step_pre_configure() {
 	# Remove the forced flag so the guard can work.
 	sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk
 
+	# Fix libuv cross-compilation: the CI runner is x86_64, but the target is
+	# aarch64-linux-android. Without --host, configure tries to run test programs
+	# compiled for the target, which fail on the build machine.
+	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk
+
 	# Fix gfortran check: Make.inc errors when no gfortran is found, even when
 	# USE_SYSTEM_OPENBLAS=1 and USE_SYSTEM_LIBSUITESPARSE=1 are set. We'll
 	# pass FC_VERSION=dummy on the make command line to bypass the check.
