@@ -12,7 +12,7 @@ DEPS=(
   zlib openssl
   libssh2 libgit2
   curl libnghttp2
-  pcre2 libpcre2 utf8proc
+  pcre2 utf8proc
   libuv p7zip
   patchelf lld
 )

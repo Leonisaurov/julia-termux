@@ -115,6 +115,10 @@ termux_step_pre_configure() {
 	# Adding ALLOW_FAILURE ($4) makes the rule warn instead of abort.
 	sed -i 's/\(call symlink_system_library,LIBM,$(LIBMNAME)\))/\1,,ALLOW_FAILURE)/' base/Makefile
 
+	# Add Termux prefix to ldconfig so libwhich/dlopen can find system libraries
+	echo "$TERMUX_PREFIX/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
+	sudo ldconfig 2>/dev/null || true
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
