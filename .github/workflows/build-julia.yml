@@ -44,21 +44,8 @@ jobs:
     - name: Install QEMU for ARM binary execution
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq qemu-user-static binfmt-support
-        # Asegurar que binfmt_misc está registrado para aarch64
-        if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-          echo "QEMU binfmt already registered:"
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
-        else
-          echo "Registering QEMU binfmt for aarch64..."
-          sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
-          # Fallback: registro manual
-          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-            echo ':aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
-          fi
-        fi
-        echo "BFIFMT STATUS:"
-        ls -la /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -E "qemu|register" || echo "(no binfmt_misc entries)"
+        sudo apt-get install -y -qq qemu-user-static
+        echo "QEMU installed for ARM binary execution"
 
     - name: Install system dependencies
       env:
@@ -73,20 +60,9 @@ jobs:
     - name: Collect package files
       if: always()
       run: |
-        echo "=== Checking output/ directory ==="
-        ls -la output/ 2>/dev/null || echo "(output/ empty or missing)"
-        echo "=== Looking for pacman packages ==="
-        PKG_COUNT=$(ls output/*.pkg.tar.* 2>/dev/null | wc -l)
-        echo "Found $PKG_COUNT package(s)"
         mkdir -p ./artifacts
-        if [ "$PKG_COUNT" -gt 0 ]; then
-          ls -la output/*.pkg.tar.*
-          mv output/*.pkg.tar.* ./artifacts/
-          echo "=== Artifacts collected ==="
-          ls -la ./artifacts/
-        else
-          echo "WARNING: No .pkg.tar.* files found in output/"
-        fi
+        ls -la output/ 2>/dev/null || echo "(output/ empty)"
+        mv output/*.pkg.tar.* ./artifacts/ 2>/dev/null && echo "Packages collected" || echo "No packages found"
 
     - name: Upload to GitHub Release
       if: always()
@@ -94,11 +70,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         FILE=$(ls ./artifacts/*.pkg.tar.* 2>/dev/null | head -1)
-        if [ -z "$FILE" ]; then
-          echo "WARNING: No package file to upload to release"
-          exit 0
-        fi
-        echo "Uploading $FILE to GitHub Release"
+        [ -f "$FILE" ] || exit 0
         gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
         gh release create julia-latest "$FILE" \
           --repo "${{ github.repository }}" \

@@ -15,25 +15,6 @@ TERMUX_PKG_HOSTBUILD=false
 termux_step_pre_configure() {
 	cd "$TERMUX_PKG_SRCDIR"
 
-	# ============================================================
-	# CONFIGURAR QEMU USER-MODE: linker de Android para binarios ARM
-	# Cuando Julia ejecuta flisp (compilado para aarch64) en el host
-	# x86_64, QEMU user-mode necesita el linker de Android.
-	# El binario busca /system/bin/linker64 (estándar Android).
-	# ============================================================
-	if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ] && [ -n "${NDK-}" ]; then
-		local android_linker="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc.so"
-		if [ -f "$android_linker" ]; then
-			mkdir -p /system/bin 2>/dev/null || sudo mkdir -p /system/bin 2>/dev/null || true
-			ln -sf "$android_linker" /system/bin/linker64 2>/dev/null || \
-				sudo ln -sf "$android_linker" /system/bin/linker64 2>/dev/null || true
-			echo "QEMU linker symlink created: /system/bin/linker64 -> $android_linker"
-		else
-			echo "WARNING: Android linker not found at $android_linker"
-			echo "QEMU may fail to execute ARM binaries"
-		fi
-	fi
-
 	# Fix LMDB for Android/bionic: the forced MDB_USE_ROBUST=1 bypasses mdb.c's
 	# built-in Android guard (lines 354-362), causing build failure on bionic.
 	# Remove the forced flag so the guard can work.
@@ -119,6 +100,16 @@ termux_step_pre_configure() {
 	echo "$TERMUX_PREFIX/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf >/dev/null 2>&1 || true
 	sudo ldconfig 2>/dev/null || true
 
+	# Make.host.user: compilador NATIVO del host (x86_64) para herramientas
+	# como flisp cuando USE_CROSS_FLISP=1. Sin esto, Julia compila flisp
+	# para aarch64 e intenta ejecutarlo en x86_64 (requiere QEMU).
+	cat > Make.host.user <<-EOF
+	CC = gcc
+	CXX = g++
+	AR = ar
+	RANLIB = ranlib
+	EOF
+
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
@@ -158,6 +149,7 @@ termux_step_pre_configure() {
 	USE_SYSTEM_MBEDTLS=0
 
 	USE_BINARYBUILDER=0
+	USE_CROSS_FLISP=1
 	DISABLE_LIBUNWIND=1
 	JULIA_THREADS=4
 	prefix=$TERMUX_PREFIX
