@@ -47,29 +47,39 @@ jobs:
         sudo apt-get install -y -qq qemu-user-static
         sudo systemctl restart systemd-binfmt || true
 
-    - name: Install system dependencies
-      env:
-        TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: ./scripts/run-docker.sh bash ./scripts/install-deps.sh
-
     - name: Build Julia
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: ./scripts/run-docker.sh ./build-package.sh -s -a aarch64 --format pacman julia
+      run: ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman julia
 
     - name: Collect package files
       if: always()
       run: |
+        echo "=== Checking output/ directory ==="
+        ls -la output/ 2>/dev/null || echo "(output/ empty or missing)"
+        echo "=== Looking for pacman packages ==="
+        PKG_COUNT=$(ls output/*.pkg.tar.* 2>/dev/null | wc -l)
+        echo "Found $PKG_COUNT package(s)"
         mkdir -p ./artifacts
-        mv output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
+        if ls output/*.pkg.tar.* 2>/dev/null; then
+          mv output/*.pkg.tar.* ./artifacts/
+          echo "=== Artifacts collected ==="
+          ls -la ./artifacts/
+        else
+          echo "WARNING: No .pkg.tar.* files found in output/"
+        fi
 
     - name: Upload to GitHub Release
       if: always()
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        FILE=$(ls ./artifacts/*.pkg.tar.xz 2>/dev/null | head -1)
-        [ -f "$FILE" ] || exit 0
+        FILE=$(ls ./artifacts/*.pkg.tar.* 2>/dev/null | head -1)
+        if [ -z "$FILE" ]; then
+          echo "WARNING: No package file to upload to release"
+          exit 0
+        fi
+        echo "Uploading $FILE to GitHub Release"
         gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
         gh release create julia-latest "$FILE" \
           --repo "${{ github.repository }}" \
@@ -83,3 +93,4 @@ jobs:
       with:
         name: julia-aarch64-${{ github.sha }}
         path: ./artifacts/*
+        if-no-files-found: warn

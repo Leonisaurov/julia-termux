@@ -6,14 +6,76 @@ TERMUX_PKG_VERSION=1.14.0
 TERMUX_PKG_SRCURL=https://github.com/JuliaLang/julia/archive/refs/heads/master.tar.gz
 TERMUX_PKG_GIT_BRANCH=master
 TERMUX_PKG_BUILD_IN_SRC=true
-# Dependencies installed via CI workflow before build (not declared here to avoid
-# buildorder.py looking up non-existent packages/ dir entries for each dep)
+# libllvm declarada abajo como TERMUX_PKG_BUILD_DEPENDS para que buildorder.py
+# la encuentre y -I la descargue automáticamente desde el repositorio APT.
+# Dependencias externas (openblas, suitesparse, etc.) se instalan dentro de
+# termux_step_pre_configure() desde el mismo repositorio APT.
 TERMUX_PKG_NO_STRIP=false
 # Julia handles cross-compilation natively in its Makefile (no hostbuild target)
 TERMUX_PKG_HOSTBUILD=false
 
+# libllvm SÍ existe en packages/libllvm/, buildorder.py la encuentra y -I la descarga
+TERMUX_PKG_BUILD_DEPENDS="libllvm"
+
 termux_step_pre_configure() {
 	cd "$TERMUX_PKG_SRCDIR"
+
+	# ============================================================
+	# INSTALAR DEPENDENCIAS EXTERNAS DESDE REPO APT
+	# Estas dependencias no tienen directorio en packages/, pero se
+	# descargan directamente del repositorio Termux como paquetes .deb
+	# Esto se integra con -I del build system
+	# ============================================================
+	if [[ "$TERMUX_INSTALL_DEPS" == "true" ]]; then
+		echo "=== Instalando dependencias externas desde repo APT ==="
+		local external_deps=(
+			libllvm-static
+			libopenblas blas-openblas
+			suitesparse
+			arpack-ng
+			libgmp libmpfr
+			zlib openssl
+			libssh2 libgit2
+			curl libnghttp2
+			pcre2 utf8proc
+			libuv p7zip
+			patchelf lld
+		)
+		local PACKAGES_URL="https://packages-cf.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages"
+		local REPO_BASE="https://packages-cf.termux.dev/apt/termux-main"
+
+		curl -sL "$PACKAGES_URL" -o /tmp/Packages
+
+		for pkg in "${external_deps[@]}"; do
+			echo "  -> $pkg"
+			local stanza
+			stanza=$(awk -v pkg="$pkg" '/^Package: /{found=($2==pkg)} found{print} /^$/{if(found) exit}' /tmp/Packages)
+			local filename
+			filename=$(echo "$stanza" | grep "^Filename:" | awk '{print $2}' || true)
+			local deb_sha256
+			deb_sha256=$(echo "$stanza" | grep "^SHA256:" | awk '{print $2}' || true)
+			[ -z "$filename" ] && { echo "     SKIP (not found in repo)"; continue; }
+			local deb_name="${filename##*/}"
+			echo "     Downloading $deb_name"
+			curl -sL "${REPO_BASE}/${filename}" -o "/tmp/$deb_name"
+			if [ -n "$deb_sha256" ]; then
+				echo "     Verifying"
+				echo "$deb_sha256  /tmp/$deb_name" | sha256sum -c - > /dev/null 2>&1 || {
+					echo "     ERROR: SHA256 mismatch for $pkg"
+					rm -f "/tmp/$deb_name"
+					exit 1
+				}
+			fi
+			echo "     Extracting to /"
+			dpkg-deb -x "/tmp/$deb_name" / 2>/dev/null || true
+			rm -f "/tmp/$deb_name"
+		done
+		echo "=== Dependencias externas instaladas ==="
+	fi
+
+	# ============================================================
+	# PARCHES SED (sin cambios respecto al original)
+	# ============================================================
 
 	# Fix LMDB for Android/bionic: the forced MDB_USE_ROBUST=1 bypasses mdb.c's
 	# built-in Android guard (lines 354-362), causing build failure on bionic.
@@ -32,7 +94,7 @@ termux_step_pre_configure() {
 
 	# Remove -lpthread from all Makefiles (bionic has pthread in libc)
 	sed -i '/^OSLIBS/s/ -lpthread//' Make.inc
-	sed -i '/^LOADER_LDFLAGS/s/ -lpthread//' cli/Makefile
+	sed -i '/^LIBS/s/ -lpthread//' cli/Makefile
 	sed -i '/^LIBS/s/ -lpthread//' src/flisp/Makefile
 
 	# The host flisp build path (USE_CROSS_FLISP=1 -> src/flisp/host/) has
