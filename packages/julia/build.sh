@@ -90,12 +90,6 @@ termux_step_pre_configure() {
 	# Fix F: Remove -latomic from OSLIBS
 	sed -i '/^OSLIBS/s/ -latomic//' Make.inc
 
-	# Fix G: Create a libm.so -> libc.so symlink so Julia's Makefile can find
-	# it.  On Android/bionic, libm is not a separate library — it is part of
-	# libc.so.  Julia's build system (handle_system_library in Makefile) tries
-	# to find libm.so to create a symlink and fails because it does not exist.
-	ln -sf "${TERMUX_PREFIX}/lib/libc.so" "${TERMUX_PREFIX}/lib/libm.so" 2>/dev/null || true
-
 	cat > Make.user <<-EOF
 	# CC/CXX are set here and also passed on the command line for the main
 	# build.  We must NOT use override so that sub-make invocations for host
@@ -107,7 +101,7 @@ termux_step_pre_configure() {
 
 	USE_SYSTEM_LLVM=1
 	USE_SYSTEM_PCRE=1
-	USE_SYSTEM_LIBM=1
+	USE_SYSTEM_LIBM=0
 	USE_SYSTEM_OPENBLAS=1
 	USE_SYSTEM_BLAS=1
 	USE_SYSTEM_LAPACK=1
