@@ -23,7 +23,7 @@ termux_step_pre_configure() {
 	# Fix libuv cross-compilation: the CI runner is x86_64, but the target is
 	# aarch64-linux-android. Without --host, configure tries to run test programs
 	# compiled for the target, which fail on the build machine.
-	sed -i 's|--with-pic.*|--with-pic --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk || echo "Warning: libuv.mk --host sed failed" >&2
+	sed -i 's|--with-pic.*|--with-pic --disable-shared --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk || echo "Warning: libuv.mk --host sed failed" >&2
 
 	# Fix libuv pthread_setcancelstate for Android/bionic: Julia removed the
 	# broken patch from libuv.mk entirely.  Insert a sed to add the missing
