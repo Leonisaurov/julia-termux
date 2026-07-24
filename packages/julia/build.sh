@@ -29,7 +29,7 @@ termux_step_pre_configure() {
 	# (libuv-android-pthread-cancel.patch) has drifted from the current libuv
 	# source so it fails to apply. Replace it with a direct sed invocation.
 	cat > deps/patches/libuv-android-fix.sed <<-SEDEOF
-	s|#ifdef __linux__|#if defined(__linux__) && !defined(__ANDROID__)|g
+	s|#ifdef __linux__|#if defined(__linux__) \&\& !defined(__ANDROID__)|g
 	SEDEOF
 	sed -i "s|patch -p1 -f < \$(SRCDIR)/patches/libuv-android-pthread-cancel.patch|sed -i -f \$(SRCDIR)/patches/libuv-android-fix.sed src/unix/process.c|" deps/libuv.mk
 
