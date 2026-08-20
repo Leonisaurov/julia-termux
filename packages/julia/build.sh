@@ -148,10 +148,11 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     # build_prefix is Julia's BUILDDIR/usr, not the Termux prefix where
     # system zlib lives.  CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY then
     # restricts cmake to the sysroot, finding host zlib headers but not
-    # the target libz.so.  Fix: point ZLIB_ROOT to the Termux prefix and
-    # pass explicit ZLIB_LIBRARY / ZLIB_INCLUDE_DIR so cmake doesn't need
-    # to search.
-    sed -i 's|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(build_prefix)"|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(prefix)" -DZLIB_LIBRARY="$(prefix)/lib/libz.so" -DZLIB_INCLUDE_DIR="$(prefix)/include"|' deps/llvm.mk 2>/dev/null || echo "Warning: H16 ZLIB cmake patch failed" >&2
+    # the target libz.so.  Fix: pass explicit ZLIB paths using
+    # $TERMUX_PREFIX (shell var, expanded when Make invokes cmake).
+    if [ -f deps/llvm.mk ]; then
+        sed -i 's|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(build_prefix)"|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$TERMUX_PREFIX" -DZLIB_LIBRARY="$TERMUX_PREFIX/lib/libz.so" -DZLIB_INCLUDE_DIR="$TERMUX_PREFIX/include"|' deps/llvm.mk 2>/dev/null || echo "Warning: H16 ZLIB cmake patch failed" >&2
+    fi
     # OpenBLAS f_check assumes GCC always reports a numeric major version.
     for openblas_fcheck in deps/scratch/openblas-*/f_check; do
         [ -f "$openblas_fcheck" ] || continue
