@@ -9,7 +9,7 @@ TERMUX_PKG_SHA256=5440ad37977af766a075e5cc9c430b66ba958ede69a70ccf308bb7d8e1d694
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_NO_STRIP=false
 TERMUX_PKG_HOSTBUILD=false
-TERMUX_PKG_DEPENDS="llvm, openblas, blas, lapack, gmp, mpfr, suitesparse, arpack-ng, libssh2, curl, libgit2, patchelf, zlib, openssl, libnghttp2, pcre2, p7zip, lld, libandroid-support, libuv"
+TERMUX_PKG_DEPENDS="llvm, libopenblas, libgmp, libmpfr, suitesparse, arpack-ng, libssh2, curl, libgit2, patchelf, zlib, openssl, libnghttp2, pcre2, p7zip, lld, libandroid-support, libuv"
 TERMUX_PKG_BUILD_DEPENDS="cmake, perl, m4"
 TERMUX_PKG_SUGGESTS="proot-distro"
 
