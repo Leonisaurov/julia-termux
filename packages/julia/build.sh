@@ -107,7 +107,7 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     sed -i 's/sysimg_builder,,-O3/sysimg_builder,,-O0/' sysimage.mk 2>/dev/null || true
     sed -i 's/^OSLIBS += -lgcc_s$/OSLIBS +=/' Make.inc 2>/dev/null || true
     sed -i '/^[[:space:]]*\$(LIBGCC_.*DEPLIB)/d' Make.inc 2>/dev/null || true
-    BUILTINS_LIB=$(find "${TERMUX_PREFIX}/lib/clang" -name 'libclang_rt.builtins-aarch64-android.a' 2>/dev/null | head -1)
+    BUILTINS_LIB=$(find "${TERMUX_PREFIX}/lib/clang" -name 'libclang_rt.builtins-aarch64-android.a' 2>/dev/null | head -1 || true)
     if [ -n "$BUILTINS_LIB" ]; then
         sed -i "/^CG_LLVMLINK :=/a CG_LLVMLINK += -Wl,--whole-archive $BUILTINS_LIB -Wl,--no-whole-archive" src/Makefile 2>/dev/null || true
         sed -i "/^RT_LLVMLINK :=/a RT_LLVMLINK += -Wl,--whole-archive $BUILTINS_LIB -Wl,--no-whole-archive" src/Makefile 2>/dev/null || true
