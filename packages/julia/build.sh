@@ -13,16 +13,16 @@ TERMUX_PKG_DEPENDS="llvm, libopenblas, libgmp, libmpfr, suitesparse, arpack-ng, 
 TERMUX_PKG_BUILD_DEPENDS="cmake, perl, m4, pkg-config"
 TERMUX_PKG_SUGGESTS="proot-distro"
 
-termux_step_pre_configure() {
-    # Resolve path to our julia-termux repo (for patches/).
-    # Docker: mounted at /home/builder/julia-termux
-    # Local Termux: relative to TERMUX_PKG_BUILDDIR
-    if [ -d "/home/builder/julia-termux/packages/julia/patches" ]; then
-        _JULIA_TERMUX_ROOT="/home/builder/julia-termux"
-    else
-        _JULIA_TERMUX_ROOT="$(cd "$TERMUX_PKG_BUILDDIR/../../../Develop/Patch/Julia/julia-termux" && pwd)"
-    fi
+# Resolve path to our julia-termux repo (for patches/).
+# Docker: mounted at /home/builder/julia-termux
+# Local Termux: relative to TERMUX_PKG_BUILDDIR
+if [ -d "/home/builder/julia-termux/packages/julia/patches" ]; then
+    _JULIA_TERMUX_ROOT="/home/builder/julia-termux"
+else
+    _JULIA_TERMUX_ROOT="$(cd "${TERMUX_PKG_BUILDDIR:-.}/../../../Develop/Patch/Julia/julia-termux" 2>/dev/null && pwd || echo ".")"
+fi
 
+termux_step_pre_configure() {
     # A) Fix LMDB para Android
     if [ -f deps/lmdb.mk ]; then
         sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk || echo "Warning: MDB_USE_ROBUST sed failed" >&2
