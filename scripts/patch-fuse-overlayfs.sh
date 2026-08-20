@@ -1,7 +1,7 @@
 #!/bin/bash
 # patch-fuse-overlayfs.sh — Disable fuse-overlayfs in termux-packages build system.
 # GitHub Actions blocks FUSE mounts via AppArmor/seccomp.
-# Replaces fuse-overlayfs mount with a simple cp of the NDK toolchain.
+# Replaces fuse-overlayfs mount with cp of the NDK toolchain.
 set -euo pipefail
 
 TP="${1:-/home/builder/termux-packages}"
@@ -12,30 +12,23 @@ if [ ! -f "$F" ]; then
     exit 0
 fi
 
-# Strategy: replace the fuse-overlayfs block with cp.
-# The block looks like:
-#   if ! mountpoint -q "${TERMUX_STANDALONE_TOOLCHAIN}"; then
-#       fuse-overlayfs ... return
-#   fi
-# We replace the entire if block with cp commands.
+echo "[patch-fuse] patching $F ..."
 
-python3 -c "
-import re
-with open('$F', 'r') as f:
-    content = f.read()
+# Step 1: Replace "if ! mountpoint" with "if false" so fuse block is skipped
+sed -i 's/if ! mountpoint -q "${TERMUX_STANDALONE_TOOLCHAIN}"; then/if false; then/' "$F" 2>/dev/null || \
+sed -i 's/if ! mountpoint -q.*TERMUX_STANDALONE_TOOLCHAIN.*; then/if false; then/' "$F" 2>/dev/null || \
+echo "[patch-fuse] WARNING: could not patch mountpoint line"
 
-# Match the fuse-overlayfs if block (from 'if ! mountpoint' to the next 'fi')
-pattern = r'if ! mountpoint -q \"\$\{TERMUX_STANDALONE_TOOLCHAIN\}\"; then.*?^fi'
-replacement = '''if true; then
-    rm -rf \"\${TERMUX_STANDALONE_TOOLCHAIN}\"
-    cp \"\${NDK}/toolchains/llvm/prebuilt/linux-x86_64\" \"\${TERMUX_STANDALONE_TOOLCHAIN}\" -r
-    cp \"\${NDK}/source.properties\" \"\${TERMUX_STANDALONE_TOOLCHAIN}\"
-fi'''
+# Step 2: Remove the "return" inside the fuse block (so code falls through)
+sed -i '/fuse-overlayfs/,/^fi$/{/^[[:space:]]*return$/d;}' "$F" 2>/dev/null || true
 
-new_content = re.sub(pattern, replacement, content, count=1, flags=re.DOTALL | re.MULTILINE)
+# Step 3: After the fi that closes the false block, insert cp commands
+# Find the first "fi" after "if false" and add cp after it
+awk '
+/if false; then/ { found=1 }
+found && /^fi$/ { print; print "    rm -rf \"${TERMUX_STANDALONE_TOOLCHAIN}\""; print "    cp \"${NDK}/toolchains/llvm/prebuilt/linux-x86_64\" \"${TERMUX_STANDALONE_TOOLCHAIN}\" -r"; print "    cp \"${NDK}/source.properties\" \"${TERMUX_STANDALONE_TOOLCHAIN}\""; found=0; next }
+{ print }
+' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 
-with open('$F', 'w') as f:
-    f.write(new_content)
-
-print('[patch-fuse] patched $F')
-"
+echo "[patch-fuse] done. Verifying..."
+grep -A2 'if false;' "$F" | head -5
