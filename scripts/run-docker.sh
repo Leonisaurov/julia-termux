@@ -85,7 +85,7 @@ VOLUMES=(
 )
 # Pass /dev/fuse if available (needed by termux-packages overlay filesystem)
 if [ -e /dev/fuse ]; then
-    VOLUMES+=(--device /dev/fuse)
+    VOLUMES+=(--device /dev/fuse --cap-add CAP_SYS_ADMIN)
 fi
 
 # Docker tty detection
