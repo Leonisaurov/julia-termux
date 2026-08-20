@@ -1,7 +1,7 @@
 #!/bin/bash
 # patch-fuse-overlayfs.sh — Disable fuse-overlayfs in termux-packages build system.
 # GitHub Actions blocks FUSE mounts via AppArmor/seccomp.
-# This patches termux_setup_toolchain_29.sh to use cp instead of fuse-overlayfs.
+# Replaces fuse-overlayfs mount with a simple cp of the NDK toolchain.
 set -euo pipefail
 
 TP="${1:-/home/builder/termux-packages}"
@@ -12,13 +12,30 @@ if [ ! -f "$F" ]; then
     exit 0
 fi
 
-# Replace the fuse-overlayfs mount check with "if false"
-sed -i 's|if ! mountpoint -q "${TERMUX_STANDALONE_TOOLCHAIN}"; then|if false; then|' "$F"
+# Strategy: replace the fuse-overlayfs block with cp.
+# The block looks like:
+#   if ! mountpoint -q "${TERMUX_STANDALONE_TOOLCHAIN}"; then
+#       fuse-overlayfs ... return
+#   fi
+# We replace the entire if block with cp commands.
 
-# After the fi that closes the fuse block, add cp fallback
-sed -i '/^fi$/a\
-rm -rf "${TERMUX_STANDALONE_TOOLCHAIN}"\
-cp "${NDK}/toolchains/llvm/prebuilt/linux-x86_64" "${TERMUX_STANDALONE_TOOLCHAIN}" -r\
-cp "${NDK}/source.properties" "${TERMUX_STANDALONE_TOOLCHAIN}"' "$F"
+python3 -c "
+import re
+with open('$F', 'r') as f:
+    content = f.read()
 
-echo "[patch-fuse] patched $F"
+# Match the fuse-overlayfs if block (from 'if ! mountpoint' to the next 'fi')
+pattern = r'if ! mountpoint -q \"\$\{TERMUX_STANDALONE_TOOLCHAIN\}\"; then.*?^fi'
+replacement = '''if true; then
+    rm -rf \"\${TERMUX_STANDALONE_TOOLCHAIN}\"
+    cp \"\${NDK}/toolchains/llvm/prebuilt/linux-x86_64\" \"\${TERMUX_STANDALONE_TOOLCHAIN}\" -r
+    cp \"\${NDK}/source.properties\" \"\${TERMUX_STANDALONE_TOOLCHAIN}\"
+fi'''
+
+new_content = re.sub(pattern, replacement, content, count=1, flags=re.DOTALL | re.MULTILINE)
+
+with open('$F', 'w') as f:
+    f.write(new_content)
+
+print('[patch-fuse] patched $F')
+"
