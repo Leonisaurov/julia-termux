@@ -142,6 +142,16 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     fi
     # LLVM's perf JIT events are not available on Android/Bionic.
     sed -i 's/-DLLVM_USE_PERF:BOOL=ON/-DLLVM_USE_PERF:BOOL=OFF/' deps/llvm.mk 2>/dev/null || true
+
+    # H16: Fix LLVM FindZLIB cross-compilation failure.
+    # LLVM's deps/llvm.mk sets -DZLIB_ROOT="$(build_prefix)" but
+    # build_prefix is Julia's BUILDDIR/usr, not the Termux prefix where
+    # system zlib lives.  CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY then
+    # restricts cmake to the sysroot, finding host zlib headers but not
+    # the target libz.so.  Fix: point ZLIB_ROOT to the Termux prefix and
+    # pass explicit ZLIB_LIBRARY / ZLIB_INCLUDE_DIR so cmake doesn't need
+    # to search.
+    sed -i 's|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(build_prefix)"|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(prefix)" -DZLIB_LIBRARY="$(prefix)/lib/libz.so" -DZLIB_INCLUDE_DIR="$(prefix)/include"|' deps/llvm.mk 2>/dev/null || echo "Warning: H16 ZLIB cmake patch failed" >&2
     # OpenBLAS f_check assumes GCC always reports a numeric major version.
     for openblas_fcheck in deps/scratch/openblas-*/f_check; do
         [ -f "$openblas_fcheck" ] || continue
