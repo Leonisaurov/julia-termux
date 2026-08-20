@@ -80,14 +80,8 @@ jobs:
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
           cd /home/builder/termux-packages
-          ./build-package.sh -I -s --format debian -j 2 -f julia > /tmp/build-stdout.log 2> /tmp/build-stderr.log
-          RC=$?
-          echo "=== BUILD EXIT: $RC ==="
-          echo "=== LAST 50 LINES STDOUT ==="
-          tail -50 /tmp/build-stdout.log
-          echo "=== LAST 50 LINES STDERR ==="
-          tail -50 /tmp/build-stderr.log
-          exit $RC
+          bash -x ./build-package.sh -I -s --format debian -j 2 -f julia 2>&1 | grep -v "termux-elf-cleaner" | tail -30
+          echo "=== BUILD EXIT: ${PIPESTATUS[0]} ==="
         '
 
     - name: Cleanup Docker container
