@@ -79,7 +79,7 @@ jobs:
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
           cd /home/builder/termux-packages
-          ./build-package.sh -I -s --format debian -j 2 -f julia
+          ./build-package.sh -I --format debian -j 2 -f julia
         '
 
     - name: Cleanup Docker container
