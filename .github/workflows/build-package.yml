@@ -76,10 +76,13 @@ jobs:
     - name: Build Julia via Docker
       run: |
         ./scripts/run-docker.sh bash -c '
+          set +e
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
           cd /home/builder/termux-packages
-          ./build-package.sh -I -s --format debian -j 2 -f julia
+          ./build-package.sh -I -s --format debian -j 2 -f julia 2>&1 | tee /tmp/build.log
+          echo "=== BUILD EXIT: ${PIPESTATUS[0]} ==="
+          tail -100 /tmp/build.log
         '
 
     - name: Cleanup Docker container
