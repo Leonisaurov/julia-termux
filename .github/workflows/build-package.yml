@@ -48,10 +48,10 @@ jobs:
         echo "LLVM objects: $(find ~/.termux-build/julia/src/deps/scratch/llvm-julia-*/build_Release -name '*.o' 2>/dev/null | wc -l)"
         echo "srccache: $(du -sh ~/.termux-build/julia/src/deps/srccache 2>/dev/null | cut -f1 || echo '0')"
 
-    - name: Install Docker
+    - name: Verify Docker
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq docker.io
+        docker version
+        echo "Docker ready"
 
     - name: Setup termux-packages checkout
       run: |
