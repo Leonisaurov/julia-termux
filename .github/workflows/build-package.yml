@@ -76,14 +76,9 @@ jobs:
     - name: Build Julia via Docker
       run: |
         ./scripts/run-docker.sh bash -c '
-          # Disable fuse-overlayfs (GitHub AppArmor blocks FUSE mounts)
-          TP=/home/builder/termux-packages
-          if [ -f "$TP/scripts/build/toolchain/termux_setup_toolchain_29.sh" ]; then
-            sed -i "s|if ! mountpoint -q.*|if false; then|" \
-              "$TP/scripts/build/toolchain/termux_setup_toolchain_29.sh" || true
-          fi
           export TERMUX_PROOT_DISABLED=1
-          cd /home/builder/termux-packages &&
+          /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
+          cd /home/builder/termux-packages
           ./build-package.sh -I -s --format debian -j 2 -f julia
         '
 
@@ -105,12 +100,10 @@ jobs:
       if: always()
       run: |
         mkdir -p ./artifacts
-        # termux-packages writes output to its own output/ dir inside the checkout
         TP_DIR="$HOME/.cache/julia-termux/termux-packages"
         find "$TP_DIR/output" -maxdepth 1 -type f \
           \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) \
           -exec cp -f {} ./artifacts/ \; 2>/dev/null || true
-        # Also check local output/
         cp output/julia-* ./artifacts/ 2>/dev/null || true
         echo "Artifacts:"
         ls -la ./artifacts/ 2>/dev/null || echo "(none)"
