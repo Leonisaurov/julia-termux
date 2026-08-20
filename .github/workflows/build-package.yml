@@ -80,13 +80,13 @@ jobs:
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
           cd /home/builder/termux-packages
-          bash -x ./build-package.sh -I -s --format debian -j 2 -f julia > /tmp/trace.log 2>&1
+          bash -x ./build-package.sh -I -s --format debian -j 2 -f julia > /home/builder/.termux-build/trace.log 2>&1
           RC=$?
           echo "=== BUILD EXIT: $RC ==="
+          echo "=== LAST 5 NON-ELF-CLEANER LINES ==="
+          grep -v "termux-elf-cleaner" /home/builder/.termux-build/trace.log | tail -5
           echo "=== ERRORS ==="
-          grep -iE "error:|cannot|No such|Permission|unbound|set:" /tmp/trace.log | grep -v "termux-elf-cleaner" | head -20
-          echo "=== LAST LINE ==="
-          grep -v "termux-elf-cleaner" /tmp/trace.log | tail -1
+          grep -iE "error:|cannot|No such|Permission|unbound|set:" /home/builder/.termux-build/trace.log | grep -v "termux-elf-cleaner" | head -10
         '
 
     - name: Cleanup Docker container
@@ -102,6 +102,11 @@ jobs:
         find ~/.termux-build -name "*.log" -o -name "*.err" 2>/dev/null | head -20
         echo "=== Last 50 lines of build log ==="
         find ~/.termux-build -name "*.log" -exec tail -50 {} \; 2>/dev/null | tail -100
+
+    - name: Collect trace log
+      if: always()
+      run: |
+        cp ~/.termux-build/trace.log ./trace.log 2>/dev/null || echo "No trace log found"
 
     - name: Collect package files
       if: always()
@@ -135,5 +140,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: julia-aarch64-${{ github.sha }}
-        path: ./artifacts/*
+        path: |
+          ./artifacts/*
+          ./trace.log
         if-no-files-found: warn
