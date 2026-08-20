@@ -16,7 +16,7 @@ cross-compilation de LLVM (ZLIB). Pendiente investigación y fix.
 
 ## Build Local (Termux en dispositivo)
 
-**Status**: MUERTO (proceso `proc_bcac578822a6` terminado)
+**Status**: PARADO (parado manualmente por el usuario, no por OOM)
 
 **Último estado conocido**: 51% de LLVM compilado con `-j1`
 - Session: `proc_bcac578822a6` (exit code -15 / SIGTERM)
@@ -24,8 +24,7 @@ cross-compilation de LLVM (ZLIB). Pendiente investigación y fix.
 - Cache en `~/.termux-build/` preservada (solo borrar `deps/scratch/llvm-julia-*/`)
 - La compilación de LLVM es la etapa más pesada (~8h normalmente)
 
-**¿Por qué murió?**: El sistema Android probablemente lo mató por memoria
-(OOM killer). Con `-j1` el build es lento pero seguro. Reintentar con
+**¿Por qué se paró?**: Parado manualmente por el usuario.
 `./scripts/build-local.sh -j1 --format debian --continue` cuando el dispositivo
 tenga suficiente RAM libre.
 
