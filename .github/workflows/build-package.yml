@@ -68,6 +68,13 @@ jobs:
         chmod +x "$TP_DIR/packages/julia/build.sh"
         echo "build.sh copied to $TP_DIR/packages/julia/"
 
+    - name: Enable FUSE for overlay filesystem
+      run: |
+        sudo modprobe fuse 2>/dev/null || true
+        [ -e /dev/fuse ] || sudo mknod /dev/fuse c 10 229 2>/dev/null || true
+        sudo chmod 666 /dev/fuse 2>/dev/null || true
+        ls -la /dev/fuse
+
     - name: Fix cache permissions for Docker
       run: |
         mkdir -p ~/.termux-build
