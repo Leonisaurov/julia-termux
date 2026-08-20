@@ -79,6 +79,8 @@ jobs:
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
           cd /home/builder/termux-packages
+          # Install build deps manually (pkg may not work in Docker)
+          pkg install -y cmake perl m4 2>/dev/null || true
           ./build-package.sh -I --format debian -j 2 -f julia
         '
 
