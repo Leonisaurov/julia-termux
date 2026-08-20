@@ -73,16 +73,20 @@ jobs:
         mkdir -p ~/.termux-build
         chmod 777 ~/.termux-build
 
-    - name: Build Julia via Docker
+    - name: Build Julia dependencies via Docker
       run: |
         ./scripts/run-docker.sh bash -c '
           export TERMUX_PROOT_DISABLED=1
           /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
+          /home/builder/julia-termux/scripts/build-deps-docker.sh
+        '
+
+    - name: Build Julia via Docker
+      run: |
+        ./scripts/run-docker.sh bash -c '
+          export TERMUX_PROOT_DISABLED=1
           cd /home/builder/termux-packages
-          # Install system build deps (Docker is Ubuntu, use apt)
-          sudo apt-get update -qq && sudo apt-get install -yqq \
-            cmake ninja-build zlib1g-dev libtinfo-dev libz-dev 2>/dev/null || true
-          ./build-package.sh -I --format debian -j 2 -f julia
+          ./build-package.sh -I -s --format debian -j 2 -a aarch64 julia
         '
 
     - name: Cleanup Docker container
