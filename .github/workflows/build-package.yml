@@ -100,11 +100,12 @@ jobs:
       if: always()
       run: |
         mkdir -p ./artifacts
-        TP_DIR="$HOME/.cache/julia-termux/termux-packages"
-        find "$TP_DIR/output" -maxdepth 1 -type f \
-          \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) \
-          -exec cp -f {} ./artifacts/ \; 2>/dev/null || true
-        cp output/julia-* ./artifacts/ 2>/dev/null || true
+        # termux-packages output goes to $TERMUX_TOPDIR/output/ = ~/.termux-build/output/ on host
+        for d in "$HOME/.termux-build/output" "$HOME/.cache/julia-termux/termux-packages/output" "./output"; do
+          find "$d" -maxdepth 1 -type f \
+            \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) \
+            -exec cp -f {} ./artifacts/ \; 2>/dev/null || true
+        done
         echo "Artifacts:"
         ls -la ./artifacts/ 2>/dev/null || echo "(none)"
 
