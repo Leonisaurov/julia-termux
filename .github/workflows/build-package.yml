@@ -83,7 +83,10 @@ jobs:
           bash -x ./build-package.sh -I -s --format debian -j 2 -f julia > /tmp/trace.log 2>&1
           RC=$?
           echo "=== BUILD EXIT: $RC ==="
-          grep -v "termux-elf-cleaner" /tmp/trace.log | tail -60
+          echo "=== ERRORS ==="
+          grep -iE "error:|cannot|No such|Permission|unbound|set:" /tmp/trace.log | grep -v "termux-elf-cleaner" | head -20
+          echo "=== LAST LINE ==="
+          grep -v "termux-elf-cleaner" /tmp/trace.log | tail -1
         '
 
     - name: Cleanup Docker container
