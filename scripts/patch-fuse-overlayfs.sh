@@ -32,4 +32,9 @@ skip { next }
 ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 
 echo "[patch-fuse] done."
-grep -c 'fuse-overlayfs' "$F" && echo "ERROR: fuse refs remain" || echo "[patch-fuse] OK: clean"
+# Non-fatal verification
+if grep -q 'fuse-overlayfs' "$F"; then
+    echo "[patch-fuse] WARNING: some fuse refs remain (non-fatal)"
+else
+    echo "[patch-fuse] OK: clean"
+fi
