@@ -10,7 +10,7 @@ TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_NO_STRIP=false
 TERMUX_PKG_HOSTBUILD=false
 TERMUX_PKG_DEPENDS="llvm, libopenblas, libgmp, libmpfr, suitesparse, arpack-ng, libssh2, curl, libgit2, patchelf, zlib, openssl, libnghttp2, pcre2, lld, libandroid-support, libuv"
-TERMUX_PKG_BUILD_DEPENDS="cmake, perl, m4"
+TERMUX_PKG_BUILD_DEPENDS="cmake, perl, m4, pkg-config"
 TERMUX_PKG_SUGGESTS="proot-distro"
 
 termux_step_pre_configure() {
