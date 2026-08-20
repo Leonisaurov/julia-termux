@@ -1,6 +1,6 @@
 #!/bin/bash
-# patch-fuse-overlayfs.sh — Disable fuse-overlayfs in termux-packages.
-# Replaces fuse-overlayfs overlay mount with plain cp of NDK toolchain.
+# patch-fuse-overlayfs.sh — Remove fuse-overlayfs from termux-packages.
+# Just delete the block entirely; the script continues to set up the toolchain.
 set -euo pipefail
 
 TP="${1:-/home/builder/termux-packages}"
@@ -13,33 +13,20 @@ fi
 
 echo "[patch-fuse] patching $F ..."
 
-# Use awk to find and replace the fuse-overlayfs block.
-# The block is:
-#   if ! mountpoint -q "${TERMUX_STANDALONE_TOOLCHAIN}"; then
+# Delete the fuse-overlayfs block entirely:
+#   if ! mountpoint -q ...; then
 #       fuse-overlayfs \
-#           "${TERMUX_STANDALONE_TOOLCHAIN}" \
-#           -o lowerdir=... \
-#           -o upperdir=... \
+#           ... \
 #           -o workdir=...
 #   fi
-# Replace with cp of the NDK toolchain.
-
 awk '
-/if ! mountpoint -q.*TERMUX_STANDALONE_TOOLCHAIN/ { found=1; next }
-found && /fuse-overlayfs/ { next }
-found && /-o lowerdir/ { next }
-found && /-o upperdir/ { next }
-found && /-o workdir/ { next }
-found && /^fi$/ {
-    # Replace the fi with our cp commands
-    print "\trm -rf \"${TERMUX_STANDALONE_TOOLCHAIN}\""
-    print "\tcp \"${NDK}/toolchains/llvm/prebuilt/linux-x86_64\" \"${TERMUX_STANDALONE_TOOLCHAIN}\" -r"
-    print "\tcp \"${NDK}/source.properties\" \"${TERMUX_STANDALONE_TOOLCHAIN}\""
-    found=0
-    next
-}
+/if ! mountpoint -q.*TERMUX_STANDALONE_TOOLCHAIN/ { skip=1; next }
+skip && /fuse-overlayfs/ { next }
+skip && /-o (lowerdir|upperdir|workdir)/ { next }
+skip && /^fi$/ { skip=0; next }
+skip { next }
 { print }
 ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 
 echo "[patch-fuse] done. Verifying..."
-grep -n 'mountpoint\|fuse-overlayfs\|TERMUX_STANDALONE_TOOLCHAIN.*cp\|TERMUX_STANDALONE_TOOLCHAIN.*rm' "$F" | head -10
+grep -n 'mountpoint\|fuse-overlayfs' "$F" || echo "[patch-fuse] OK: no fuse references remain"
