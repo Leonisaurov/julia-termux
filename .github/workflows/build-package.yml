@@ -1,0 +1,126 @@
+name: Build Julia for Termux
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/julia/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720  # 12h max — LLVM compilation is slow
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Enable zram (16GB comprimido para builds grandes)
+      uses: ./.github/actions/zram
+      with:
+        algorithm: zstd
+        size: 16G
+        priority: 100
+        device_name: /dev/zram0
+
+    - name: Restore build cache
+      uses: actions/cache@v4
+      id: build-cache
+      with:
+        path: ~/.termux-build
+        key: julia-termux-${{ hashFiles('packages/julia/build.sh') }}-${{ github.run_id }}
+        restore-keys: |
+          julia-termux-${{ hashFiles('packages/julia/build.sh') }}-
+          julia-termux-
+
+    - name: Check cache state
+      run: |
+        echo "Cache size: $(du -sh ~/.termux-build 2>/dev/null | cut -f1 || echo '0')"
+        echo "LLVM objects: $(find ~/.termux-build/julia/src/deps/scratch/llvm-julia-*/build_Release -name '*.o' 2>/dev/null | wc -l)"
+        echo "srccache: $(du -sh ~/.termux-build/julia/src/deps/srccache 2>/dev/null | cut -f1 || echo '0')"
+
+    - name: Install Docker
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq docker.io
+
+    - name: Setup termux-packages checkout
+      run: |
+        TP_DIR="$HOME/.cache/julia-termux/termux-packages"
+        if [ ! -d "$TP_DIR/.git" ]; then
+          echo "Cloning termux-packages..."
+          git clone --depth=1 https://github.com/termux/termux-packages.git "$TP_DIR"
+        else
+          echo "termux-packages already cached"
+        fi
+        # Copy our build.sh into the termux-packages tree
+        mkdir -p "$TP_DIR/packages/julia"
+        cp packages/julia/build.sh "$TP_DIR/packages/julia/build.sh"
+        chmod +x "$TP_DIR/packages/julia/build.sh"
+        echo "build.sh copied to $TP_DIR/packages/julia/"
+
+    - name: Build Julia via Docker
+      run: |
+        ./scripts/run-docker.sh bash -c '
+          cd /home/builder/termux-packages &&
+          ./build-package.sh -I -s --format debian -j 2 -f julia
+        '
+
+    - name: Cleanup Docker container
+      if: always()
+      run: |
+        docker rm -f julia-termux-builder 2>/dev/null || true
+
+    - name: Debug - Show build log on failure
+      if: failure()
+      run: |
+        echo "=== Build failed ==="
+        ls -la ~/.termux-build/ 2>/dev/null || echo "No .termux-build dir"
+        find ~/.termux-build -name "*.log" -o -name "*.err" 2>/dev/null | head -20
+        echo "=== Last 50 lines of build log ==="
+        find ~/.termux-build -name "*.log" -exec tail -50 {} \; 2>/dev/null | tail -100
+
+    - name: Collect package files
+      if: always()
+      run: |
+        mkdir -p ./artifacts
+        # termux-packages writes output to its own output/ dir inside the checkout
+        TP_DIR="$HOME/.cache/julia-termux/termux-packages"
+        find "$TP_DIR/output" -maxdepth 1 -type f \
+          \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) \
+          -exec cp -f {} ./artifacts/ \; 2>/dev/null || true
+        # Also check local output/
+        cp output/julia-* ./artifacts/ 2>/dev/null || true
+        echo "Artifacts:"
+        ls -la ./artifacts/ 2>/dev/null || echo "(none)"
+
+    - name: Upload to GitHub Release
+      if: always()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        FILE=$(ls ./artifacts/julia-*.deb ./artifacts/julia-*.pkg.tar.* 2>/dev/null | head -1)
+        [ -f "$FILE" ] || exit 0
+        gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
+        gh release create julia-latest "$FILE" \
+          --repo "${{ github.repository }}" \
+          --title "julia-latest" \
+          --latest \
+          --notes "Julia for Termux aarch64 - Build from ${{ github.sha }}"
+
+    - name: Upload artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: julia-aarch64-${{ github.sha }}
+        path: ./artifacts/*
+        if-no-files-found: warn

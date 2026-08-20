@@ -1,0 +1,51 @@
+name: 'Enable zram'
+description: 'Enable zram swap for memory-intensive builds'
+inputs:
+  algorithm:
+    description: 'Compression algorithm (lz4, zstd, lzo, lz4hc)'
+    default: 'zstd'
+  size:
+    description: 'Size of zram device (e.g., 16G)'
+    default: '16G'
+  priority:
+    description: 'Swap priority'
+    default: '100'
+  device_name:
+    description: 'zram device name'
+    default: '/dev/zram0'
+runs:
+  using: 'composite'
+  steps:
+    - name: Enable zram
+      shell: bash
+      run: |
+        ZRAM_DEV="${{ inputs.device_name }}"
+        ZRAM_SIZE="${{ inputs.size }}"
+        ZRAM_ALGO="${{ inputs.algorithm }}"
+        ZRAM_PRIORITY="${{ inputs.priority }}"
+
+        echo "=== Enabling zram ==="
+        echo "Device: $ZRAM_DEV"
+        echo "Size: $ZRAM_SIZE"
+        echo "Algorithm: $ZRAM_ALGO"
+
+        # Check if zram is already enabled
+        if [ -e "$ZRAM_DEV" ] && grep -q "$ZRAM_DEV" /proc/swaps 2>/dev/null; then
+          echo "zram already enabled, skipping"
+          exit 0
+        fi
+
+        # Try to enable zram
+        if ! command -v zramctl &>/dev/null; then
+          echo "zramctl not found, trying direct sysfs..."
+          echo "$ZRAM_ALGO" | sudo tee /sys/block/zram0/comp_algorithm 2>/dev/null || true
+          echo "$ZRAM_SIZE" | sudo tee /sys/block/zram0/disksize 2>/dev/null || true
+          sudo mkswap "$ZRAM_DEV" 2>/dev/null || true
+          sudo swapon "$ZRAM_DEV" -p "$ZRAM_PRIORITY" 2>/dev/null || true
+        else
+          sudo zramctl -f -s "$ZRAM_SIZE" -a "$ZRAM_ALGO" | sudo xargs -I{} sh -c "sudo mkswap {} && sudo swapon {} -p $ZRAM_PRIORITY" || true
+        fi
+
+        echo "=== zram status ==="
+        swapon --show 2>/dev/null || cat /proc/swaps 2>/dev/null || true
+        free -m
