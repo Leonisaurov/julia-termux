@@ -76,6 +76,7 @@ jobs:
     - name: Build Julia via Docker
       run: |
         ./scripts/run-docker.sh bash -c '
+          export TERMUX_PROOT_DISABLED=1 &&
           cd /home/builder/termux-packages &&
           ./build-package.sh -I -s --format debian -j 2 -f julia
         '
