@@ -83,10 +83,6 @@ VOLUMES=(
     --volume "$REPOROOT:$CONTAINER_HOME_DIR/julia-termux${SEC_SELINUX}"
     --volume "$HOME/.termux-build:$CONTAINER_HOME_DIR/.termux-build${SEC_SELINUX}"
 )
-# Pass /dev/fuse if available (needed by termux-packages overlay filesystem)
-if [ -e /dev/fuse ]; then
-    VOLUMES+=(--device /dev/fuse --cap-add CAP_SYS_ADMIN)
-fi
 
 # Docker tty detection
 if [ -t 1 ]; then

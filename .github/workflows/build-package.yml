@@ -68,13 +68,6 @@ jobs:
         chmod +x "$TP_DIR/packages/julia/build.sh"
         echo "build.sh copied to $TP_DIR/packages/julia/"
 
-    - name: Enable FUSE for overlay filesystem
-      run: |
-        sudo modprobe fuse 2>/dev/null || true
-        [ -e /dev/fuse ] || sudo mknod /dev/fuse c 10 229 2>/dev/null || true
-        sudo chmod 666 /dev/fuse 2>/dev/null || true
-        ls -la /dev/fuse
-
     - name: Fix cache permissions for Docker
       run: |
         mkdir -p ~/.termux-build
@@ -83,7 +76,13 @@ jobs:
     - name: Build Julia via Docker
       run: |
         ./scripts/run-docker.sh bash -c '
-          export TERMUX_PROOT_DISABLED=1 &&
+          # Disable fuse-overlayfs (GitHub AppArmor blocks FUSE mounts)
+          TP=/home/builder/termux-packages
+          if [ -f "$TP/scripts/build/toolchain/termux_setup_toolchain_29.sh" ]; then
+            sed -i "s|if ! mountpoint -q.*|if false; then|" \
+              "$TP/scripts/build/toolchain/termux_setup_toolchain_29.sh" || true
+          fi
+          export TERMUX_PROOT_DISABLED=1
           cd /home/builder/termux-packages &&
           ./build-package.sh -I -s --format debian -j 2 -f julia
         '
