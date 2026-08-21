@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del Proyecto julia-termux
 
-> Última actualización: 2026-08-20 ~16:30 CST
+> Última actualización: 2026-08-20 ~22:40 CST
 
 ---
 
@@ -36,14 +36,20 @@ tenga suficiente RAM libre.
 
 ## CI (GitHub Actions)
 
-**Status**: FALLANDO — 5 runs fallidos, 1 en progreso
+**Status**: FALLANDO — 6 runs fallidos (último: 32424126077)
 
-### Último error conocido
+### Último error conocido (run 32424126077 — 2026-08-20)
 ```
-Could NOT find ZLIB (missing: ZLIB_LIBRARY) (found version "1.3.1")
+CMake Error at cmake/config-ix.cmake:144 (message):
+  Failed to configure zlib
 ```
+**El fix `${TERMUX_PREFIX}` NO resolvió ZLIB.** El cmake sigue sin encontrar
+libz. Además fallaron 3 deps adicionales:
+- **curl**: fallo en configure (detalles pendientes de revisión)
+- **libgit2**: fallo en configure
+- **suitesparse**: `ld.lld: error: unable to find library -landroid-complex-math`
 
-### Causa raíz identificada
+### Causa raíz de ZLIB (persiste)
 Julia's `deps/llvm.mk` configura LLVM cmake con:
 ```makefile
 LLVM_CMAKE += -DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT="$(build_prefix)"
@@ -57,7 +63,7 @@ sysroot (`CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY`). Resultado:
 - Headers: encontrados (del host Ubuntu v1.3.1)
 - Librería: NO encontrada (busca en sysroot, no en Termux prefix)
 
-### Fix aplicado (H16)
+### Fix intentado (H16)
 En `packages/julia/build.sh`, sed-parchea `deps/llvm.mk` para usar
 `${TERMUX_PREFIX}` en lugar de `$(build_prefix)`:
 ```makefile
@@ -66,17 +72,13 @@ En `packages/julia/build.sh`, sed-parchea `deps/llvm.mk` para usar
 # Después:
 -DZLIB_ROOT="${TERMUX_PREFIX}" -DZLIB_LIBRARY="${TERMUX_PREFIX}/lib/libz.so" -DZLIB_INCLUDE_DIR="${TERMUX_PREFIX}/include"
 ```
-
-**Pendiente**: El fix H16 usa `${TERMUX_PREFIX}` con llaves pero el último run
-(32422559792) todavía mostraba `ERMUX_PREFIX` — significa que el sed anterior
-(usando `$TERMUX_PREFIX` sin llaves) fue el que se ejecutó. El fix con llaves
-(`${TERMUX_PREFIX}`) fue pushado pero el run actual (32424126077) está en
-progreso y debería usar el fix correcto.
+**Resultado**: NO funcionó — el sed puede no estar aplicándose correctamente,
+o el cmake toolchain sigue forzando la búsqueda al sysroot.
 
 ### Runs de CI
 | Run ID     | Status    | Error                              |
 |------------|-----------|-------------------------------------|
-| 32424126077| in_progress| (pendiente — primer run con fix {}) |
+| 32424126077| failure   | ZLIB + curl/libgit2/suitesparse     |
 | 32422559792| failure   | ZLIB: `ERMUX_PREFIX` (sin {})       |
 | 32420949217| failure   | ZLIB: `ERMUX_PREFIX` (sin {})       |
 | 32337297450| failure   | ZLIB: cmake no lo encuentra         |
@@ -90,7 +92,7 @@ progreso y debería usar el fix correcto.
 4. **nounset** — `_JULIA_TERMUX_ROOT: unbound variable`. Fix: declarar globalmente
 5. **Package names** — `openblas` → `libopenblas`, `gmp` → `libgmp`, `p7zip` eliminado
 6. **cmake not found** — Docker es Ubuntu, no Termux. Fix: `apt-get install cmake`
-7. **ZLIB_LIBRARY** — cmake busca en sysroot, no en Termux prefix. Fix: H16
+7. **ZLIB_LIBRARY** — cmake busca en sysroot, no en Termux prefix. Fix: H16 (falló)
 
 ---
 
@@ -110,12 +112,13 @@ progreso y debería usar el fix correcto.
 
 ## Lo que Sigue
 
-1. **Esperar run 32424126077** — Si `${TERMUX_PREFIX}` con llaves funciona,
-   LLVM configurará correctamente con ZLIB
-2. **Si funciona**: El build de CI tardará ~30-60min (compila LLVM + Julia)
-3. **Recolectar release**: El artifact `.deb` se publica en `julia-latest`
+1. **Debug ZLIB en CI** — El sed con `${TERMUX_PREFIX}` no funciona. Necesario:
+   - Verificar que el sed se aplica correctamente en `termux_step_pre_configure()`
+   - O pasar ZLIB paths directamente via `LLVM_CMAKE` en `build.sh` (no sed)
+   - Posiblemente `-DCMAKE_FIND_ROOT_PATH` necesita incluir Termux prefix
+2. **Investigar curl/libgit2/suitesparse** — 3 deps fallidos en CI step 1
+3. **Build local**: Relanzar con `--continue` cuando el usuario lo autorice
 4. **Probar en Termux**: Instalar el `.deb` y verificar que `julia --version` funciona
-5. **Build local**: Relanzar con `--continue` cuando el dispositivo tenga RAM libre
 
 ---
 
