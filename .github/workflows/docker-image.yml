@@ -7,6 +7,8 @@ on:
       - 'scripts/Dockerfile'
       - 'scripts/setup-ubuntu.sh'
       - 'scripts/setup-android-sdk.sh'
+      - '.github/workflows/docker-image.yml'
+      - '.github/actions/zram/**'
 
 jobs:
   update:
