@@ -19,6 +19,10 @@ ejecución limpia reproducible cuando no exista caché.
   dentro de una variable de Make no llegan al shell como se esperaba.
 - Invalidar únicamente `CMakeCache.txt`/`CMakeFiles` de LLVM cuando contienen
   el zlib host incorrecto, conservando los objetos LLVM ya compilados.
+- Mantener el contenedor en la arquitectura nativa del runner y configurar
+  explícitamente `HOSTCC/HOSTCXX` para las herramientas LLVM ejecutables.
+- Mantener un Dockerfile derivado de `ghcr.io/termux/package-builder` para que
+  el workflow de imagen tenga una fuente real y reproducible.
 
 ## Verificación
 
@@ -28,3 +32,5 @@ ejecución limpia reproducible cuando no exista caché.
 - Búsqueda de rutas temporales prohibidas en los scripts afectados.
 - Revisión del log de CI para confirmar que CMake usa el zlib target y no
   `/lib/libz.so`.
+- Confirmar que `llvm-min-tblgen` se genera como herramienta host y que el
+  workflow Docker encuentra `scripts/Dockerfile`.

@@ -251,6 +251,10 @@ EOF
     cat > Make.user <<-EOF
 XC_HOST = aarch64-linux-android
 OS = Linux
+# Force LLVM's CROSS_TOOLCHAIN_FLAGS_NATIVE path: LLVM build tools such as
+# llvm-min-tblgen must run on the x86_64 CI host, not on Android aarch64.
+override HOSTCC = clang
+override HOSTCXX = clang++
 JULIA_CPU_TARGET = generic
 AR = llvm-ar
 RANLIB = llvm-ranlib
@@ -327,6 +331,9 @@ termux_step_make() {
         cat > Make.user << 'MEOF'
 XC_HOST = aarch64-linux-android
 OS = Linux
+# Native compiler for LLVM helper programs (the target CC is cross clang).
+override HOSTCC = clang
+override HOSTCXX = clang++
 JULIA_CPU_TARGET = generic
 AR = llvm-ar
 RANLIB = llvm-ranlib
