@@ -1,51 +1,92 @@
-name: 'Enable zram'
-description: 'Enable zram swap for memory-intensive builds'
+name: zram
+description: Build, cache, and enable zram on GitHub-hosted Linux runners
 inputs:
   algorithm:
-    description: 'Compression algorithm (lz4, zstd, lzo, lz4hc)'
-    default: 'zstd'
+    description: Compression algorithm used by zram
+    default: zstd
   size:
-    description: 'Size of zram device (e.g., 16G)'
-    default: '16G'
+    description: Maximum compressed swap size
+    default: 16G
   priority:
-    description: 'Swap priority'
+    description: Swap priority
     default: '100'
   device_name:
-    description: 'zram device name'
-    default: '/dev/zram0'
+    description: zram device to activate
+    default: /dev/zram0
 runs:
-  using: 'composite'
+  using: composite
   steps:
-    - name: Enable zram
+    - name: Resolve runner kernel
+      id: kernel
       shell: bash
       run: |
-        ZRAM_DEV="${{ inputs.device_name }}"
-        ZRAM_SIZE="${{ inputs.size }}"
-        ZRAM_ALGO="${{ inputs.algorithm }}"
-        ZRAM_PRIORITY="${{ inputs.priority }}"
+        set -euo pipefail
+        full_kernel_version="$(uname -r)"
+        kernel_version="$(printf '%s\n' "$full_kernel_version" | grep -o '^[0-9.]*')"
+        tar_kernel_version="${kernel_version%\.0}"
+        test -n "$kernel_version"
+        {
+          echo "full=$full_kernel_version"
+          echo "version=$kernel_version"
+          echo "tar=$tar_kernel_version"
+          echo "modules=/lib/modules/$full_kernel_version"
+        } >> "$GITHUB_OUTPUT"
 
-        echo "=== Enabling zram ==="
-        echo "Device: $ZRAM_DEV"
-        echo "Size: $ZRAM_SIZE"
-        echo "Algorithm: $ZRAM_ALGO"
+    - name: Restore cached zram module
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .github/actions/zram/zram.ko.zst
+        key: zram-${{ steps.kernel.outputs.full }}-${{ hashFiles('.github/actions/zram/linux-kernel-signing-keys.gpg') }}-${{ hashFiles('.github/actions/zram/action.yml') }}
 
-        # Check if zram is already enabled
-        if [ -e "$ZRAM_DEV" ] && grep -q "$ZRAM_DEV" /proc/swaps 2>/dev/null; then
-          echo "zram already enabled, skipping"
-          exit 0
-        fi
+    - name: Build zram kernel module
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+        TAR_KERNEL_VERSION: ${{ steps.kernel.outputs.tar }}
+        MODULES_DIR: ${{ steps.kernel.outputs.modules }}
+      run: |
+        set -euo pipefail
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required on GitHub-hosted runners}"
+        build_dir="$(mktemp -d "$RUNNER_TEMP/opencode-zram.XXXXXX")"
+        trap 'rm -rf "$build_dir"' EXIT
+        cd "$build_dir"
+        curl -fsSLO "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/linux-${TAR_KERNEL_VERSION}.tar.xz"
+        curl -fsSLO "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/linux-${TAR_KERNEL_VERSION}.tar.sign"
+        gpg --import "$GITHUB_WORKSPACE/.github/actions/zram/linux-kernel-signing-keys.gpg"
+        unxz "linux-${TAR_KERNEL_VERSION}.tar.xz"
+        gpg --verify "linux-${TAR_KERNEL_VERSION}.tar.sign"
+        tar -xf "linux-${TAR_KERNEL_VERSION}.tar"
+        cd "linux-${TAR_KERNEL_VERSION}/drivers/block/zram"
+        make -C "$MODULES_DIR/build" M="$PWD" -j"$(nproc)"
+        zstd -q -f zram.ko -o "$GITHUB_WORKSPACE/.github/actions/zram/zram.ko.zst"
 
-        # Try to enable zram
-        if ! command -v zramctl &>/dev/null; then
-          echo "zramctl not found, trying direct sysfs..."
-          echo "$ZRAM_ALGO" | sudo tee /sys/block/zram0/comp_algorithm 2>/dev/null || true
-          echo "$ZRAM_SIZE" | sudo tee /sys/block/zram0/disksize 2>/dev/null || true
-          sudo mkswap "$ZRAM_DEV" 2>/dev/null || true
-          sudo swapon "$ZRAM_DEV" -p "$ZRAM_PRIORITY" 2>/dev/null || true
-        else
-          sudo zramctl -f -s "$ZRAM_SIZE" -a "$ZRAM_ALGO" | sudo xargs -I{} sh -c "sudo mkswap {} && sudo swapon {} -p $ZRAM_PRIORITY" || true
-        fi
+    - name: Enable zram module
+      shell: bash
+      env:
+        MODULES_DIR: ${{ steps.kernel.outputs.modules }}
+        DEVICE_NAME: ${{ inputs.device_name }}
+        ALGORITHM: ${{ inputs.algorithm }}
+        SIZE: ${{ inputs.size }}
+        PRIORITY: ${{ inputs.priority }}
+      run: |
+        set -euo pipefail
+        test -s .github/actions/zram/zram.ko.zst
+        sudo install -D -m 0644 .github/actions/zram/zram.ko.zst "$MODULES_DIR/kernel/zram.ko.zst"
+        sudo depmod
+        sudo modprobe zram
+        sudo swapoff "$DEVICE_NAME" 2>/dev/null || true
+        sudo zramctl --reset "$DEVICE_NAME" 2>/dev/null || true
+        sudo zramctl --find --algorithm "$ALGORITHM" --size "$SIZE"
+        sudo mkswap -U clear "$DEVICE_NAME" >/dev/null
+        sudo swapon --discard --priority "$PRIORITY" "$DEVICE_NAME"
+        sudo swapon --show
+        sudo zramctl "$DEVICE_NAME"
 
-        echo "=== zram status ==="
-        swapon --show 2>/dev/null || cat /proc/swaps 2>/dev/null || true
-        free -m
+    - name: Save zram module cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .github/actions/zram/zram.ko.zst
+        key: zram-${{ steps.kernel.outputs.full }}-${{ hashFiles('.github/actions/zram/linux-kernel-signing-keys.gpg') }}-${{ hashFiles('.github/actions/zram/action.yml') }}
