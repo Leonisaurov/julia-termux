@@ -15,6 +15,10 @@ ejecución limpia reproducible cuando no exista caché.
   las dependencias normales de `make` y de la nueva clave de caché.
 - Mantener publicación con permisos de escritura en un job posterior y dejar
   el job de compilación con permisos mínimos.
+- Pasar rutas absolutas al zlib target en `deps/llvm.mk`; las variables `${...}`
+  dentro de una variable de Make no llegan al shell como se esperaba.
+- Invalidar únicamente `CMakeCache.txt`/`CMakeFiles` de LLVM cuando contienen
+  el zlib host incorrecto, conservando los objetos LLVM ya compilados.
 
 ## Verificación
 
@@ -22,3 +26,5 @@ ejecución limpia reproducible cuando no exista caché.
 - Validación YAML/actionlint si están disponibles.
 - Comprobación de claves, artefactos, permisos y dependencias del workflow.
 - Búsqueda de rutas temporales prohibidas en los scripts afectados.
+- Revisión del log de CI para confirmar que CMake usa el zlib target y no
+  `/lib/libz.so`.

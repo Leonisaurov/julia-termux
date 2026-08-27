@@ -4,4 +4,5 @@
 - [x] Activar ccache dentro del contenedor Docker.
 - [x] Eliminar el force-refresh del build de Julia.
 - [x] Separar compilación y publicación por permisos.
-- [x] Ejecutar validaciones estáticas y revisar el diff.
+- [x] Revisar el log y corregir la expansión incorrecta de ZLIB en CMake.
+- [ ] Validar, publicar y confirmar el nuevo workflow de CI.
