@@ -82,6 +82,7 @@ VOLUMES=(
     --volume "$TP_DIR:$CONTAINER_HOME_DIR/termux-packages${SEC_SELINUX}"
     --volume "$REPOROOT:$CONTAINER_HOME_DIR/julia-termux${SEC_SELINUX}"
     --volume "$HOME/.termux-build:$CONTAINER_HOME_DIR/.termux-build${SEC_SELINUX}"
+    --volume "$HOME/.cache/julia-termux/ccache:$CONTAINER_HOME_DIR/.cache/ccache${SEC_SELINUX}"
 )
 
 # Docker tty detection

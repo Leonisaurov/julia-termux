@@ -1,0 +1,24 @@
+# Plan: builds incrementales de Julia en CI
+
+## Objetivo
+
+Hacer que las ejecuciones de GitHub Actions reutilicen el árbol de trabajo,
+objetos compilados y descargas de Julia/LLVM entre commits, manteniendo una
+ejecución limpia reproducible cuando no exista caché.
+
+## Decisiones
+
+- Usar claves de caché estables basadas en inputs del build, no en `run_id`.
+- Mantener el estado de `~/.termux-build` separado de la caché de ccache.
+- Montar ccache dentro del contenedor y activar wrappers para compiladores C/C++.
+- Quitar `-f` del build incremental de Julia; la invalidación queda a cargo de
+  las dependencias normales de `make` y de la nueva clave de caché.
+- Mantener publicación con permisos de escritura en un job posterior y dejar
+  el job de compilación con permisos mínimos.
+
+## Verificación
+
+- `bash -n` para scripts ejecutados por CI.
+- Validación YAML/actionlint si están disponibles.
+- Comprobación de claves, artefactos, permisos y dependencias del workflow.
+- Búsqueda de rutas temporales prohibidas en los scripts afectados.

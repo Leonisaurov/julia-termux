@@ -18,7 +18,8 @@ cd /home/builder/termux-packages
 # cross-compilation configuration.
 echo "=== Installing host build tools ==="
 sudo apt-get update -qq
-sudo apt-get install -yqq cmake ninja-build zlib1g-dev libtinfo-dev 2>/dev/null || true
+sudo apt-get install -yqq ccache cmake ninja-build zlib1g-dev libtinfo-dev
+. /home/builder/julia-termux/scripts/setup-ccache-docker.sh
 
 # --- Cross-compilation dependencies ---
 # Each package is built AND installed into the Termux prefix by
