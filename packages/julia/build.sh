@@ -156,7 +156,7 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
         # CMAKE_SYSTEM_NAME=Linux. Force its native sub-build so TableGen
         # helpers run on the x86_64 CI host instead of Android aarch64.
         if ! grep -q 'CROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE' deps/llvm.mk 2>/dev/null; then
-            sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_C_COMPILER=$$(which clang);-DCMAKE_CXX_COMPILER=$$(which clang++)"' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
+            sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=/usr/bin/clang;-DCMAKE_CXX_COMPILER=/usr/bin/clang++;-DCMAKE_C_FLAGS=;-DCMAKE_CXX_FLAGS=;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS="' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
         fi
     fi
     # Preserve compiled LLVM objects, but discard only the stale CMake
@@ -167,6 +167,15 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
         rm -rf "${_llvm_cmake_cache%/CMakeCache.txt}/CMakeFiles"
     fi
     unset _llvm_cmake_cache
+    # The host-tools sub-build has its own cache.  A previous run could have
+    # configured it with Android's target compiler and linker flags; remove
+    # only that helper cache so the expensive target LLVM objects remain.
+    _llvm_native_cache="deps/scratch/llvm-julia-18.1.7-4/build_Release/NATIVE/CMakeCache.txt"
+    if [ -f "$_llvm_native_cache" ] && grep -Eq 'android-r[0-9]+-api|/data/data/com.termux/files/usr|android-support' "$_llvm_native_cache" 2>/dev/null; then
+        rm -f "$_llvm_native_cache"
+        rm -rf "${_llvm_native_cache%/CMakeCache.txt}/CMakeFiles"
+    fi
+    unset _llvm_native_cache
     # OpenBLAS f_check assumes GCC always reports a numeric major version.
     for openblas_fcheck in deps/scratch/openblas-*/f_check; do
         [ -f "$openblas_fcheck" ] || continue
