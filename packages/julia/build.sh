@@ -152,11 +152,17 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     # expanded by make first.
     if [ -f deps/llvm.mk ]; then
         sed -i "s|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT=\"\$(build_prefix)\"|-DLLVM_ENABLE_ZLIB=FORCE_ON -DZLIB_ROOT=\"${TERMUX_PREFIX}\" -DZLIB_LIBRARY=\"${TERMUX_PREFIX}/lib/libz.so\" -DZLIB_INCLUDE_DIR=\"${TERMUX_PREFIX}/include\"|" deps/llvm.mk 2>/dev/null || echo "Warning: H16 ZLIB cmake patch failed" >&2
+        # LLVM 18 does not see CMAKE as cross-compiling when Julia passes
+        # CMAKE_SYSTEM_NAME=Linux. Force its native sub-build so TableGen
+        # helpers run on the x86_64 CI host instead of Android aarch64.
+        if ! grep -q 'CROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE' deps/llvm.mk 2>/dev/null; then
+            sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_C_COMPILER=$$(which clang);-DCMAKE_CXX_COMPILER=$$(which clang++)"' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
+        fi
     fi
     # Preserve compiled LLVM objects, but discard only the stale CMake
     # configuration created with the host /lib/libz.so.
     _llvm_cmake_cache="deps/scratch/llvm-julia-18.1.7-4/build_Release/CMakeCache.txt"
-    if [ -f "$_llvm_cmake_cache" ] && grep -Eq 'ZLIB_LIBRARY:FILEPATH=/lib/libz\.so$|ZLIB_ROOT:PATH=/lib$' "$_llvm_cmake_cache" 2>/dev/null; then
+    if [ -f "$_llvm_cmake_cache" ] && { grep -Eq 'ZLIB_LIBRARY:FILEPATH=/lib/libz\.so$|ZLIB_ROOT:PATH=/lib$' "$_llvm_cmake_cache" 2>/dev/null || ! grep -q 'LLVM_USE_HOST_TOOLS' "$_llvm_cmake_cache" 2>/dev/null; }; then
         rm -f "$_llvm_cmake_cache"
         rm -rf "${_llvm_cmake_cache%/CMakeCache.txt}/CMakeFiles"
     fi

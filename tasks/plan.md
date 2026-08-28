@@ -23,6 +23,11 @@ ejecución limpia reproducible cuando no exista caché.
   explícitamente `HOSTCC/HOSTCXX` para las herramientas LLVM ejecutables.
 - Mantener un Dockerfile derivado de `ghcr.io/termux/package-builder` para que
   el workflow de imagen tenga una fuente real y reproducible.
+- Activar explícitamente `LLVM_USE_HOST_TOOLS` y
+  `CROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE`, porque el build reporta `Linux` aunque
+  el compilador sea cross-target.
+- Validar la imagen Docker sin publicarla a GHCR; el token del repositorio no
+  tiene autorización garantizada para crear/escribir ese paquete.
 
 ## Verificación
 
@@ -34,3 +39,5 @@ ejecución limpia reproducible cuando no exista caché.
   `/lib/libz.so`.
 - Confirmar que `llvm-min-tblgen` se genera como herramienta host y que el
   workflow Docker encuentra `scripts/Dockerfile`.
+- Confirmar que Docker termina sin el paso `write_package` y que la acción
+  Julia supera la fase de TableGen.
