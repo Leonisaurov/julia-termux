@@ -479,8 +479,7 @@ julia-termux/
 │   │   └── zram/
 │   │       └── action.yml          # Acción composite para zram
 │   └── workflows/
-│       ├── build-package.yml        # CI/CD principal
-│       └── docker-image.yml         # Build de imagen Docker personalizada
+│       └── build-package.yml        # Imagen Docker + Julia + release
 ├── ndk-patches/
 │   └── 29/
 │       └── .gitkeep                 # Parches NDK (futuro)

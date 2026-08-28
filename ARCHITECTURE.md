@@ -44,7 +44,6 @@
   - [Matriz de Compatibilidad bionic](#matriz-de-compatibilidad-bionic)
 - [CI/CD Pipeline](#cicd-pipeline)
   - [Workflow build-package.yml](#workflow-build-packageyml)
-  - [Workflow docker-image.yml](#workflow-docker-imageyml)
   - [Zram Action](#zram-action)
 - [Troubleshooting Avanzado](#troubleshooting-avanzado)
   - [Anatomía de un Fallo de Build](#anatoma-de-un-fallo-de-build)
@@ -880,18 +879,15 @@ concurrency:
 ```
 Si se hace push mientras un build corre, el build anterior se cancela. Esto ahorra recursos y evita releases duplicados.
 
-### Workflow docker-image.yml
+### Imagen Docker del build
 
-**Archivo**: `.github/workflows/docker-image.yml`
-
-Construye una imagen Docker personalizada basada en `ghcr.io/termux/package-builder`. Se activa cuando cambian los scripts de setup.
-
-**Propósito**: Permite modificar el entorno de build (NDK, SDK, paquetes base) sin depender del registry oficial de termux-packages.
-
-**Proceso**:
-1. Build con Docker Buildx (con caché GHA)
-2. Push a `ghcr.io/$OWNER/package-builder:latest`
-3. El workflow `build-package.yml` usa esta imagen automáticamente
+La imagen Docker es una dependencia directa del build y se construye en el
+mismo job, antes de iniciar los contenedores de dependencias o Julia. El paso
+`Build CI package-builder image` usa `scripts/Dockerfile`, conserva la caché
+de BuildKit y carga la etiqueta local `julia-termux/package-builder:ci`.
+Los pasos posteriores pasan esa etiqueta mediante `TERMUX_BUILDER_IMAGE_NAME`
+a `scripts/run-docker.sh`; así no existe una imagen paralela que el build
+pueda ignorar ni una publicación GHCR necesaria para la corrección.
 
 ### Zram Action
 

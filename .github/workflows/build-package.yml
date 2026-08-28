@@ -77,12 +77,26 @@ jobs:
     - name: Verify Docker
       run: docker version
 
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build CI package-builder image
+      uses: docker/build-push-action@v6
+      with:
+        context: scripts/
+        load: true
+        tags: julia-termux/package-builder:ci
+        cache-from: type=gha,scope=package-builder
+        cache-to: type=gha,mode=max,scope=package-builder
+
     - name: Fix cache permissions for Docker
       run: |
         mkdir -p ~/.termux-build ~/.cache/julia-termux/ccache
         chmod 777 ~/.termux-build ~/.cache/julia-termux/ccache
 
     - name: Build Julia dependencies via Docker
+      env:
+        TERMUX_BUILDER_IMAGE_NAME: julia-termux/package-builder:ci
       run: |
         ./scripts/run-docker.sh bash -c '
           export TERMUX_PROOT_DISABLED=1
@@ -91,6 +105,8 @@ jobs:
         '
 
     - name: Build Julia incrementally via Docker
+      env:
+        TERMUX_BUILDER_IMAGE_NAME: julia-termux/package-builder:ci
       run: |
         ./scripts/run-docker.sh bash -c '
           export TERMUX_PROOT_DISABLED=1

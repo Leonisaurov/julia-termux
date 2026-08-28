@@ -8,4 +8,5 @@
 - [x] Corregir la generación host de `llvm-min-tblgen` y añadir `Dockerfile`.
 - [x] Activar explícitamente `LLVM_USE_HOST_TOOLS` y quitar la publicación GHCR
       no autorizada del workflow de imagen.
+- [x] Integrar la construcción Docker como dependencia directa del job Julia.
 - [ ] Validar, publicar y confirmar el nuevo workflow de CI.

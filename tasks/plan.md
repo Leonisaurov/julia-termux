@@ -28,6 +28,8 @@ ejecución limpia reproducible cuando no exista caché.
   el compilador sea cross-target.
 - Validar la imagen Docker sin publicarla a GHCR; el token del repositorio no
   tiene autorización garantizada para crear/escribir ese paquete.
+- Construir y cargar la imagen en el mismo job de Julia, antes de usarla, para
+  expresar la dependencia directamente y evitar workflows paralelos huérfanos.
 
 ## Verificación
 
@@ -41,3 +43,4 @@ ejecución limpia reproducible cuando no exista caché.
   workflow Docker encuentra `scripts/Dockerfile`.
 - Confirmar que Docker termina sin el paso `write_package` y que la acción
   Julia supera la fase de TableGen.
+- Confirmar que `TERMUX_BUILDER_IMAGE_NAME` apunta a la imagen local cargada.
