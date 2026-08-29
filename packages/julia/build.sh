@@ -156,7 +156,7 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
         # CMAKE_SYSTEM_NAME=Linux. Force its native sub-build so TableGen
         # helpers run on the x86_64 CI host instead of Android aarch64.
         if ! grep -q 'CROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE' deps/llvm.mk 2>/dev/null; then
-            sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=gcc;-DCMAKE_CXX_COMPILER=g++;-DCMAKE_C_FLAGS=-include/usr/include/stdint.h;-DCMAKE_CXX_FLAGS=-include/usr/include/stdint.h;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS="' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
+            sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=/usr/bin/x86_64-linux-gnu-gcc;-DCMAKE_CXX_COMPILER=/usr/bin/x86_64-linux-gnu-g++;-DCMAKE_C_FLAGS=-include/usr/include/stdint.h;-DCMAKE_CXX_FLAGS=-include/usr/include/stdint.h;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS="' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
         fi
     fi
     # Preserve compiled LLVM objects, but discard only the stale CMake

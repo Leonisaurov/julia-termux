@@ -6,7 +6,7 @@ FROM ${TERMUX_BUILDER_IMAGE}
 USER root
 RUN apt-get update -qq \
     && apt-get install -yqq --no-install-recommends \
-        ccache cmake ninja-build gcc g++ zlib1g-dev libtinfo-dev \
+        ccache cmake ninja-build gcc-x86-64-linux-gnu g++-x86-64-linux-gnu zlib1g-dev libtinfo-dev \
     && rm -rf /var/lib/apt/lists/*
 
 USER builder
