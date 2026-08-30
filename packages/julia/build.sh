@@ -158,7 +158,7 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
         # Replace this override on every run: deps/llvm.mk is inside the
         # persistent build tree and may contain a stale host-tool setting.
         sed -i '/CROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE/d' deps/llvm.mk 2>/dev/null || true
-        sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=/usr/bin/x86_64-linux-gnu-gcc;-DCMAKE_CXX_COMPILER=/usr/bin/x86_64-linux-gnu-g++;-DCMAKE_C_FLAGS=-include/usr/include/stdint.h;-DCMAKE_CXX_FLAGS=-include/usr/include/stdint.h;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS="' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
+        sed -i '/LLVM_ENABLE_ZLIB=FORCE_ON/a LLVM_CMAKE += -DLLVM_USE_HOST_TOOLS=ON -DCROSS_TOOLCHAIN_FLAGS_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=/usr/bin/x86_64-linux-gnu-gcc;-DCMAKE_CXX_COMPILER=/usr/bin/x86_64-linux-gnu-g++;-DCMAKE_C_FLAGS=-include/usr/include/stdint.h;-DCMAKE_CXX_FLAGS=-include/usr/include/stdint.h;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS=" -DCROSS_TOOLCHAIN_FLAGS_LLVM_NATIVE="-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_C_COMPILER=/usr/bin/x86_64-linux-gnu-gcc;-DCMAKE_CXX_COMPILER=/usr/bin/x86_64-linux-gnu-g++;-DCMAKE_C_FLAGS=-include/usr/include/stdint.h;-DCMAKE_CXX_FLAGS=-include/usr/include/stdint.h;-DCMAKE_EXE_LINKER_FLAGS=;-DCMAKE_SHARED_LINKER_FLAGS=;-DCMAKE_MODULE_LINKER_FLAGS="' deps/llvm.mk 2>/dev/null || echo "Warning: H16 native LLVM tools patch failed" >&2
     fi
     # Preserve compiled LLVM objects, but discard only the stale CMake
     # configuration created with the host /lib/libz.so.
@@ -171,11 +171,14 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     # The host-tools sub-build has its own cache.  A previous run could have
     # configured it with Android's target compiler and linker flags; remove
     # only that helper cache so the expensive target LLVM objects remain.
-    _llvm_native_cache="deps/scratch/llvm-julia-18.1.7-4/build_Release/NATIVE/CMakeCache.txt"
-    if [ -f "$_llvm_native_cache" ] && { grep -Eq 'android-r[0-9]+-api|/data/data/com.termux/files/usr|android-support' "$_llvm_native_cache" 2>/dev/null || ! grep -q '/usr/bin/x86_64-linux-gnu-gcc' "$_llvm_native_cache" 2>/dev/null || ! grep -q '/usr/bin/x86_64-linux-gnu-g++' "$_llvm_native_cache" 2>/dev/null; }; then
-        rm -f "$_llvm_native_cache"
-        rm -rf "${_llvm_native_cache%/CMakeCache.txt}/CMakeFiles"
-    fi
+    for _llvm_native_cache in \
+        deps/scratch/llvm-julia-18.1.7-4/build_Release/NATIVE/CMakeCache.txt \
+        deps/scratch/llvm-julia-18.1.7-4/build_Release/NATIVE/NATIVE/CMakeCache.txt; do
+        if [ -f "$_llvm_native_cache" ] && { grep -Eq 'android-r[0-9]+-api|/data/data/com.termux/files/usr|android-support' "$_llvm_native_cache" 2>/dev/null || ! grep -q '/usr/bin/x86_64-linux-gnu-gcc' "$_llvm_native_cache" 2>/dev/null || ! grep -q '/usr/bin/x86_64-linux-gnu-g++' "$_llvm_native_cache" 2>/dev/null; }; then
+            rm -f "$_llvm_native_cache"
+            rm -rf "${_llvm_native_cache%/CMakeCache.txt}/CMakeFiles"
+        fi
+    done
     unset _llvm_native_cache
     # OpenBLAS f_check assumes GCC always reports a numeric major version.
     for openblas_fcheck in deps/scratch/openblas-*/f_check; do
