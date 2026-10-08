@@ -1,6 +1,14 @@
 # Termux/Bionic port: libwhich.c
 #
-# No dlinfo(RTLD_DI_LINKMAP) on Bionic; use the dl_iterate_phdr path.
+# No dlinfo(RTLD_DI_LINKMAP) on Bionic, so -p answers from the dl_iterate_phdr
+# map.  The first entry of that map is the Android linker, and asking dlopen for
+# it kills the process when the linker configuration allows the request: the CI
+# rootfs has no /linkerconfig/ld.config.txt, so libwhich died there answering
+# "" (rc=1), base/Makefile:166 throws its stderr away with 2>/dev/null, and
+# julia-base reported "Unable to locate libpcre2-8.so on your system"
+# (run 37811196090).  On a phone the same request is refused by the namespace
+# and harmless.  RTLD_NOLOAD only asks about images already mapped, so the
+# linker is never opened.
 --- a/libwhich.c
 +++ b/libwhich.c
 @@ -224,7 +224,7 @@
@@ -12,3 +20,17 @@
  const char *dlpath(void *handle, struct vector_t name)
  {
      struct link_map *map;
+@@ -237,7 +237,12 @@
+ const char *dlpath(void *handle, struct vector_t name)
+ {
+     for (size_t i = 0; i < name.length; i++) {
+-        void *h2 = dlopen(name.data[i], RTLD_LAZY);
++        // The main executable and the [vdso] are in the map without a path.
++        if (name.data[i][0] != '/')
++            continue;
++        // RTLD_NOLOAD, because the first entry of this map is the Android linker
++        // and dlopening it for real kills the process.
++        void *h2 = dlopen(name.data[i], RTLD_LAZY | RTLD_NOLOAD);
+         if (h2)
+             dlclose(h2);
+         // If the handle is the same as what was passed in, return this image name
