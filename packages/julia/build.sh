@@ -23,11 +23,6 @@ else
 fi
 
 termux_step_pre_configure() {
-    # A) Fix LMDB para Android
-    if [ -f deps/lmdb.mk ]; then
-        sed -i '/CPPFLAGS.*MDB_USE_ROBUST/d' deps/lmdb.mk || echo "Warning: MDB_USE_ROBUST sed failed" >&2
-    fi
-
     # B) Fix libuv cross-compilation
     sed -i 's|--with-pic.*|--with-pic --disable-shared --host=aarch64-linux-android --build=x86_64-pc-linux-gnu $(CONFIGURE_COMMON) $(UV_FLAGS)|' deps/libuv.mk || echo "Warning: libuv.mk --host sed failed" >&2
 
@@ -45,15 +40,8 @@ termux_step_pre_configure() {
     # F) Remove -latomic (no necesario en ARM64)
     sed -i '/^OSLIBS.*--no-as-needed/s/ -latomic//' Make.inc || echo "Warning: Make.inc -latomic sed failed" >&2
 
-    # G) Remove -static-libstdc++ (Android usa libc++)
-    sed -i 's/-static-libstdc++//g' src/Makefile || echo "Warning: src/Makefile -static-libstdc++ sed failed" >&2
-
     # H) Disable ifunc detection en Android
     sed -i '/IFUNC_DETECT_SRC/,/^endif/d' Make.inc || echo "Warning: Make.inc IFUNC_DETECT sed failed" >&2
-
-    # I) Remove libc_nonshared.a
-    sed -i '/libc_nonshared.a/d' Makefile || echo "Warning: libc_nonshared.a sed failed" >&2
-    sed -i '/libc_nonshared.a/d' deps/csl.mk 2>/dev/null || true
 
     # J) Fix julia.expmap: LLVM -> Julia symbol version
     sed -i 's/@LLVM_SHLIB_SYMBOL_VERSION@/@JULIA_SHLIB_SYMBOL_VERSION@/' src/julia.expmap.in || echo "Warning: julia.expmap.in LLVM version sed failed" >&2
@@ -73,9 +61,6 @@ endif' Make.inc || echo "Warning: BUILDING_HOST_TOOLS guard sed failed" >&2
     # M) Source code fixes para bionic (Android)
     # H0: Excluir #error de libunwind
     sed -i 's/#if defined __linux__/#if defined __linux__ \&\& !defined(__ANDROID__)/' src/task.c 2>/dev/null || true
-
-    # H00: Excluir sys/sysinfo.h y sysinfo()
-    sed -i -e 's/#ifdef _OS_LINUX_/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/' -e 's/^#if defined(_OS_LINUX_)$/#if defined(_OS_LINUX_) \&\& !defined(__BIONIC__)/' src/codegen.cpp 2>/dev/null || true
 
     # H01: Excluir __register_frame/__deregister_frame
     sed -i '/defined(LLVM_SHLIB)/c\#if (defined(_OS_LINUX_) \&\& !defined(__BIONIC__)) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) \&\& defined(LLVM_SHLIB))' src/debuginfo.cpp 2>/dev/null || true
