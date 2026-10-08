@@ -1,14 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Static gate for packages/<pkg>/build.sh: replays the patch stage, the
-# endianness decision the patched tree makes, the configure stage and Julia's
-# own Make.inc parse against the real upstream tarball WITHOUT compiling
-# anything.
+# endianness decision the patched tree makes, the configure stage, Julia's own
+# Make.inc parse and the library lookups base/Makefile will ask the loader to
+# do - against the real upstream tarball WITHOUT compiling anything.
 #
 # Why this exists: a *.patch that no longer matches upstream silently produces a
-# `.rej` and a half-patched tree, and a USE_SYSTEM_* flag pointing at a library
-# Termux does not ship only fails ~70 minutes into a CI build.  All of it is
-# answerable in seconds from the tarball and $PREFIX, so CI is not allowed to
-# start until it is.
+# `.rej` and a half-patched tree, a USE_SYSTEM_* flag pointing at a library
+# Termux does not ship only fails ~70 minutes into a CI build, and a loader that
+# cannot resolve a soname fails inside julia-base after LLVM is already built.
+# All of it is answerable in seconds from the tarball and $PREFIX, so CI is not
+# allowed to start until it is.
 #
 # Usage: bash scripts/rehearse-recipe.sh [package]      (default: julia)
 #   REHEARSAL_KEEP=1  leave the workdir in place for inspection
@@ -389,6 +390,28 @@ for mk in "$SRCDIR"/deps/*.mk; do
 	done
 done
 
+# ---- the loader has to answer the question base/Makefile will ask it ----
+# base/Makefile:166 runs `libwhich -p <soname> 2>/dev/null` for every
+# USE_SYSTEM_* library and turns an empty answer into "System library symlink
+# failure" inside the julia-base target - 47 minutes into run 37811196090, with
+# the loader's own reason discarded by that 2>/dev/null.  The source the replay
+# just fetched and patched is the binary the build will use, so ask it here.
+echo
+echo "===== library resolution ====="
+lib_fail=0
+if [ -f "$WORK/dep-libwhich/libwhich.c" ]; then
+	bash "$REPO_ROOT/scripts/probe-library-resolution.sh" \
+		--src-dir "$WORK/dep-libwhich" \
+		--patch "$SRCDIR/deps/patches/termux-libwhich-dlinfo-android.patch" \
+		> "$WORK/libres.txt" 2>&1
+	lib_fail=$?
+	sed 's/^/  /' "$WORK/libres.txt"
+	lib_fail=$((lib_fail > 0))
+else
+	echo "FAIL  no extracted libwhich source to build the probe tool from"
+	lib_fail=1
+fi
+
 # ---- declared packages must exist in the Termux repository ----
 echo
 echo "===== declared packages ====="
@@ -409,13 +432,13 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$repo_fail"
+printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$repo_fail"
 if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
-	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
+	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it)"
 exit 0

@@ -90,8 +90,9 @@ jobs:
           set -uo pipefail
           . "$TERMUX_BUILDER_ENV"
           # The gate replays termux_step_patch_package() and the recipe's configure
-          # hooks over the real Julia tarball, then probes every USE_SYSTEM_* flag
-          # against this prefix.
+          # hooks over the real Julia tarball, probes every USE_SYSTEM_* flag
+          # against this prefix, and builds the pinned libwhich to ask it the same
+          # question base/Makefile will ask at julia-base time.
           export REHEARSAL_CACHE="$RUNNER_TEMP/rehearse-cache"
           bash scripts/rehearse-recipe.sh "$PKG"
 
@@ -151,6 +152,18 @@ jobs:
         with:
           path: output
           key: julia-deb-v1-aarch64-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}-${{ hashFiles('packages/julia/**') }}
+
+      - name: Probe the loader's library resolution
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$TERMUX_BUILDER_ENV"
+          # The gate's "library resolution" section measured this in the lint
+          # job's environment; this repeats it in the build job's own, in the
+          # exact environment base/Makefile will ask libwhich for these names.
+          # Cheap enough to be a precondition of a 47-minute compile.
+          bash scripts/probe-library-resolution.sh
 
       - name: Build the package
         if: steps.cache.outputs.cache-hit != 'true'

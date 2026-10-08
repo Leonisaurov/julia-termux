@@ -24,7 +24,7 @@ final (`sysimg`, `base/`, empaquetado) y la verificación en dispositivo.
 | Gates estáticos locales | OK y en el DAG de CI |
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
-| `src/` de Julia | en curso |
+| `src/` de Julia | OK (flisp y el runtime se compilan); `julia-base` aborta al enlazar las system libs |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -100,7 +100,7 @@ se convirtió en gate local cuando era reproducible fuera del runner.
 | 37795904301 | 14:51 | `Make.inc:1434 … without a functioning fortran compiler!` | `Make.inc:541` fija `FC := gfortran`; Termux no trae `gfortran` y OpenBLAS usa `-DC_LAPACK=ON` | `FC := $PREFIX/bin/clang` en `Make.user` + sonda `-dM -E/__GNUC__` (`755fab0`) |
 | 37801929253 | 15:34 | CMake: `/usr/bin/gmake: no such file or directory` | CMake ancla `CMAKE_MAKE_PROGRAM` a la ruta del host; `make` de Termux no provee `gmake` | `$PREFIX/bin/gmake -> make` + sonda que configura **y compila** un proyecto (`e2802de`) |
 | 37803324627 | 15:45 | 4 errores en `src/flisp/flisp.c:991` | ciclo de macros: `BYTE_ORDER → __BYTE_ORDER` (dtypes.h) y `__BYTE_ORDER → BYTE_ORDER` (`sys/endian.h`); el preprocessor corta la recursión, ambos valen 0 y `#if BYTE_ORDER == BIG_ENDIAN` es `0 == 0`, así que se compila la rama big-endian, cuyo `#define` en `flisp.c:990` carece de barra de continuación (bug latente de upstream) | `#ifndef` alrededor de los tres `#define` de dtypes.h + sección "endianness macros" en el gate (`f1f9638`) |
-| 37811196090 | 16:44 | — | hipótesis en curso: flisp compila y el build pasa `julia_flisp.boot.inc.phony` | |
+| 37811196090 | 16:44 | `System library symlink failure: Unable to locate libpcre2-8.so on your system!` → `Makefile:93: julia-base` a los ~47 min; flisp y LLVM ya estaban compilados | en medición: `base/Makefile:166` hace `libwhich -p <soname> 2>/dev/null` y se queda con `[ -e "$REALPATH" ]`; el `2>/dev/null` descarta el motivo y en todo el log no hay ni un `ln -sf`, o sea que el sondeo no resolvió nada. En el dispositivo el mismo binario resuelve los 18 sonames solo por el RUNPATH que inyecta clang; el runner no tiene `/linkerconfig/ld.config.txt` | sonda `scripts/probe-library-resolution.sh`: compila el `libwhich` parcheado y corre la cadena de shell exacta sobre cada soname; entra como sección "library resolution" del gate del job lint y como precondición del build, así la pregunta se responde en minutos y no a los 47 |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
@@ -112,7 +112,9 @@ y `Warning: git information unavailable`.
 ### Avance medible del build
 
 `12 ms` (ni arrancaba) → `4 min` (parches + configure) → `4.5 min`
-(deps/libuv/LBT) → `43 min` (LLVM 18.1.7-4 completo; fallo en flisp) → en curso.
+(deps/libuv/LBT) → `43 min` (LLVM 18.1.7-4 completo; flisp caía en endianness) →
+`~47 min` (flisp compila, `src/` se construye, muere en `julia-base` al enlazar
+las system libs).
 
 ---
 
