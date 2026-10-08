@@ -454,6 +454,73 @@ else
 	triplet_fail=1
 fi
 
+# ---- the versioned names Julia's own code dlopens ----
+# The alias step in base/Makefile answers the names *make* asks for, and it
+# answers them unversioned (usr/lib/julia/libgmp.so).  The Julia code in the
+# sysimage asks them versioned: base/gmp.jl:32 says "libgmp.so.10", base/mpfr.jl:40
+# "libmpfr.so.6", and the bionic loader matches file names, so it answered
+# "could not load library" 49 minutes into run 37851961397, at sysimage.mk:129.
+# Two independent sources describe this build - make's call sites and the .jl
+# literals - so the gate crosses them: a versioned name nothing answers is only
+# harmless while make does not require that library either.
+echo
+echo "===== dlopen'ed versioned sonames ====="
+soname_fail=0
+if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" 2>"$WORK/sonames.txt"); then
+	sed 's/^/  /' "$WORK/sonames.txt"
+	aliased=$(printf '%s\n' "$verdicts" | awk '$1 == "alias" { print $2 }')
+	printf '  %s name(s) need an alias before make runs\n' "$(printf '%s\n' "$aliased" | grep -c .)"
+	orphans=$(printf '%s\n' "$verdicts" | awk '$1 == "absent" { print $2 }' |
+		while read -r name; do
+			[ -n "$name" ] || continue
+			unversioned=${name%%.so*}.so
+			if printf '%s\n' "${symlinked:-}" | grep -qxF -e "$name" -e "$unversioned"; then
+				echo "$name"
+			fi
+		done)
+	if [ -n "$orphans" ]; then
+		printf '%s\n' "$orphans" | while read -r name; do
+			printf '  FAIL  julia-base requires that library and nothing answers %s\n' "$name"
+		done
+		soname_fail=1
+	fi
+	printf '%s\n' "$verdicts" | awk '$1 == "absent" { print $2 }' |
+		while read -r name; do
+			[ -n "$name" ] || continue
+			unversioned=${name%%.so*}.so
+			printf '%s\n' "${symlinked:-}" | grep -qxF -e "$name" -e "$unversioned" ||
+				printf '  note  %s: nothing answers it, and julia-base does not require that library either\n' "$name"
+		done
+	# An alias that is derived but never created is the same run, 49 minutes later.
+	# So the recipe must ask for it, and ask *before* make starts, because the
+	# sysimage bootstraps inside make.  Reaching the derivation through a helper
+	# function counts, as long as that function is the one that runs it.
+	if [ -n "$aliased" ]; then
+		make_body=$(awk '/^termux_step_make\(\)/ { f = 1 } f { print } f && /^}/ { exit }' "$RECIPE")
+		producers=$(awk '
+			/^[a-z_][a-z0-9_]*\(\)[[:space:]]*\{/ { name = $1; sub(/\(\)/, "", name); inb = 1; next }
+			inb { if ($0 ~ /soname-aliases\.sh/) { print name; inb = 0 } else if ($0 == "}") inb = 0 }' "$RECIPE")
+		make_at=$(printf '%s\n' "$make_body" | grep -n -m1 '^[[:space:]]*make ' | cut -d: -f1)
+		wired=0
+		for fn in soname-aliases.sh $producers; do
+			line=$(printf '%s\n' "$make_body" | grep -n -m1 -E "(^|[^a-z0-9_.-])${fn}([^a-z0-9_.-]|$)" | cut -d: -f1)
+			[ -n "$line" ] || continue
+			if [ -z "$make_at" ] || [ "$line" -lt "$make_at" ]; then wired=1; fi
+		done
+		if [ "$wired" = 1 ]; then
+			echo "  OK    build.sh creates them in usr/lib/julia before make starts"
+		else
+			echo "  FAIL  build.sh does not create the aliases the source demands before make starts"
+			soname_fail=1
+		fi
+	fi
+	echo
+else
+	sed 's/^/  /' "$WORK/sonames.txt"
+	echo "  FAIL  the demanded sonames could not be read from the staged tree"
+	soname_fail=1
+fi
+
 # ---- declared packages must exist in the Termux repository ----
 echo
 echo "===== declared packages ====="
@@ -474,14 +541,14 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$repo_fail"
+printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s sonames=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$soname_fail" "$repo_fail"
 if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
 	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] \
-	|| [ "$triplet_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
+	|| [ "$triplet_fail" -gt 0 ] || [ "$soname_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, and the triplet the sysimage embeds parses)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, the triplet the sysimage embeds parses, and every versioned soname the sysimage dlopens has an answer)"
 exit 0
