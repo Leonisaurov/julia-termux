@@ -69,7 +69,14 @@ jobs:
           # database build-package.sh's on-device path dies immediately: it calls
           # `apt install -y termux-elf-cleaner` (termux_step_start_build.sh:124),
           # and apt on an unprovisioned prefix returns 100.
-          sudo mkdir -p "$ROOT/var/lib/dpkg" "$ROOT/var/lib/apt" "$ROOT/tmp" "$ROOT/etc/apt"
+          sudo mkdir -p "$ROOT/var/lib/dpkg" "$ROOT/tmp" "$ROOT/etc/apt"
+          # apt's own state, created BEFORE the chown so the runner user owns it:
+          # it refused to run over "Could not open lock file .../lists/lock
+          # (13: Permission denied)" when these arrived from sudo mkdir.
+          # /data/data/com.termux/cache is where Termux's apt puts its archives.
+          sudo mkdir -p "$ROOT/var/lib/apt/lists/partial" "$ROOT/var/lib/apt/extended_states.d" \
+            "$ROOT/etc/apt/apt.conf.d" "$ROOT/etc/apt/preferences.d" \
+            /data/data/com.termux/cache/apt/archives/partial
           : > status.part
           for f in debs/*.deb; do
             d=$(mktemp -d)
@@ -97,7 +104,6 @@ jobs:
           # IPv6; these runners resolve IPv4 only, so apt gets "No address associated with
           # hostname" and every `apt install` inside build-package.sh dies with code 100.
           echo 'deb [trusted=yes] https://packages.termux.dev/apt/termux-main stable main' | sudo tee "$ROOT/etc/apt/sources.list" > /dev/null
-          sudo mkdir -p "$ROOT/etc/apt/apt.conf.d" "$ROOT/etc/apt/preferences.d" "$ROOT/var/lib/apt/lists/partial"
           printf 'Acquire::ForceIPv4 "true";\n' | sudo tee "$ROOT/etc/apt/apt.conf.d/99force-ipv4" > /dev/null
           rc=0
           apt update >../apt-update.log 2>&1 || rc=$?
@@ -171,6 +177,14 @@ jobs:
             readelf -h "../unpacked/$ELF" | grep -E 'Class|Machine|Type'
             readelf -d "../unpacked/$ELF" | grep -E 'RUNPATH|RPATH|TEXTREL' || echo "  (no RUNPATH/RPATH/TEXTREL)"
           done
+          # Without this the job reports success while the build failed: every
+          # command here ends in `|| rc=$?` or a grep, so the step status is
+          # meaningless.  The deb is the only thing that proves the path works.
+          if [ "$rc" -ne 0 ] || ! ls ../output/libandroid-glob_*_aarch64.deb >/dev/null 2>&1; then
+            echo "GATE FAIL: build rc=$rc and no libandroid-glob deb in ../output"
+            exit 1
+          fi
+          echo "GATE PASS: on-device build produced $(ls ../output/libandroid-glob_*_aarch64.deb)"
 
       - name: Record what the runner gave us
         if: always()
