@@ -198,11 +198,25 @@ runs:
       run: |
         set -euo pipefail
         ROOT=/data/data/com.termux/files/usr
+        # libtermux-exec is loaded into every process started from a shell that has
+        # sourced this environment, and it rewrites every /bin, /etc, /lib, /usr and
+        # /var path handed to execve() and open().  So from inside such a shell the
+        # runner's own tools are unreachable however they are spelled: run
+        # 37786844653 asked for /usr/bin/curl and got the prefix's bionic curl, whose
+        # resolver has no DNS here.  Copies outside the aliased prefixes keep working,
+        # and with them the host's resolver.
+        HOSTBIN="$HOME/.termux-builder-hostbin"
+        mkdir -p "$HOSTBIN"
+        for t in curl df; do
+          cp "$(command -v "$t")" "$HOSTBIN/$t"
+        done
+        "$HOSTBIN/curl" --version | head -1
         # LD_PRELOAD stays out of GITHUB_ENV: preloading a bionic library into the
         # runner's own glibc tools makes every command print an ld.so error.  Steps that
         # run Termux binaries source this file instead.
         cat > "$HOME/.termux-builder-env.sh" <<EOF
         export TERMUX_BUILDER_ROOT=$ROOT
+        export TERMUX_BUILDER_HOSTBIN=$HOSTBIN
         export LD_PRELOAD=$ROOT/lib/libtermux-exec.so
         export PATH=$ROOT/bin:\$PATH
         export TMPDIR=$ROOT/tmp
@@ -218,11 +232,9 @@ runs:
         # cannot run must not end the job (run 37784767638 died on exactly this).
         {
           echo "uname: $(uname -m)  nproc: $(nproc)  dpkg arch: $(dpkg --print-architecture)"
-          # /usr/bin/df because Termux's `df` execs /system/bin/df, which the rootfs
-          # does not carry; LD_PRELOAD has to go because bionic's libtermux-exec
-          # preloaded into a glibc binary makes its loader reject the prefix's libc
-          # ("invalid ELF header" for /lib/aarch64-linux-gnu/libc.so).
-          env -u LD_PRELOAD /usr/bin/df -h "$ROOT" | tail -1
+          # The host's df: Termux's execs /system/bin/df, which the rootfs does not
+          # carry, and asking for /usr/bin/df from here would be rewritten back to it.
+          "$TERMUX_BUILDER_HOSTBIN/df" -h "$ROOT" | tail -1
           free -m | head -3
         } || true
         # The tools the build actually execs.  Their packages being installed (the
