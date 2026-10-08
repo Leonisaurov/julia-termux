@@ -12,10 +12,16 @@
 #	library, one small clang call and the loader's stderr visible answers it in
 #	seconds.
 #
+# Every stage is reported before the next one runs, because the failure mode
+# found in run 37811196090 killed the tool without printing anything: a stdout
+# line is only trustworthy if the protocol guarantees it was flushed, and an
+# empty stdout means the binary never reached main().
+#
 # The built-in probe is libwhich's patched `-p` algorithm (dlopen the soname,
-# then dl_iterate_phdr and re-dlopen each recorded name until the handle
-# matches), compiled by the clang this environment builds with, so it carries
-# the same PT_INTERP and RUNPATH as the binary deps/libwhich.mk produces.
+# then walk dl_iterate_phdr and ask each recorded image about its handle with
+# RTLD_NOLOAD), compiled by the clang this environment builds with, so it
+# carries the same PT_INTERP, RUNPATH and DT_NEEDED as the binary
+# deps/libwhich.mk produces.
 #
 # Usage: bash scripts/probe-library-resolution.sh [--src-dir DIR] [--patch FILE]
 #	--src-dir DIR  DIR holds libwhich.c (the pinned upstream source); the real
@@ -33,7 +39,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--src-dir) LW_SRC="${2:?--src-dir needs a directory}"; shift 2 ;;
 		--patch) LW_PATCH="${2:?--patch needs a file}"; shift 2 ;;
-		-h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,36p' "$0"; exit 0 ;;
 		*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -77,15 +83,24 @@ int main(int argc, char **argv)
 {
 	if (argc != 2) { fprintf(stderr, "usage: probe <soname>\n"); return 2; }
 	void *h = dlopen(argv[1], RTLD_LAZY);
-	if (!h) { printf("NOLOAD %s %s\n", argv[1], dlerror()); return 1; }
+	/* Reported before anything else can kill this process: "LOAD <name> ok"
+	 * means the loader found the library, whatever the answer is after it
+	 * means it did not, and no line at all means main() never ran. */
+	printf("LOAD %s %s\n", argv[1], h ? "ok" : dlerror());
+	fflush(stdout);
+	if (!h) return 1;
 	dl_iterate_phdr(collect, NULL);
 	const char *found = NULL;
 	for (size_t i = 0; i < n_names; i++) {
-		void *h2 = dlopen(names[i], RTLD_LAZY);
+		/* The main executable and the [vdso] carry no path here. */
+		if (names[i][0] != '/') continue;
+		/* RTLD_NOLOAD because the first entry of this list is the Android
+		 * linker, and dlopening it for real is fatal. */
+		void *h2 = dlopen(names[i], RTLD_LAZY | RTLD_NOLOAD);
 		if (h2) dlclose(h2);
 		if (h2 == h) { found = names[i]; break; }
 	}
-	if (!found) { printf("NOLIST %s loaded but dl_iterate_phdr matched no name\n", argv[1]); return 1; }
+	if (!found) { printf("NOMATCH %s loaded, but no mapped image carries that handle\n", argv[1]); return 1; }
 	if (access(found, F_OK) != 0) { printf("NOTHERE %s loader answered \"%s\", which does not exist\n", argv[1], found); return 1; }
 	printf("RESOLVED %s %s\n", argv[1], found);
 	return 0;
@@ -121,27 +136,59 @@ echo "===== loader resolution probe ====="
 echo "env:  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}  LD_PRELOAD=${LD_PRELOAD:-<unset>}"
 echo "linker: $(ls -l /system/bin/linker64 2>/dev/null | sed 's/^.*linker64/linker64/' || echo 'no /system/bin/linker64')"
 for cfg in /linkerconfig/ld.config.txt /system/etc/ld.config.txt; do
-	[ -e "$cfg" ] && echo "config: $cfg present" || echo "config: $cfg absent"
+	if ls -d "$cfg" >/dev/null 2>&1; then echo "config: $cfg readable"
+	elif [ -e "$(dirname "$cfg")" ]; then echo "config: $cfg not readable by this uid"
+	else echo "config: $cfg absent"; fi
 done
-readelf -d "$WORK/probe" | grep -E 'RUNPATH|RPATH' | sed 's/^/self:   /'
+readelf -d "$WORK/probe" | grep -E 'RUNPATH|RPATH|NEEDED' | sed 's/^/self:   /'
 readelf -lW "$WORK/probe" | sed -n 's@.*\[Requesting program interpreter: \(.*\)\]@self:   interp  \1@p'
-[ -n "$LW" ] && readelf -d "$LW" | grep -E 'RUNPATH|RPATH' | sed 's/^/libwhich: /'
+[ -n "$LW" ] && readelf -d "$LW" | grep -E 'RUNPATH|RPATH|NEEDED' | sed 's/^/libwhich: /'
 
 fail=0
+
+# Before blaming dlopen: does a binary built here even reach main()?  A dead-on-
+# arrival binary makes every library below look unresolvable.
+ctrl=$("$WORK/probe" 2>"$WORK/ctrl.txt"); ctrl_rc=$?
+if [ "$ctrl_rc" -eq 2 ]; then
+	printf 'CTRL  %-28s a freshly built binary reaches main() here\n' "startup"
+else
+	printf 'FAIL  %-28s a freshly built binary exits %s without reaching main():\n' "startup" "$ctrl_rc"
+	[ -n "$ctrl" ] && printf '%s\n' "$ctrl" | sed 's/^/         stdout: /' | head -4
+	sed 's/^/         stderr: /' "$WORK/ctrl.txt" | head -8
+	fail=$((fail + 1))
+fi
+
 for lib in $LIBS; do
 	if [ ! -e "$PREFIX/lib/$lib" ] && [ ! -e "$PREFIX/lib/julia/$lib" ]; then
 		printf 'MISS  %-28s absent from %s/lib (nothing to resolve)\n' "$lib" "$PREFIX"
 		continue
 	fi
 	out=$("$WORK/probe" "$lib" 2>"$WORK/stderr.txt"); rc=$?
-	if [ "$rc" -eq 0 ]; then
-		printf 'OK    %-28s %s\n' "$lib" "${out#RESOLVED $lib }"
-	else
-		printf 'FAIL  %-28s %s\n' "$lib" "${out#*"$lib "}"
-		[ -s "$WORK/stderr.txt" ] && sed 's/^/         stderr: /' "$WORK/stderr.txt" | head -4
+	first=$(printf '%s\n' "$out" | sed -n '1p')
+	case "$first" in
+	"LOAD $lib ok")
+		path=$(printf '%s\n' "$out" | sed -n 's@^RESOLVED '"$lib"' @@p')
+		if [ -n "$path" ]; then
+			printf 'OK    %-28s loader bound %s\n' "$lib" "$path"
+		else
+			printf 'FAIL  %-28s loaded (rc=%s) but the handle matched no mapped image: %s\n' \
+				"$lib" "$rc" "${out#*LOAD $lib ok}"
+			fail=$((fail + 1))
+		fi
+		;;
+	"LOAD $lib "*)
+		printf 'FAIL  %-28s dlopen failed: %s\n' "$lib" "${first#LOAD $lib }"
+		sed 's/^/         stderr: /' "$WORK/stderr.txt" | head -8
 		ls -l "$PREFIX/lib/$lib" 2>/dev/null | sed 's/^/         file:  /'
 		fail=$((fail + 1))
-	fi
+		;;
+	*)
+		printf 'FAIL  %-28s the probe printed nothing (rc=%s): it died before main()\n' "$lib" "$rc"
+		sed 's/^/         stderr: /' "$WORK/stderr.txt" | head -8
+		ls -l "$PREFIX/lib/$lib" 2>/dev/null | sed 's/^/         file:  /'
+		fail=$((fail + 1))
+		;;
+	esac
 
 	# The consumer's own shell statement: base/Makefile asks libwhich, sends its
 	# stderr to /dev/null and only tests `[ -e "$REALPATH" ]`.  Reproduce that,
@@ -150,7 +197,7 @@ for lib in $LIBS; do
 		REALPATH=$("$LW" -p "$lib" 2>"$WORK/lw-stderr.txt"); lw_rc=$?
 		if [ ! -e "$REALPATH" ]; then
 			printf 'FAIL  %-28s libwhich -p rc=%s answered "%s"\n' "$lib" "$lw_rc" "$REALPATH"
-			[ -s "$WORK/lw-stderr.txt" ] && sed 's/^/         stderr: /' "$WORK/lw-stderr.txt" | head -4
+			sed 's/^/         stderr: /' "$WORK/lw-stderr.txt" | head -8
 			fail=$((fail + 1))
 			continue
 		fi
