@@ -23,6 +23,17 @@ RECIPE="$REPO_ROOT/packages/$PKG/build.sh"
 
 CACHE_DIR="${REHEARSAL_CACHE:-$PREFIX/tmp/$PKG-rehearse-cache}"
 KEEP="${REHEARSAL_KEEP:-0}"
+# CI sources the builder environment before running this, which puts the
+# materialised rootfs first on PATH - and bionic's curl has no working DNS on
+# the GitHub ARM runners ("Could not resolve host: github.com", run
+# 37786008765).  The host's curl resolves the same names, but preloading
+# bionic's libtermux-exec into a glibc binary makes its loader reject the
+# prefix's libc, so the preload has to go with it.  On a phone /usr/bin/curl
+# does not exist and the Termux curl is the right one.
+FETCH=(curl)
+if [ -x /usr/bin/curl ]; then
+	FETCH=(env -u LD_PRELOAD /usr/bin/curl)
+fi
 WORK="$(mktemp -d "$PREFIX/tmp/$PKG-rehearse.XXXXXX")"
 cleanup() {
 	if [ "$KEEP" = 1 ]; then
@@ -52,7 +63,7 @@ if [ ! -f "$TARBALL" ]; then
 		exit 3
 	fi
 	echo "== downloading source tarball (sources only, no compilation)"
-	curl --fail --location --retry 3 -o "$TARBALL.part" "$SRCURL" || { echo "download failed" >&2; exit 3; }
+	"${FETCH[@]}" --fail --location --retry 3 -o "$TARBALL.part" "$SRCURL" || { echo "download failed" >&2; exit 3; }
 	mv "$TARBALL.part" "$TARBALL"
 fi
 if [ -n "$SHA256" ]; then
@@ -297,7 +308,7 @@ for mk in "$SRCDIR"/deps/*.mk; do
 		if [ ! -d "$dep_src" ]; then
 			dep_tgz="$CACHE_DIR/$dep-$sha.tar.gz"
 			if [ ! -f "$dep_tgz" ]; then
-				if ! curl -sS --fail --location --retry 3 -o "$dep_tgz.part" "${url//\$1/$sha}"; then
+				if ! "${FETCH[@]}" -sS --fail --location --retry 3 -o "$dep_tgz.part" "${url//\$1/$sha}"; then
 					rm -f "$dep_tgz.part"
 					printf 'FAIL  %-40s could not fetch %s\n' "$(basename "$patchfile")" "${url//\$1/$sha}"
 					dep_patch_fail=$((dep_patch_fail + 1))
