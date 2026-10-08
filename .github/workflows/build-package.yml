@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Upload the bundle to the mutable julia-latest release (off by default: a green build is not the same claim as a published package)
+        description: "Upload the bundle to the mutable julia-latest release (off by default: a green build is not the same claim as a published package)"
         type: boolean
         default: false
 
