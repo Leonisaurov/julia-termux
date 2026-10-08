@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del proyecto julia-termux
 
-> Última actualización: 2026-10-08 ~18:15 UTC
+> Última actualización: 2026-10-08 ~19:40 UTC
 >
 > Este archivo es el **registro de evidencia**: qué se intentó, qué falló, por
 > qué y qué gate local cerró ese fallo. Las decisiones de diseño viven en
@@ -74,20 +74,37 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   real, decisión de endianness del árbol parcheado, `termux_step_pre_configure`
   + `termux_step_configure`, `Make.inc` acepta el `Make.user` generado,
   cada `USE_SYSTEM_* := 1` respaldado por una librería/binario real, los
-  `patches/deps/*.patch` aplican al commit que `deps/*.mk` descarga, y cada
-  paquete declarado existe en el repo de Termux.
+  `patches/deps/*.patch` aplican al commit que `deps/*.mk` descarga, cada
+  paquete declarado existe en el repo de Termux, y la sonda de resolución corre
+  sobre **la lista que `base/Makefile` va a pedir**, no sobre una lista propia.
+- `scripts/symlinked-libraries.sh` — le pide a `make` los nombres que
+  `base/Makefile` resolverá vía `libwhich`: extrae el bloque de symlinks del
+  árbol **parcheado** (condicionales incluidos), lo incluye sobre `Make.inc` con
+  el `Make.user` generado y reemplaza `symlink_system_library` por una grabadora,
+  de modo que `versioned_libname`, `LIBMNAME`/`LIBBLASNAME`/`LIBLAPACKNAME`,
+  los guardas `USE_SYSTEM_*` y los `ALLOW_FAILURE` se resuelven como en el build.
+  `scripts/probe-library-resolution.sh` solo trabaja con esa lista (el job lint
+  se la pasa al job build por output del job); un nombre ausente del prefijo es
+  `FAIL`, porque `julia-base` aborta justo ahí.
 - `.github/scripts/termux-closure-resolver.py` — cierre de dependencias del
   índice de Termux (roots = bootstrap recortado + Tier 1 de
   `scripts/setup-termux.sh` + `termux-elf-cleaner` + `TERMUX_PKG_*DEPENDS` de la
   receta).
 
-**Hipótesis del próximo run**: `julia-base` no abortaba porque el loader del
-runner ignorara `$PREFIX/lib`, sino porque el propio `libwhich` moría al
-re-`dlopen`ear `/system/bin/linker64`; con el mapa sondeado en `RTLD_NOLOAD`
-las 18 system libs responden y `make -C base` pasa de los symlinks. Que el gate
-del job lint dé `resolution=0` sobre el tool real es la parte barata de este
-run (~2 min); si aun así el loader del runner no boundea ningún soname, el
-`LOAD <soname> <motivo>` de la sonda lo dice en la misma línea.
+**Hipótesis del próximo run**: `julia-base` volvió a abortar en un symlink, ahora
+en `Makefile:250`, porque el prefijo del runner no tiene `libblas.so`: con
+`USE_SYSTEM_BLAS := 1` Make.inc fija `LIBBLASNAME := libblas` y ese alias lo
+aporta el paquete split `blas-openblas`, que la receta no declaraba (declarado
+queda en `TERMUX_PKG_BUILD_DEPENDS`; el symlink resultante es absoluto a
+`$PREFIX/lib/libopenblas.so`, que ya está en runtime). La lista que se sonda es
+la que derivan `make` + `base/Makefile` — 19 nombres, dos más que los 18
+inventados que el gate venía verificando contra la librería equivocada. El gate
+local ya pasó sobre esa lista (`resolution=0`, `libblas.so → libopenblas.so`,
+gate12 19:35 UTC) y la closure del action la resuelve (`blas-openblas_0.3.34`,
+115 paquetes, `unresolved=0`). Como `packages/**` entra en la clave de caché,
+este run paga la compilación completa (~45 min): si vuelve a caer, el punto es
+`Makefile:252` (`liblapack.so`) o más allá de los symlinks, y la lista derivada
+lo dice antes de que arranque el build.
 
 ---
 
@@ -110,6 +127,7 @@ convirtió en gate local cuando era reproducible fuera del runner.
 | 37803324627 | 15:45 | 4 errores en `src/flisp/flisp.c:991` | ciclo de macros: `BYTE_ORDER → __BYTE_ORDER` (dtypes.h) y `__BYTE_ORDER → BYTE_ORDER` (`sys/endian.h`); el preprocessor corta la recursión, ambos valen 0 y `#if BYTE_ORDER == BIG_ENDIAN` es `0 == 0`, así que se compila la rama big-endian, cuyo `#define` en `flisp.c:990` carece de barra de continuación (bug latente de upstream) | `#ifndef` alrededor de los tres `#define` de dtypes.h + sección "endianness macros" en el gate (`f1f9638`) |
 | 37811196090 | 16:44 | `System library symlink failure: Unable to locate libpcre2-8.so on your system!` → `Makefile:93: julia-base` a los ~47 min; flisp y LLVM ya estaban compilados | el `libwhich` parcheado **moría al responder**, no era el `dlopen` del soname: su rama sin `dlinfo` re-`dlopen`ea cada imagen que `dl_iterate_phdr` reporta para comparar el handle, y la primera es `/system/bin/linker64`. En el teléfono ese pedido se rechaza por namespace y devuelve `NULL` inofensivamente; en el runner, sin `/linkerconfig/ld.config.txt`, `/system/bin` sí es ruta de búsqueda y bionic se niega a cargarse a sí mismo (`error: linker cannot load itself`) matando el proceso **con stdout sin flush** → `libwhich -p` respondió `""` con rc=1 y el `2>/dev/null` de `base/Makefile:166` se llevó la única pista | `RTLD_LAZY \| RTLD_NOLOAD` al sondear el mapa (la rama Apple de libwhich ya lo usa) + saltar las entradas sin `/` inicial, en `patches/deps/termux-libwhich-dlinfo-android.patch`; verificado con el tool real en el gate: 18/18 `loader bound …` y 18 `TOOL` |
 | 37820685855 | 18:00 | `GATE: FAIL` con `resolution=1` en el job lint: el build ni empezó | la sonda nueva heredaba el algoritmo fatal de libwhich, así que reproducía el síntoma sin poder explicarlo: `FAIL  libpcre2-8.so` con el detalle vacío, porque el proceso moría antes de imprimir | la sonda reporta por etapas (`CTRL` de arranque, `LOAD <soname> ok` con `flush`, `NEEDED` del binario, stderr completo): un stdout vacío ahora significa "no llegó a `main()`" y un `LOAD … ok` prueba que el loader encontró la librería |
+| 37823556050 | 18:20 | `GATE: PASS` y `PROBE: PASS` (`18 soname(s) probed, 0 failure(s)`) en el runner, pero a los ~44 min `System library symlink failure: Unable to locate libblas.so on your system!` → `Makefile:250` → `Makefile:93: julia-base`; el fix de libwhich sí había funcionado (`ln -sf $PREFIX/lib/libpcre2-8.so usr/lib/julia/libpcre2-8.so` en el build real) | el nombre que faltaba no era el que se verificaba: con `USE_SYSTEM_BLAS := 1`, Make.inc fija `LIBBLASNAME := libblas` / `LIBLAPACKNAME := liblapack` y `base/Makefile` pregunta por **esos alias**, que en Termux pertenecen al paquete split `blas-openblas` (dueño de `libblas.so`, `libblas.so.3`, `liblapack.so*`) — la receta solo declaraba `libopenblas`. Y tanto el gate como la sonda llevaban la lista escrita a mano con `libopenblas.so`, así que `resolution=0` mediía otra cosa | `blas-openblas` en `TERMUX_PKG_BUILD_DEPENDS` (el symlink que crea `julia-base` es absoluto a `$PREFIX/lib/libopenblas.so`, ya cubierto en runtime); `scripts/symlinked-libraries.sh` deriva los 19 nombres con `make` sobre el árbol parcheado y `rehearse-recipe.sh`/el job build los consumen (`PROBE_LIBS` del output `lint.probe_libs`); `MISS` pasó a ser `FAIL`: un nombre que el prefijo no tiene es exactamente el abort de `julia-base` |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
