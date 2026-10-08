@@ -146,6 +146,11 @@ termux_link_soname_aliases() {
 	local _dir="${1:?usage: termux_link_soname_aliases <directory>}"
 	local _verdict _want _target _out
 
+	# The aliases have to exist before make, and usr/lib/julia is created *by*
+	# make, so at this point the directory does not exist yet: run 37859841658
+	# died 4 minutes in with "ln: failed to create symbolic link
+	# 'usr/lib/julia/libcurl.so.4': No such file or directory".
+	mkdir -p "${_dir}"
 	if ! _out=$(bash "${TERMUX_PKG_BUILDER_DIR}/soname-aliases.sh" \
 		"${TERMUX_PKG_SRCDIR}" "${TERMUX_PREFIX}/lib"); then
 		termux_error_exit "soname-aliases.sh could not derive the versioned names"
