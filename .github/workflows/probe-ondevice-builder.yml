@@ -93,15 +93,21 @@ jobs:
           echo "--- sources shipped by the apt package ---"
           cat "$ROOT/etc/apt/sources.list"
           ls -l "$ROOT/etc/apt/trusted.gpg.d" | head -5
+          # The shipped default uses packages-cf.termux.dev, whose AAAA record is served over
+          # IPv6; these runners resolve IPv4 only, so apt gets "No address associated with
+          # hostname" and every `apt install` inside build-package.sh dies with code 100.
+          echo 'deb [trusted=yes] https://packages.termux.dev/apt/termux-main stable main' | sudo tee "$ROOT/etc/apt/sources.list" > /dev/null
+          sudo mkdir -p "$ROOT/etc/apt/apt.conf.d" "$ROOT/etc/apt/preferences.d" "$ROOT/var/lib/apt/lists/partial"
+          printf 'Acquire::ForceIPv4 "true";\n' | sudo tee "$ROOT/etc/apt/apt.conf.d/99force-ipv4" > /dev/null
           rc=0
           apt update >../apt-update.log 2>&1 || rc=$?
           echo "apt update rc=$rc"
           grep -vE 'linkerconfig|ld.config.txt' ../apt-update.log | tail -15
           # The exact call termux_step_start_build.sh makes on the device path.
           rc=0
-          apt install -y termux-elf-cleaner >../apt-install.log 2>&1 || rc=$?
+          apt install -y --allow-unauthenticated termux-elf-cleaner >../apt-install.log 2>&1 || rc=$?
           echo "apt install termux-elf-cleaner rc=$rc"
-          grep -vE 'linkerconfig|ld.config.txt' ../apt-install.log | tail -10
+          grep -vE 'linkerconfig|ld.config.txt' ../apt-install.log | tail -12
           command -v termux-elf-cleaner || echo "termux-elf-cleaner still missing"
 
       - name: Environment sanity
@@ -138,7 +144,10 @@ jobs:
           # GitHub runs this with `bash -e`, so capture rc instead of letting a
           # non-zero build abort the step before the log is printed.
           rc=0
-          timeout 1500 ./build-package.sh -s --format debian -o ../output libandroid-glob >../build.log 2>&1 || rc=$?
+          # -f: libandroid-glob arrives as a dependency of something in the closure, so
+          # without it the builder prints "installed - skipping" and exits 0 without
+          # compiling.  Forcing is what makes this actually exercise the compile path.
+          timeout 1500 ./build-package.sh -s -f --format debian -o ../output libandroid-glob >../build.log 2>&1 || rc=$?
           echo "build rc=$rc"
           # Every bionic exec on a Linux kernel prints this; it hides real output.
           clean() { grep -vE 'linkerconfig|ld.config.txt' "$1"; }
