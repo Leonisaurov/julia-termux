@@ -22,11 +22,21 @@ TMPD="${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}"
 for wf in "${WORKFLOWS[@]}"; do
 	bodies="$(mktemp -d "$TMPD/julia-lint.XXXXXX")"
 	if ! python3 - "$wf" "$bodies" <<'PY'
-import sys, yaml, pathlib
+import sys, re, yaml, pathlib
 wf, outdir = sys.argv[1], sys.argv[2]
 def die(msg):
-    print(f"YAML  {msg}", file=sys.stderr)
+    print(f"CHECK {msg}", file=sys.stderr)
     raise SystemExit(1)
+def bad_expression(text):
+    for m in re.finditer(r"\$\{\{(.*?)\}\}", text, re.S):
+        # String literals legitimately contain those words ('Build and publish').
+        expr = re.sub(r"'[^']*'", "''", m.group(1))
+        hit = re.search(r"\b(and|or|not)\b", expr)
+        if hit:
+            line = text[: m.start()].count("\n") + 1
+            return (f"{wf}:{line}: ${{{{...}}}} uses the word '{hit.group(1)}' - "
+                    "GitHub expressions only have &&, || and !")
+    return None
 def where(exc):
     mark = getattr(exc, "problem_mark", None) or getattr(exc, "mark", None)
     if mark is None:
@@ -38,7 +48,8 @@ def where(exc):
 try:
     # A file that does not parse has no run blocks to check, and silently reporting zero
     # of them is how an unparseable workflow once passed this gate.
-    doc = yaml.safe_load(pathlib.Path(wf).read_text())
+    text = pathlib.Path(wf).read_text()
+    doc = yaml.safe_load(text)
 except yaml.MarkedYAMLError as e:
     # PyYAML re-raises the inner scanner error, so the traceback is 40 frames of noise;
     # the position is the whole message here.
@@ -48,6 +59,11 @@ except Exception as e:
     die(f"{wf}: {type(e).__name__}: {e}")
 if not isinstance(doc, dict):
     die(f"{wf}: not a mapping at top level")
+# A word operator makes GitHub reject the whole file before it creates any job, so the
+# run costs a queue slot and reports nothing - PyYAML accepts it, this gate has to.
+problem = bad_expression(text)
+if problem:
+    die(problem)
 jobs = doc.get("jobs")
 if not jobs and isinstance(doc.get("runs"), dict):
     # Composite action: runs.steps has the same shape as a job's steps.
@@ -72,7 +88,7 @@ if skipped:
     print(f"skipped {skipped} non-bash run blocks", file=sys.stderr)
 PY
 	then
-		printf 'FAIL  %s (yaml)\n' "${wf#"$REPO_ROOT"/}"
+		printf 'FAIL  %s (file rejected)\n' "${wf#"$REPO_ROOT"/}"
 		fail=$((fail + 1))
 		rm -rf "$bodies"
 		continue
