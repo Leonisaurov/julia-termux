@@ -1,5 +1,9 @@
 name: Build Julia for Termux
 
+run-name: >-
+  ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')
+  && 'Build and publish' or 'Build (no publish)' }}
+
 # Architecture (October 2026): the build runs termux-packages in its own on-device
 # mode on an arm64 runner, so host == target and Termux's clang is the compiler.
 # That is what makes the bundled LLVM 18.1.7 buildable at all: the x86_64 Docker
@@ -8,7 +12,8 @@ name: Build Julia for Termux
 #
 # DAG: lint (static gate) -> build (.deb) -> bundle (.pkg.tar.xz + tar.gz) -> publish.
 # Nothing expensive starts unless the gate passed; see AGENTS.md "no CI run without
-# the local gate".
+# the local gate".  publish is opt-in (workflow_dispatch input) - a green run is not a
+# reason to move a release pointer.
 
 on:
   push:
@@ -19,7 +24,12 @@ on:
       - '.github/actions/**'
       - '.github/scripts/**'
       - '.github/workflows/build-package.yml'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the bundle to the mutable julia-latest release (off by default: a green build is not the same claim as a published package)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -325,6 +335,9 @@ jobs:
   publish:
     name: Publish the mutable release
     needs: bundle
+    # `github.event.inputs` rather than `inputs`: this job also runs for push events,
+    # where the dispatch inputs do not exist at all.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
