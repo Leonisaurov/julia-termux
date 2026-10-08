@@ -214,12 +214,17 @@ runs:
         echo "TERMUX_BUILDER_ENV=$HOME/.termux-builder-env.sh" >> "$GITHUB_ENV"
         echo "PREFIX=$ROOT" >> "$GITHUB_ENV"
         set -o allexport; . "$HOME/.termux-builder-env.sh"; set +o allexport
-        echo "uname: $(uname -m)  nproc: $(nproc)  dpkg arch: $(dpkg --print-architecture)"
-        # /usr/bin/df and not the one this PATH now resolves first: Termux's coreutils
-        # `df` is a wrapper that execs /system/bin/df, and the rootfs only ships the
-        # dynamic loader (run 37784040618 ended here with exit 127).
-        /usr/bin/df -h "$ROOT" | tail -1
-        free -m | head -3
+        # Everything above the tool table is a report, not a check: a diagnostic that
+        # cannot run must not end the job (run 37784767638 died on exactly this).
+        {
+          echo "uname: $(uname -m)  nproc: $(nproc)  dpkg arch: $(dpkg --print-architecture)"
+          # /usr/bin/df because Termux's `df` execs /system/bin/df, which the rootfs
+          # does not carry; LD_PRELOAD has to go because bionic's libtermux-exec
+          # preloaded into a glibc binary makes its loader reject the prefix's libc
+          # ("invalid ELF header" for /lib/aarch64-linux-gnu/libc.so).
+          env -u LD_PRELOAD /usr/bin/df -h "$ROOT" | tail -1
+          free -m | head -3
+        } || true
         # The tools the build actually execs.  Their packages being installed (the
         # step above) does not mean they are on PATH: ar, ranlib, objcopy and readelf
         # come from Termux's llvm, not from binutils, and 7z from 7zip.
@@ -236,7 +241,3 @@ runs:
           printf 'info  %-20s %s\n' "$t" "$(command -v "$t" || echo absent)"
         done
         exit "$fail"
-        for t in clang ld.lld make cmake ninja pkg-config perl python git patch sed grep \
-                 dpkg-deb file tar curl patchelf which dpkg apt bsdtar xz zstd 7z; do
-          printf '%-12s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
-        done
