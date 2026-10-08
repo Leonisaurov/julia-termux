@@ -32,6 +32,8 @@ bash scripts/lint-workflows.sh                      # YAML + bash -n + uses: loc
 bash scripts/rehearse-recipe.sh                     # replay de parches/configure + sonda
 bash scripts/probe-library-resolution.sh --tree DIR # el loader y el tool real, sobre la
                                                     # lista que derivan base/Makefile+Make.inc
+bash scripts/embedded-triplet.sh TREE               # el BUILD_TRIPLET que el sysimage
+                                                    # va a empotrar, derivado con make
 
 # CI/CD (GitHub Actions)
 git push origin main                                # Dispara build-package.yml
@@ -53,6 +55,15 @@ ls output/                                          # Paquetes compilados
   parcheado.  Una lista escrita a mano es un segundo fuente de verdad y ya costó
   un run: el gate medía `libopenblas.so` mientras `julia-base` moría en
   `libblas.so` (run 37823556050); ver `scripts/symlinked-libraries.sh`.
+- Un parche arregla la capa que **produce** el valor, no la que lo consume.
+  Reescribir el resultado de otra capa dentro de un consumidor borra la pista y no
+  arregla nada: `base-binaryplatforms.jl.patch` hacía `replace("-android" => "-gnu")`
+  dentro de `parse`, así que convertía el mensaje de error de
+  `contrib/normalize_triplet.py` —que `Make.inc:1380` había empotrado como
+  `const BUILD_TRIPLET` sin mirar el rc— en `aarch64-unknown-linux-gnu24`, y el
+  sysimage moría igual (run 37841320064).  Hoy lo canoniza
+  `packages/julia/contrib-normalize_triplet.py.patch` y
+  `scripts/embedded-triplet.sh` lo verifica por round-trip.
 
 ---
 
