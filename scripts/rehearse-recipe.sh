@@ -23,19 +23,6 @@ RECIPE="$REPO_ROOT/packages/$PKG/build.sh"
 
 CACHE_DIR="${REHEARSAL_CACHE:-$PREFIX/tmp/$PKG-rehearse-cache}"
 KEEP="${REHEARSAL_KEEP:-0}"
-# CI sources the builder environment before running this, so this shell runs with
-# libtermux-exec loaded, and that rewrites every /usr, /bin, /etc, /lib and /var
-# path given to execve() or open().  Asking for /usr/bin/curl therefore gets the
-# prefix's bionic curl - which on the GitHub ARM runners has no working resolver
-# ("Could not resolve host: github.com", runs 37786008765 and 37786844653).  The
-# builder action stages a copy of the host's curl outside the aliased prefixes
-# for exactly this.  On a phone the variable is unset and Termux's curl is the
-# right one, DNS and all.
-FETCH=(curl)
-if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "$TERMUX_BUILDER_HOSTBIN/curl" ]; then
-	FETCH=("$TERMUX_BUILDER_HOSTBIN/curl")
-fi
-echo "== downloader: ${FETCH[*]}"
 WORK="$(mktemp -d "$PREFIX/tmp/$PKG-rehearse.XXXXXX")"
 cleanup() {
 	if [ "$KEEP" = 1 ]; then
@@ -65,7 +52,7 @@ if [ ! -f "$TARBALL" ]; then
 		exit 3
 	fi
 	echo "== downloading source tarball (sources only, no compilation)"
-	"${FETCH[@]}" --fail --location --retry 3 -o "$TARBALL.part" "$SRCURL" || { echo "download failed" >&2; exit 3; }
+	curl --fail --location --retry 3 -o "$TARBALL.part" "$SRCURL" || { echo "download failed" >&2; exit 3; }
 	mv "$TARBALL.part" "$TARBALL"
 fi
 if [ -n "$SHA256" ]; then
@@ -310,7 +297,7 @@ for mk in "$SRCDIR"/deps/*.mk; do
 		if [ ! -d "$dep_src" ]; then
 			dep_tgz="$CACHE_DIR/$dep-$sha.tar.gz"
 			if [ ! -f "$dep_tgz" ]; then
-				if ! "${FETCH[@]}" -sS --fail --location --retry 3 -o "$dep_tgz.part" "${url//\$1/$sha}"; then
+				if ! curl -sS --fail --location --retry 3 -o "$dep_tgz.part" "${url//\$1/$sha}"; then
 					rm -f "$dep_tgz.part"
 					printf 'FAIL  %-40s could not fetch %s\n' "$(basename "$patchfile")" "${url//\$1/$sha}"
 					dep_patch_fail=$((dep_patch_fail + 1))

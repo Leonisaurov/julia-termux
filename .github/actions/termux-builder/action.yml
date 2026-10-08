@@ -234,7 +234,11 @@ runs:
           echo "uname: $(uname -m)  nproc: $(nproc)  dpkg arch: $(dpkg --print-architecture)"
           # The host's df: Termux's execs /system/bin/df, which the rootfs does not
           # carry, and asking for /usr/bin/df from here would be rewritten back to it.
-          "$TERMUX_BUILDER_HOSTBIN/df" -h "$ROOT" | tail -1
+          # LD_PRELOAD has to be out of the child's environment, not just unused:
+          # glibc's loader takes the bionic libtermux-exec as an ELF, resolves its
+          # DT_NEEDED "libc.so" against Debian's linker script and aborts with
+          # "invalid ELF header" (run 37788134488).
+          ( unset LD_PRELOAD; exec "$TERMUX_BUILDER_HOSTBIN/df" -h "$ROOT" ) | tail -1
           free -m | head -3
         } || true
         # The tools the build actually execs.  Their packages being installed (the
@@ -253,3 +257,35 @@ runs:
           printf 'info  %-20s %s\n' "$t" "$(command -v "$t" || echo absent)"
         done
         exit "$fail"
+
+    - name: Give the prefix a curl that can resolve names
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        set -o allexport; . "$HOME/.termux-builder-env.sh"; set +o allexport
+        # Every byte the build pulls comes through this name: termux_download()
+        # fetches the Julia tarball with `curl` (scripts/build/termux_download.sh:55)
+        # and Julia's own deps/*.mk fetches LLVM 18.1.7, libuv, utf8proc, dSFMT,
+        # libwhich and libblastrampoline the same way.  In the prefix environment
+        # that is bionic's curl, and bionic has no resolver on these runners (run
+        # 37782123436).  Shadow it with the runner's own binary, which is only
+        # reachable from a path libtermux-exec does not rewrite and whose
+        # LD_PRELOAD must be absent, and keep the real one as the fallback.
+        if [ ! -e "$ROOT/bin/curl.bionic" ]; then
+          mv "$ROOT/bin/curl" "$ROOT/bin/curl.bionic"
+        fi
+        cat > "$ROOT/bin/curl" <<'SHIM'
+        #!/data/data/com.termux/files/usr/bin/sh
+        if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "$TERMUX_BUILDER_HOSTBIN/curl" ]; then
+          unset LD_PRELOAD
+          exec "$TERMUX_BUILDER_HOSTBIN/curl" "$@"
+        fi
+        exec /data/data/com.termux/files/usr/bin/curl.bionic "$@"
+        SHIM
+        chmod 755 "$ROOT/bin/curl"
+        # Prove it here, in a two-minute job, rather than an hour into a compile.
+        curl --version | head -1
+        curl --fail --silent --show-error --max-time 60 --range 0-0 \
+          -o /dev/null https://github.com/JuliaLang/julia/releases/download/v1.12.6/julia-1.12.6.tar.gz
+        echo "OK    curl from the prefix environment fetches the recipe's own URL"
