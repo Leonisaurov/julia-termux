@@ -7,9 +7,15 @@ missing leaf (a virtual package, an Pre-Depends on something Termux expresses
 differently) must not abort the whole prefix setup.
 
 The default roots are the bootstrap set of scripts/generate-bootstraps.sh in
-termux-packages, trimmed to what a build prefix needs: extracting exactly these
-gives a $PREFIX whose dpkg database can be seeded and whose `apt` then installs
-everything else, the way a real Termux installation does.
+termux-packages, trimmed to what a build prefix needs.  Roots given on the command
+line are added to them, not substituted for them: the caller passes the recipe's own
+TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS, and a prefix without the bootstrap
+is not a prefix at all.
+
+Nothing here reaches the network: these runners cannot resolve DNS from inside
+bionic (measured on run 37782123436 - apt's https method reports
+"No address associated with hostname" while the host's curl resolves the same
+name), so the whole set a build needs has to come out of this one closure.
 """
 import re
 import sys
@@ -20,6 +26,12 @@ ROOTS = [
     "findutils", "gawk", "grep", "gzip", "patch", "procps", "psmisc", "sed", "tar",
     "termux-core", "termux-exec", "termux-keyring", "termux-tools", "util-linux",
     "xz-utils",
+    # termux_step_start_build.sh:125 runs `apt install -y termux-elf-cleaner`
+    # unconditionally for every bionic on-device build.  With the package extracted
+    # and seeded in dpkg/status that call answers "already the newest version" and
+    # returns 0 even with empty apt lists (measured with apt-get -s on a real
+    # prefix); without it the build dies before configuring anything.
+    "termux-elf-cleaner",
 ]
 
 
@@ -48,7 +60,7 @@ def dep_names(spec):
 
 def main():
     index = sys.argv[1] if len(sys.argv) > 1 else "Packages"
-    roots = sys.argv[2:] or ROOTS
+    roots = sorted(set(ROOTS) | {name for name in sys.argv[2:] if name})
     packages = parse(index)
     resolved, missing = {}, set()
     frontier = list(roots)

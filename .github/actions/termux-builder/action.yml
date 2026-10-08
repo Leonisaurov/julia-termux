@@ -3,7 +3,12 @@ description: >
   Recreate, on a Linux arm64 runner, the environment termux-packages' build-package.sh
   expects on a phone: /system present (that file is what switches on
   TERMUX_ON_DEVICE_BUILD), a $PREFIX holding Termux's own binaries, and a dpkg database
-  apt is willing to install into.
+  that reports every package the build needs as installed.
+
+  Nothing in here uses the network from inside the prefix: bionic's resolver returns
+  "No address associated with hostname" on these runners, so the whole set comes from
+  one closure downloaded with the host's curl, and the apt calls termux-packages makes
+  are satisfied from the seeded dpkg/status instead.
 
   Everything downstream — the static gate and the build — runs through this same code
   path, which is the one already validated on a device.
@@ -12,14 +17,14 @@ inputs:
   recipe:
     description: >
       Path, relative to the repository, of a termux-packages build.sh whose
-      TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS should be installed into the
-      prefix.  The recipe stays the single source of truth for what the build needs.
+      TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS are pulled into the closure.
+      The recipe stays the single source of truth for what the build needs.
     required: false
     default: ''
   packages:
     description: >
-      Space-separated Termux packages to apt-install on top of the bootstrap set and
-      the recipe's own lists.
+      Space-separated Termux packages to pull into the closure on top of the bootstrap
+      set, termux-elf-cleaner and the recipe's own lists.
     required: false
     default: ''
 
@@ -48,22 +53,47 @@ runs:
         sudo chmod -R a+rX /system
         ls -l /system/bin | head -5
 
-    - name: Resolve the bootstrap closure
+    - name: Resolve the closure the build needs
       shell: bash
+      env:
+        RECIPE: ${{ inputs.recipe }}
+        EXTRA: ${{ inputs.packages }}
       run: |
         set -euo pipefail
+        # bionic apt cannot resolve DNS on these runners, so everything the build
+        # needs has to arrive through this one closure.  The recipe is the source of
+        # truth for the list; the parsing is the same scripts/rehearse-recipe.sh does
+        # for its repository check - version predicates and soname suffixes are not
+        # package names.
+        requested=()
+        if [ -n "${RECIPE// /}" ]; then
+          while read -r name; do
+            requested+=("$name")
+          done < <(grep -h '^TERMUX_PKG_DEPENDS=\|^TERMUX_PKG_BUILD_DEPENDS=' \
+              "$GITHUB_WORKSPACE/$RECIPE" | sed 's/^[^=]*="//; s/"$//' | tr ',' '\n' |
+            sed 's/^ *//; s/ *$//; s/[<>(].*$//; s/\*.*$//' | grep -v '^$' | sort -u)
+        fi
+        # Deliberately unquoted: EXTRA is a space-separated list of names.
+        # shellcheck disable=SC2206
+        if [ -n "${EXTRA// /}" ]; then
+          requested+=(${EXTRA})
+        fi
+        printf '%s\n' "${requested[@]:-}" | grep -v '^$' > "$RUNNER_TEMP/roots.txt" || true
+        echo "requested by the recipe and inputs: $(tr '\n' ' ' < "$RUNNER_TEMP/roots.txt")"
         # packages-cf.termux.dev serves an AAAA record; these runners resolve IPv4 only,
         # so the plain hostname is used here and apt is forced to IPv4 below.
         curl --fail --silent --show-error --location --retry 3 \
           https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz \
           -o "$RUNNER_TEMP/Packages.gz"
         gzip -dc "$RUNNER_TEMP/Packages.gz" > "$RUNNER_TEMP/Packages"
+        rc=0
         python3 "$GITHUB_WORKSPACE/.github/scripts/termux-closure-resolver.py" \
-          "$RUNNER_TEMP/Packages" > "$RUNNER_TEMP/urls.txt" 2> "$RUNNER_TEMP/resolver.log" || rc=$?
+          "$RUNNER_TEMP/Packages" $(cat "$RUNNER_TEMP/roots.txt") \
+          > "$RUNNER_TEMP/urls.txt" 2> "$RUNNER_TEMP/resolver.log" || rc=$?
         # The resolver's own report is the diagnosis; print it whether or not it failed.
         cat "$RUNNER_TEMP/resolver.log"
         echo "closure size: $(wc -l < "$RUNNER_TEMP/urls.txt") packages"
-        exit "${rc:-0}"
+        exit "$rc"
 
     - name: Extract the closure and seed the package database
       shell: bash
@@ -122,51 +152,46 @@ runs:
         fi
         chmod +x "$ROOT/bin/termux-setup-package-manager"
         export LD_PRELOAD="$ROOT/lib/libtermux-exec.so" PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+        # No `apt update` here and none below: bionic's resolver returns "No address
+        # associated with hostname" for every name on these runners (run 37782123436
+        # printed it for packages.termux.dev, while the host's curl resolves the same
+        # name).  The lists stay empty on purpose - a package seeded in dpkg/status
+        # answers `apt install` with "already the newest version" without any fetch,
+        # which is exactly what the build depends on.
         rc=0
-        # Every bionic exec on a Linux kernel prints the linkerconfig noise; it buries
-        # the actual apt output.
-        apt update > "$RUNNER_TEMP/apt-update.log" 2>&1 || rc=$?
-        echo "apt update rc=$rc"
-        grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-update.log" | tail -8
-        [ "$rc" -eq 0 ] || exit 1
+        # The exact call termux_step_start_build.sh:125 makes for every bionic
+        # on-device build, unconditionally.  If it is not satisfiable from the seeded
+        # database, the build dies before configuring anything, so prove it here.
         apt install -y termux-elf-cleaner > "$RUNNER_TEMP/apt-elfcleaner.log" 2>&1 || rc=$?
         echo "apt install termux-elf-cleaner rc=$rc"
         grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-elfcleaner.log" | tail -6
         [ "$rc" -eq 0 ] || exit 1
-        # This is the exact binary termux_step_start_build.sh looks up after installing
+        # This is the binary termux_step_start_build.sh looks up right after installing
         # it; if it is not on PATH the build fails minutes later with a confusing error.
-        command -v termux-elf-cleaner || { echo "termux-elf-cleaner missing after apt install"; exit 1; }
+        command -v termux-elf-cleaner || { echo "termux-elf-cleaner missing after seeding"; exit 1; }
 
-    - name: Install the packages the build needs
+    - name: Check that the closure really covers the recipe
       shell: bash
-      env:
-        RECIPE: ${{ inputs.recipe }}
-        EXTRA: ${{ inputs.packages }}
       run: |
         set -uo pipefail
         ROOT=/data/data/com.termux/files/usr
-        # Same parsing scripts/rehearse-recipe.sh uses for its repository check:
-        # version predicates and soname suffixes are not package names.
-        recipe_deps=""
-        if [ -n "${RECIPE// /}" ]; then
-          recipe_deps=$(grep -h '^TERMUX_PKG_DEPENDS=\|^TERMUX_PKG_BUILD_DEPENDS=' \
-              "$GITHUB_WORKSPACE/$RECIPE" | sed 's/^[^=]*="//; s/"$//' | tr ',' '\n' |
-            sed 's/^ *//; s/ *$//; s/[<>(].*$//; s/\*.*$//' | grep -v '^$' | sort -u | tr '\n' ' ')
-          echo "from $RECIPE: $recipe_deps"
-        fi
-        # shellcheck disable=SC2086
-        set -- $recipe_deps $EXTRA
-        if [ "$#" -eq 0 ]; then
-          echo "no extra packages requested"
-          exit 0
-        fi
         export LD_PRELOAD="$ROOT/lib/libtermux-exec.so" PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
-        echo "installing: $*"
-        rc=0
-        apt install -y "$@" > "$RUNNER_TEMP/apt-install.log" 2>&1 || rc=$?
-        echo "apt install rc=$rc"
-        grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-install.log" | tail -25
-        [ "$rc" -eq 0 ] || exit 1
+        fail=0
+        # dpkg reads the status we seeded, so this is the same view apt and
+        # build-package.sh will have: a root reported installed must be installed.
+        while read -r pkg; do
+          [ -n "$pkg" ] || continue
+          if dpkg -s "$pkg" > /dev/null 2>&1; then
+            printf 'OK    %s %s\n' "$pkg" "$(dpkg -s "$pkg" | sed -n 's/^Version: //p')"
+          else
+            printf 'FAIL  %s is not installed in the prefix\n' "$pkg"
+            fail=1
+          fi
+        done < "$RUNNER_TEMP/roots.txt"
+        if [ "$fail" -ne 0 ]; then
+          echo "the closure does not cover what the recipe asks for - fix the resolver, not the build"
+          exit 1
+        fi
 
     - name: Publish the prefix environment
       shell: bash
