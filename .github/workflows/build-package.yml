@@ -1,8 +1,6 @@
 name: Build Julia for Termux
 
-run-name: >-
-  ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')
-  && 'Build and publish' or 'Build (no publish)' }}
+run-name: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') && 'Build and publish' || 'Build (no publish)' }}
 
 # Architecture (October 2026): the build runs termux-packages in its own on-device
 # mode on an arm64 runner, so host == target and Termux's clang is the compiler.
@@ -197,6 +195,43 @@ jobs:
             if [ -e "$f" ]; then printf 'OK    %s\n' "${f#"$P"/}"
             else printf 'FAIL  %s absent from the package\n' "${f#"$P"/}"; fail=1; fi
           done
+          # The other half of the pre-massage contract: nothing that is not Julia's.
+          # An on-device build packages whatever was newer than its start timestamp, so
+          # a phone that wrote a log during the build would ship that log.  The names
+          # allowed here are exactly the ones termux_step_pre_massage() keeps, so a
+          # change to that hook has to show up here as well or this check goes red.
+          printf -- '--- payload outside Julia footprint ---\n'
+          _foreign() { # <dir> [allowed name ...]
+            local _d="$1" _n _expr
+            shift
+            [ -d "$_d" ] || return 0
+            _expr=("$_d" -mindepth 1 -maxdepth 1)
+            for _n in "$@"; do _expr+=( ! -name "$_n" ); done
+            find "${_expr[@]}" -printf 'FAIL  foreign: %p\n'
+          }
+          _left=$(
+            _foreign unpack data
+            _foreign unpack/data data
+            _foreign unpack/data/data/com.termux/files usr
+            _foreign "$P" bin etc include lib libexec share
+            _foreign "$P/bin" julia 'julia-*'
+            _foreign "$P/etc" julia
+            _foreign "$P/include" julia
+            _foreign "$P/lib" julia 'libjulia*' 'libopenlibm*'
+            _foreign "$P/libexec" julia
+            _foreign "$P/share" julia doc man metainfo applications
+            _foreign "$P/share/doc" julia
+            _foreign "$P/share/man" man1
+            _foreign "$P/share/man/man1" 'julia*'
+            _foreign "$P/share/metainfo" 'julia*'
+            _foreign "$P/share/applications" 'julia*'
+          )
+          if [ -n "$_left" ]; then
+            printf '%s\n' "$_left"
+            fail=1
+          else
+            echo "OK    nothing in the payload outside Julia's footprint"
+          fi
           printf -- '--- bin/julia: target and dynamic section ---\n'
           file "$P/bin/julia"
           readelf -h "$P/bin/julia" | grep -E 'Class|Machine|Type'
