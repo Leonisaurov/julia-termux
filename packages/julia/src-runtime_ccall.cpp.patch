@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/runtime_ccall.cpp
+#
+# Bionic has no getdomainname(3).
+--- a/src/runtime_ccall.cpp
++++ b/src/runtime_ccall.cpp
+@@ -139,7 +139,7 @@
+                     hostname[sizeof(hostname) - 1] = '\0'; /* Null terminate, just to be safe. */
+                     outfile << hostname;
+                 }
+-#ifndef _OS_WINDOWS_
++#if !defined(_OS_WINDOWS_) && !defined(_OS_ANDROID_)
+                 if (c == 'l' && getdomainname(hostname, sizeof(hostname)) == 0) {
+                     hostname[sizeof(hostname) - 1] = '\0'; /* Null terminate, just to be safe. */
+                     outfile << hostname;

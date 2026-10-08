@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/scheduler.c
+#
+# rr is unavailable on Android; its probe syscall (1008) is blocked by seccomp.
+--- a/src/scheduler.c
++++ b/src/scheduler.c
+@@ -139,7 +139,7 @@
+ 
+ int jl_running_under_rr(int recheck)
+ {
+-#ifdef _OS_LINUX_
++#if defined(_OS_LINUX_) && !defined(_OS_ANDROID_)
+ #define RR_CALL_BASE 1000
+ #define SYS_rrcall_check_presence (RR_CALL_BASE + 8)
+     static _Atomic(int) is_running_under_rr = 0;

@@ -1,0 +1,36 @@
+# Termux/Bionic port: Make.inc
+#
+# Bionic has no libgcc_s.so.1: drop it from the loader dependency lists.
+--- a/Make.inc
++++ b/Make.inc
+@@ -1837,7 +1837,6 @@
+ endef
+ 
+ LOADER_BUILD_DEP_LIBS = $(call build_deplibs, \
+-    $(LIBGCC_BUILD_DEPLIB) \
+     $(LIBM_BUILD_DEPLIB) \
+     @$(LIBSTDCXX_BUILD_DEPLIB) \
+     @$(LIBJULIAINTERNAL_BUILD_DEPLIB) \
+@@ -1845,7 +1844,6 @@
+ )
+ 
+ LOADER_DEBUG_BUILD_DEP_LIBS = $(call build_deplibs, \
+-   $(LIBGCC_BUILD_DEPLIB) \
+    $(LIBM_BUILD_DEPLIB) \
+    @$(LIBSTDCXX_BUILD_DEPLIB) \
+    @$(LIBJULIAINTERNAL_DEBUG_BUILD_DEPLIB) \
+@@ -1853,14 +1851,12 @@
+ )
+ 
+ LOADER_INSTALL_DEP_LIBS = $(call build_deplibs, \
+-    $(LIBGCC_INSTALL_DEPLIB) \
+     $(LIBM_INSTALL_DEPLIB) \
+     @$(LIBSTDCXX_INSTALL_DEPLIB) \
+     @$(LIBJULIAINTERNAL_INSTALL_DEPLIB) \
+     @$(LIBJULIACODEGEN_INSTALL_DEPLIB) \
+ )
+ LOADER_DEBUG_INSTALL_DEP_LIBS = $(call build_deplibs, \
+-    $(LIBGCC_INSTALL_DEPLIB) \
+     $(LIBM_INSTALL_DEPLIB) \
+     @$(LIBSTDCXX_INSTALL_DEPLIB) \
+     @$(LIBJULIAINTERNAL_DEBUG_INSTALL_DEPLIB) \

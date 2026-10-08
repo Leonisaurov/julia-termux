@@ -1,0 +1,27 @@
+# Termux/Bionic port: libuv src/unix/process.c
+#
+# Bionic has no pthread_cancel(); drop the setcancelstate guards.
+--- a/src/unix/process.c
++++ b/src/unix/process.c
+@@ -1037,7 +1037,6 @@
+   int status;
+ #ifdef __linux__
+   volatile int exec_errorno;
+-  int cancelstate;
+ #else
+   int signal_pipe[2] = { -1, -1 };
+   int exec_errorno;
+@@ -1077,13 +1076,11 @@
+ #ifdef __linux__
+   /* Acquire write lock to prevent opening new fds in worker threads */
+   uv_rwlock_wrlock(&loop->cloexec_lock);
+-  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancelstate);
+ 
+   exec_errorno = 0;
+   err = uv__spawn_and_init_child_fork(options, &exec_errorno, stdio_count, pipes, pid);
+ 
+   /* Release lock in parent process */
+-  pthread_setcancelstate(cancelstate, NULL);
+   uv_rwlock_wrunlock(&loop->cloexec_lock);
+ 
+   if (err == 0) {

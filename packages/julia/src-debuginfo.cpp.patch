@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/debuginfo.cpp
+#
+# No __register_frame/__deregister_frame without libgcc_s.
+--- a/src/debuginfo.cpp
++++ b/src/debuginfo.cpp
+@@ -53,7 +53,7 @@
+     uint32_t crc32;
+ };
+ 
+-#if (defined(_OS_LINUX_) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) && defined(LLVM_SHLIB)))
++#if ((defined(_OS_LINUX_) && !defined(_OS_ANDROID_)) || defined(_OS_FREEBSD_) || (defined(_OS_DARWIN_) && defined(LLVM_SHLIB)))
+ extern "C" void __register_frame(void*) JL_NOTSAFEPOINT;
+ extern "C" void __deregister_frame(void*) JL_NOTSAFEPOINT;
+ 

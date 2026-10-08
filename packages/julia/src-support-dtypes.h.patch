@@ -1,0 +1,19 @@
+# Termux/Bionic port: src/support/dtypes.h
+#
+# Bionic's sys/types.h already typedefs uint_t.
+--- a/src/support/dtypes.h
++++ b/src/support/dtypes.h
+@@ -204,7 +204,13 @@
+ #ifdef _P64
+ #define TOP_BIT 0x8000000000000000
+ #define NBITS 64
++// Bionic's <sys/types.h> typedefs uint_t as `unsigned int` unconditionally and
++// dtypes.h pulls that header in, so upstream's 64-bit typedef is a redefinition
++// error here.  uint_t only carries hash-sized values (src/gf.c, htable.inc);
++// int_t keeps its 64 bits, so flisp's NBITS==64 fixnum path is unaffected.
++#ifndef _OS_ANDROID_
+ typedef uint64_t uint_t;  // preferred int type on platform
++#endif
+ typedef int64_t int_t;
+ #else
+ #define TOP_BIT 0x80000000

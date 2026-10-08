@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/init.c
+#
+# Bionic provides neither pthread_get_stackaddr_np nor glibc's stack layout.
+--- a/src/init.c
++++ b/src/init.c
+@@ -63,7 +63,7 @@
+     // threads since it seems to return bogus values for master thread on Linux
+     // and possibly OSX.
+     if (!ismaster) {
+-#  if defined(_OS_LINUX_) || defined(_OS_FREEBSD_)
++#  if (defined(_OS_LINUX_) && !defined(_OS_ANDROID_)) || defined(_OS_FREEBSD_)
+         pthread_attr_t attr;
+ #if defined(_OS_FREEBSD_)
+         pthread_attr_init(&attr);

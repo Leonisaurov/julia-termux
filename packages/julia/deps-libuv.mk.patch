@@ -1,0 +1,27 @@
+# Termux/Bionic port: deps/libuv.mk
+#
+# Patch Julia's libuv for Bionic before configure.
+--- a/deps/libuv.mk
++++ b/deps/libuv.mk
+@@ -15,6 +15,12 @@
+ 
+ LIBUV_BUILDDIR := $(BUILDDIR)/$(LIBUV_SRC_DIR)
+ 
++# Bionic has no pthread_cancel/pthread_setcancelstate; Julia's libuv fork still
++# guards the fork/exec path with them under __linux__.
++$(SRCCACHE)/$(LIBUV_SRC_DIR)/source-patched: $(SRCCACHE)/$(LIBUV_SRC_DIR)/source-extracted
++	cd $(dir $@) && patch -p1 -f < $(SRCDIR)/patches/termux-libuv-process-android.patch
++	echo 1 > $@
++
+ ifneq ($(CLDFLAGS)$(SANITIZE_LDFLAGS),)
+ $(LIBUV_BUILDDIR)/build-configured: LDFLAGS:=$(LDFLAGS) $(CLDFLAGS) $(SANITIZE_LDFLAGS)
+ endif
+@@ -33,7 +39,7 @@
+ 	emmake $(MAKE) -C $(dir $<) $(UV_MFLAGS)
+ 	echo 1 > $@
+ else
+-$(LIBUV_BUILDDIR)/build-configured: $(SRCCACHE)/$(LIBUV_SRC_DIR)/source-extracted
++$(LIBUV_BUILDDIR)/build-configured: $(SRCCACHE)/$(LIBUV_SRC_DIR)/source-patched
+ 	touch -c $(SRCCACHE)/$(LIBUV_SRC_DIR)/aclocal.m4 # touch a few files to prevent autogen from getting called
+ 	touch -c $(SRCCACHE)/$(LIBUV_SRC_DIR)/Makefile.in
+ 	touch -c $(SRCCACHE)/$(LIBUV_SRC_DIR)/configure

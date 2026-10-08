@@ -1,0 +1,77 @@
+# Termux/Bionic port: stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
+#
+# Locate OpenBLAS at run time from known paths; never bake the path into the
+# system image and never rely on dlpath() alone.
+--- a/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
++++ b/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
+@@ -32,15 +32,49 @@
+     const libsuffix = ""
+ end
+ 
++# Everything below has to be computed inside `__init__()`, not at module top
++# level: a top-level `const` in a stdlib is frozen into the system image, so a
++# path built from `Sys.BINDIR` there would keep the build machine's prefix.
++#
++# `dlpath()` alone is not acceptable either: it routes through
++# jl_pathname_for_handle(), which used to return NULL on Bionic, leaving
++# libopenblas_path == "" in the image; libblastrampoline then forwarded to "" and
++# every Julia process died during BLAS init.
++function load_openblas()
++    # Termux ships OpenBLAS as a plain library in $(prefix)/lib; there is no
++    # artifact directory.  During system-image generation Sys.BINDIR is the
++    # staged usr/bin, so the staged copy is a candidate too, and the bare soname
++    # covers whichever layout the loader's RUNPATH can actually see.
++    libdir = joinpath(dirname(Sys.BINDIR), "lib")
++    candidates = (joinpath(libdir, "libopenblas$(libsuffix).so"),
++                  joinpath(libdir, "julia", "libopenblas$(libsuffix).so"),
++                  "libopenblas$(libsuffix).so")
++    for candidate in candidates
++        # A miss here is just the next candidate, and `dlopen` throws by default.
++        handle = dlopen(candidate; throw_error=false)
++        handle === C_NULL && continue
++        isfile(candidate) && return (handle, normpath(candidate))
++        path = try
++            dlpath(handle)
++        catch err
++            @warn "OpenBLAS_jll: dlpath() of $(candidate) failed" exception=(err, catch_backtrace())
++            ""
++        end
++        isempty(path) || return (handle, path)
++    end
++    error("OpenBLAS_jll: none of ", join(candidates, ", "),
++          " could be dlopen'ed; is the libopenblas package installed?")
++end
++
+ if Sys.iswindows()
+     const libopenblas = "libopenblas$(libsuffix).dll"
+-    const _libgfortran = string("libgfortran-", libgfortran_version(HostPlatform()).major, ".dll")
++    const _libgfortran = string("libgfortran-", something(libgfortran_version(HostPlatform()), v"0.0.0").major, ".dll")
+ elseif Sys.isapple()
+     const libopenblas = "@rpath/libopenblas$(libsuffix).dylib"
+-    const _libgfortran = string("@rpath/", "libgfortran.", libgfortran_version(HostPlatform()).major, ".dylib")
++    const _libgfortran = string("@rpath/", "libgfortran.", something(libgfortran_version(HostPlatform()), v"0.0.0").major, ".dylib")
+ else
+     const libopenblas = "libopenblas$(libsuffix).so"
+-    const _libgfortran = string("libgfortran.so.", libgfortran_version(HostPlatform()).major)
++    const _libgfortran = string("libgfortran.so.", something(libgfortran_version(HostPlatform()), v"0.0.0").major)
+ end
+ 
+ function __init__()
+@@ -62,12 +96,11 @@
+         ENV["OPENBLAS_DEFAULT_NUM_THREADS"] = "1"
+     end
+ 
+-    # As mentioned above, we are sneaking this in here so that we don't have to
+-    # depend on CSL_jll and load _all_ of its libraries.
+-    dlopen(_libgfortran)
+-
+-    global libopenblas_handle = dlopen(libopenblas)
+-    global libopenblas_path = dlpath(libopenblas_handle)
++    # dlopen(_libgfortran) is skipped: Termux's OpenBLAS links the Fortran
++    # runtime statically, so there is no libgfortran.so to load.
++    loaded = load_openblas()
++    global libopenblas_handle = loaded[1]
++    global libopenblas_path = loaded[2]
+     global artifact_dir = dirname(Sys.BINDIR)
+     LIBPATH[] = dirname(libopenblas_path)
+     push!(LIBPATH_list, LIBPATH[])

@@ -1,0 +1,16 @@
+# Termux/Bionic port: base/binaryplatforms.jl
+#
+# Accept the -android triplet as glibc.
+--- a/base/binaryplatforms.jl
++++ b/base/binaryplatforms.jl
+@@ -703,6 +703,10 @@
+ Parses a string platform triplet back into a `Platform` object.
+ """
+ function Base.parse(::Type{Platform}, triplet::String; validate_strict::Bool = false)
++    # Android/Termux: LLVM reports a triple ending in "-android", but
++    # BinaryPlatforms has no "android" libc and ArtifactHub only publishes
++    # "-gnu"/"-musl".  Treat Android as the closest supported platform.
++    triplet = replace(triplet, "-android" => "-gnu")
+     m = match(triplet_regex, triplet)
+     if m !== nothing
+         # Helper function to find the single named field within the giant regex

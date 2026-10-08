@@ -1,0 +1,19 @@
+# Termux/Bionic port: src/signals-unix.c
+#
+# signal_bt_* are referenced outside the libunwind guard.
+--- a/src/signals-unix.c
++++ b/src/signals-unix.c
+@@ -840,10 +840,11 @@
+         profile_autostop_time = jl_hrtime() + (profile_peek_duration * 1e9);
+ }
+ 
+-#if !defined(JL_DISABLE_LIBUNWIND)
+-
+ static jl_bt_element_t signal_bt_data[JL_MAX_BT_SIZE + 1];
+ static size_t signal_bt_size = 0;
++
++#if !defined(JL_DISABLE_LIBUNWIND)
++
+ static void do_critical_profile(void *ctx)
+ {
+     bt_context_t signal_context;

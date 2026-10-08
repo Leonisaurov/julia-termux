@@ -1,0 +1,14 @@
+# Termux/Bionic port: libwhich.c
+#
+# No dlinfo(RTLD_DI_LINKMAP) on Bionic; use the dl_iterate_phdr path.
+--- a/libwhich.c
++++ b/libwhich.c
+@@ -224,7 +224,7 @@
+     return dynamic_libraries;
+ }
+ 
+-#if defined(__linux__) || defined(__FreeBSD__)  // Use `dlinfo` API, when supported
++#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__FreeBSD__)  // Use `dlinfo` API, when supported
+ const char *dlpath(void *handle, struct vector_t name)
+ {
+     struct link_map *map;

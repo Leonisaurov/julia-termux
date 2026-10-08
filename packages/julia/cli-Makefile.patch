@@ -1,0 +1,27 @@
+# Termux/Bionic port: cli/Makefile
+#
+# Android's linker rejects DT_TEXTREL; use clang's compiler-rt builtins.
+--- a/cli/Makefile
++++ b/cli/Makefile
+@@ -20,13 +20,20 @@
+ LOADER_LDFLAGS += -municode -mconsole -nostdlib -lntdll -lkernel32 -lpsapi
+ else ifeq ($(OS),Linux)
+ # textoff and notext are aliases to the same option which suppress the TEXTREL warning for i686
+-LOADER_LDFLAGS += -Wl,--no-as-needed -ldl -lpthread -rdynamic -lc -Wl,--as-needed -Wl,-z,notext
++LOADER_LDFLAGS += -Wl,--no-as-needed -ldl -lpthread -rdynamic -lc -Wl,--as-needed
+ else ifeq ($(OS),FreeBSD)
+ LOADER_LDFLAGS += -Wl,--no-as-needed -ldl -lpthread -rdynamic -lc -Wl,--as-needed
+ else ifeq ($(OS),OpenBSD)
+ LOADER_LDFLAGS += -Wl,--no-as-needed -lpthread -rdynamic -lc -Wl,--as-needed
+ endif
+ 
++# Android/Termux links against compiler-rt, not libgcc_s; the loader needs the
++# builtins because libjulia-internal is loaded before any C++ runtime is
++# guaranteed to be present in the process.
++ifneq ($(CLANG_RT_BUILTINS),)
++LOADER_LDFLAGS += -Wl,--whole-archive $(CLANG_RT_BUILTINS) -Wl,--no-whole-archive
++endif
++
+ # Build list of dependent libraries that must be opened
+ SHIPFLAGS  += -DDEP_LIBS=$(call shell_escape,$(call c_escape,$(LOADER_BUILD_DEP_LIBS)))
+ DEBUGFLAGS += -DDEP_LIBS=$(call shell_escape,$(call c_escape,$(LOADER_DEBUG_BUILD_DEP_LIBS)))

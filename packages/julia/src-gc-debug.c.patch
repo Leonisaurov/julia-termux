@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/gc-debug.c
+#
+# Bionic has no malloc_stats(3).
+--- a/src/gc-debug.c
++++ b/src/gc-debug.c
+@@ -669,7 +669,7 @@
+ 
+ void jl_print_gc_stats(JL_STREAM *s)
+ {
+-#ifdef _OS_LINUX_
++#if defined(_OS_LINUX_) && !defined(_OS_ANDROID_)
+     malloc_stats();
+ #endif
+     double ptime = jl_hrtime() - process_t0;

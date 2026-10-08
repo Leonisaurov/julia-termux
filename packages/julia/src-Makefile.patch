@@ -1,0 +1,19 @@
+# Termux/Bionic port: src/Makefile
+#
+# Link compiler-rt builtins into the runtime and codegen libraries.
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -64,6 +64,13 @@
+ RT_LLVMLINK :=
+ CG_LLVMLINK :=
+ 
++# LLVM's JIT emits calls to compiler builtins that are not in libc.  On glibc
++# these come from libgcc_s; Bionic has none, so pull clang's compiler-rt in.
++ifneq ($(CLANG_RT_BUILTINS),)
++RT_LLVMLINK += -Wl,--whole-archive $(CLANG_RT_BUILTINS) -Wl,--no-whole-archive
++CG_LLVMLINK += -Wl,--whole-archive $(CLANG_RT_BUILTINS) -Wl,--no-whole-archive
++endif
++
+ ifeq ($(JULIACODEGEN),LLVM)
+ # Currently these files are used by both GCs. But we should make the list specific to stock, and MMTk should have its own implementation.
+ GC_CODEGEN_SRCS := llvm-final-gc-lowering llvm-late-gc-lowering llvm-gc-invariant-verifier

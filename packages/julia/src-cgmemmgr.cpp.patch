@@ -1,0 +1,14 @@
+# Termux/Bionic port: src/cgmemmgr.cpp
+#
+# Bionic exposes no shm_open; use the tmpfile() fallback.
+--- a/src/cgmemmgr.cpp
++++ b/src/cgmemmgr.cpp
+@@ -181,7 +181,7 @@
+     char shm_name[JL_PATH_MAX] = "julia-codegen-0123456789-0123456789/tmp///";
+     pid_t pid = getpid();
+     // `shm_open` can't be mapped exec on mac
+-#  ifndef _OS_DARWIN_
++#  if !defined(_OS_DARWIN_) && !defined(_OS_ANDROID_)
+     do {
+         snprintf(shm_name, sizeof(shm_name),
+                  "julia-codegen-%d-%d", (int)pid, rand());

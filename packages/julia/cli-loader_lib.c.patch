@@ -1,0 +1,25 @@
+# Termux/Bionic port: cli/loader_lib.c
+#
+# Skip the libstdc++ probe: Termux has libc++ and no ldconfig.
+--- a/cli/loader_lib.c
++++ b/cli/loader_lib.c
+@@ -213,7 +213,9 @@
+ // As a fix, on linux we probe the system libstdc++ to see if it is newer, and then load it if it is.
+ // Otherwise, we load the bundled one. This improves compatibility with third party dynamic libs that
+ // may depend on symbols exported by the system libstdxc++.
+-#ifdef _OS_LINUX_
++// Android/Termux ships libc++ (no libstdc++.so.6) and has no ldconfig, so the
++// probe cannot work; the C++ runtime still arrives through DT_NEEDED.
++#if defined(_OS_LINUX_) && !defined(_OS_ANDROID_)
+ #ifndef GLIBCXX_LEAST_VERSION_SYMBOL
+ #warning GLIBCXX_LEAST_VERSION_SYMBOL should always be defined in the makefile.
+ #define GLIBCXX_LEAST_VERSION_SYMBOL "GLIBCXX_a.b.c" /* Appease the linter */
+@@ -467,7 +469,7 @@
+ 
+             // First special library to be loaded is `libstdc++`; perform probing here.
+             if (special_idx == 0) {
+-#if defined(_OS_LINUX_)
++#if defined(_OS_LINUX_) && !defined(_OS_ANDROID_)
+                 int do_probe = 1;
+                 int probe_successful = 0;
+ 

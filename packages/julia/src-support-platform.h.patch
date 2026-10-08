@@ -1,0 +1,18 @@
+# Termux/Bionic port: src/support/platform.h
+#
+# Define _OS_ANDROID_ on Bionic (Julia only knows _OS_LINUX_).
+--- a/src/support/platform.h
++++ b/src/support/platform.h
+@@ -87,6 +87,12 @@
+ #define _OS_OPENBSD_
+ #elif defined(__linux__)
+ #define _OS_LINUX_
++#  if defined(__ANDROID__)
++// Bionic is Linux but not glibc: no dlinfo()/RTLD_DI_LINKMAP, no
++// pthread_cancel, no libgcc_s, and seccomp rejects untraced syscalls.
++// Julia keys its Android-specific paths off _OS_ANDROID_.
++#    define _OS_ANDROID_
++#  endif
+ #elif defined(_WIN32) || defined(_WIN64)
+ #define _OS_WINDOWS_
+ #elif defined(__APPLE__) && defined(__MACH__)

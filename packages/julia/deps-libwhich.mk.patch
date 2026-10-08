@@ -1,0 +1,20 @@
+# Termux/Bionic port: deps/libwhich.mk
+#
+# Patch libwhich for Bionic before it compiles.
+--- a/deps/libwhich.mk
++++ b/deps/libwhich.mk
+@@ -6,7 +6,13 @@
+ LIBWHICH_OBJ_LIB := $(build_depsbindir)/libwhich
+ LIBWHICH_MFLAGS := CC="$(HOSTCC)"
+ 
+-$(BUILDDIR)/$(LIBWHICH_SRC_DIR)/build-compiled: $(BUILDDIR)/$(LIBWHICH_SRC_DIR)/source-extracted
++# libwhich is built with the target compiler on Android, where the dlinfo()
++# path does not exist; fall back to the dl_iterate_phdr implementation.
++$(BUILDDIR)/$(LIBWHICH_SRC_DIR)/source-patched: $(BUILDDIR)/$(LIBWHICH_SRC_DIR)/source-extracted
++	cd $(dir $@) && patch -p1 -f < $(SRCDIR)/patches/termux-libwhich-dlinfo-android.patch
++	echo 1 > $@
++
++$(BUILDDIR)/$(LIBWHICH_SRC_DIR)/build-compiled: $(BUILDDIR)/$(LIBWHICH_SRC_DIR)/source-patched
+ 	$(MAKE) -C $(dir $<) $(LIBWHICH_MFLAGS) libwhich
+ 	echo 1 > $@
+ 

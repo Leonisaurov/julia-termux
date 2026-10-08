@@ -1,0 +1,23 @@
+# Termux/Bionic port: src/sys.c
+#
+# jl_pathname_for_handle via dl_iterate_phdr (no dlinfo on Bionic).
+--- a/src/sys.c
++++ b/src/sys.c
+@@ -619,7 +619,7 @@
+ #endif
+ }
+ 
+-#ifdef _OS_OPENBSD_
++#if defined(_OS_OPENBSD_) || defined(_OS_ANDROID_)
+ // Helper for jl_pathname_for_handle()
+ struct dlinfo_data {
+     void       *searched;
+@@ -693,7 +693,7 @@
+     free(pth16);
+     return filepath;
+ 
+-#elif defined(_OS_OPENBSD_)
++#elif defined(_OS_OPENBSD_) || defined(_OS_ANDROID_)
+     struct dlinfo_data data = {
+         .searched = handle,
+         .result = NULL,
