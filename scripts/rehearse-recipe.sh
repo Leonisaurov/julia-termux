@@ -16,6 +16,8 @@
 #   REHEARSAL_CACHE=...  where the source tarball is cached
 #                     (default $PREFIX/tmp/<pkg>-rehearse-cache)
 #   REHEARSAL_SKIP_DOWNLOAD=1  fail instead of fetching the tarball
+#   REHEARSAL_LIBS_OUT=file  also write the sonames base/Makefile will ask the
+#                     loader for, one per line (the build job probes that list)
 set -uo pipefail
 
 PKG="${1:-julia}"
@@ -287,8 +289,12 @@ while read -r flag _rest; do
 		USE_SYSTEM_CURL) check_lib libcurl.so "$flag" ;;
 		USE_SYSTEM_LIBGIT2) check_lib libgit2.so "$flag" ;;
 		USE_SYSTEM_LIBSUITESPARSE) check_lib libcholmod.so "$flag" ;;
-		USE_SYSTEM_BLAS) check_lib libopenblas.so "$flag" ;;
-		USE_SYSTEM_LAPACK) check_lib libopenblas.so "$flag" ;;
+		# Not libopenblas.so: with USE_SYSTEM_BLAS=1 Make.inc names the library
+		# julia links and symlinks after the alias - LIBBLASNAME=libblas,
+		# LIBLAPACKNAME=liblapack - and those are owned by the blas-openblas split
+		# package, not by libopenblas.
+		USE_SYSTEM_BLAS) check_lib libblas.so "$flag" ;;
+		USE_SYSTEM_LAPACK) check_lib liblapack.so "$flag" ;;
 		USE_SYSTEM_LIBM) : ;; # bionic's libm comes from the system, not $PREFIX
 		USE_SYSTEM_CSL) : ;;   # deliberately no libgcc_s/libstdc++ on bionic
 		USE_SYSTEM_PATCHELF) check_bin patchelf "$flag" ;;
@@ -400,13 +406,26 @@ echo
 echo "===== library resolution ====="
 lib_fail=0
 if [ -f "$WORK/dep-libwhich/libwhich.c" ]; then
-	bash "$REPO_ROOT/scripts/probe-library-resolution.sh" \
-		--src-dir "$WORK/dep-libwhich" \
-		--patch "$SRCDIR/deps/patches/termux-libwhich-dlinfo-android.patch" \
-		> "$WORK/libres.txt" 2>&1
-	lib_fail=$?
-	sed 's/^/  /' "$WORK/libres.txt"
-	lib_fail=$((lib_fail > 0))
+	# Which names julia-base will ask for is a fact about base/Makefile, Make.inc
+	# and the Make.user just generated - not about a list maintained here.  The
+	# gate that checked libopenblas.so while the build died on libblas.so
+	# (run 37823556050) is why make is asked instead.
+	if symlinked=$(bash "$REPO_ROOT/scripts/symlinked-libraries.sh" "$SRCDIR" 2>"$WORK/symlinked.txt"); then
+		sed 's/^/  /' "$WORK/symlinked.txt"
+		printf '  %s name(s) must resolve for julia-base to finish\n\n' "$(printf '%s\n' "$symlinked" | wc -l)"
+		[ -n "${REHEARSAL_LIBS_OUT:-}" ] && printf '%s\n' "$symlinked" > "$REHEARSAL_LIBS_OUT"
+		PROBE_LIBS="$symlinked" bash "$REPO_ROOT/scripts/probe-library-resolution.sh" \
+			--src-dir "$WORK/dep-libwhich" \
+			--patch "$SRCDIR/deps/patches/termux-libwhich-dlinfo-android.patch" \
+			> "$WORK/libres.txt" 2>&1
+		lib_fail=$?
+		sed 's/^/  /' "$WORK/libres.txt"
+		lib_fail=$((lib_fail > 0))
+	else
+		echo "FAIL  the sonames julia-base will ask for could not be derived from the staged tree"
+		sed 's/^/        /' "$WORK/symlinked.txt" | head -14
+		lib_fail=1
+	fi
 else
 	echo "FAIL  no extracted libwhich source to build the probe tool from"
 	lib_fail=1

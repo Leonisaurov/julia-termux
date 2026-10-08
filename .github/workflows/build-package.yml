@@ -44,6 +44,11 @@ env:
 jobs:
   lint:
     name: Static gate (no compilation)
+    # The gate derives from base/Makefile which libraries julia-base will ask the
+    # loader to resolve; the build job has no source tree at probe time, so it
+    # probes the list the gate computed instead of a name list kept by hand.
+    outputs:
+      probe_libs: ${{ steps.libraries.outputs.probe_libs }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     permissions:
@@ -94,7 +99,27 @@ jobs:
           # against this prefix, and builds the pinned libwhich to ask it the same
           # question base/Makefile will ask at julia-base time.
           export REHEARSAL_CACHE="$RUNNER_TEMP/rehearse-cache"
+          export REHEARSAL_LIBS_OUT="$RUNNER_TEMP/symlinked-libs.txt"
           bash scripts/rehearse-recipe.sh "$PKG"
+
+      - name: Hand the derived library list to the build job
+        id: libraries
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ ! -s "$RUNNER_TEMP/symlinked-libs.txt" ]; then
+            echo "the gate wrote no library list, so julia-base's lookups are unchecked" \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "no list derived from base/Makefile" >&2
+            exit 1
+          fi
+          list=$(tr '\n' ' ' < "$RUNNER_TEMP/symlinked-libs.txt")
+          if ! printf '%s' "$list" | grep -Eq '^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$'; then
+            echo "the derived list holds characters that are not library names" >&2
+            exit 1
+          fi
+          printf 'probe_libs=%s\n' "$list" >> "$GITHUB_OUTPUT"
+          echo "derived: $list"
 
       - name: Record the verdict
         if: always()
@@ -156,13 +181,17 @@ jobs:
       - name: Probe the loader's library resolution
         if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          PROBE_LIBS: ${{ needs.lint.outputs.probe_libs }}
         run: |
           set -uo pipefail
           . "$TERMUX_BUILDER_ENV"
           # The gate's "library resolution" section measured this in the lint
           # job's environment; this repeats it in the build job's own, in the
           # exact environment base/Makefile will ask libwhich for these names.
-          # Cheap enough to be a precondition of a 47-minute compile.
+          # The names come from the gate's derivation, because this job has no
+          # source tree yet and a list invented here is what let the libblas.so
+          # failure reach a build (run 37823556050).
           bash scripts/probe-library-resolution.sh
 
       - name: Build the package

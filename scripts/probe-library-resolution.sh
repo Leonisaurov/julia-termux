@@ -23,23 +23,31 @@
 # carries the same PT_INTERP, RUNPATH and DT_NEEDED as the binary
 # deps/libwhich.mk produces.
 #
-# Usage: bash scripts/probe-library-resolution.sh [--src-dir DIR] [--patch FILE]
+# Usage: bash scripts/probe-library-resolution.sh [--tree DIR] [--src-dir DIR]
+#	--tree DIR     staged and configured julia source tree: the names to probe
+#	               are derived from its base/Makefile and Make.inc by
+#	               scripts/symlinked-libraries.sh, which is the only way to keep
+#	               this list in step with what the build actually asks
 #	--src-dir DIR  DIR holds libwhich.c (the pinned upstream source); the real
 #	               tool is built and run too, and its output goes through the
 #	               shell chain base/Makefile applies to it.
 #	--patch FILE   deps patch to apply to that source before building it.
-#   PROBE_LIBS="..."  override the sonames to probe
+#   PROBE_LIBS="..."  the names to probe, where no tree is available: the lint
+#	               job derives them and hands the build job that list
 #   PROBE_KEEP=1      leave the workdir in place for inspection
 set -uo pipefail
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LW_SRC=""
 LW_PATCH=""
+TREE=""
 while [ $# -gt 0 ]; do
 	case "$1" in
+		--tree) TREE="${2:?--tree needs the staged julia source directory}"; shift 2 ;;
 		--src-dir) LW_SRC="${2:?--src-dir needs a directory}"; shift 2 ;;
 		--patch) LW_PATCH="${2:?--patch needs a file}"; shift 2 ;;
-		-h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,37p' "$0"; exit 0 ;;
 		*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -50,15 +58,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The libraries base/Makefile probes WITHOUT the ALLOW_FAILURE fourth argument,
-# for the configuration packages/julia/build.sh generates.  LIBM and CSL are
-# allowed to fail and are not listed; DSFMT, LIBWHICH and LIBBLASTRAMPOLINE are
-# built from deps/, so their rules never run.
-DEFAULT_LIBS="libpcre2-8.so libopenblas.so libgmp.so libmpfr.so libcrypto.so \
-libssl.so libssh2.so libnghttp2.so libcurl.so libgit2.so libamd.so libcamd.so \
-libccolamd.so libcholmod.so libcolamd.so libumfpack.so libspqr.so \
-libsuitesparseconfig.so"
-LIBS="${PROBE_LIBS:-$DEFAULT_LIBS}"
+# There is deliberately no built-in list here.  A list maintained by hand drifts
+# from the build it is supposed to predict, and the drift costs a full run: this
+# script watched libopenblas.so while julia-base died on libblas.so
+# (run 37823556050).  So the names come from base/Makefile, either by deriving
+# them from a staged tree or from the list the lint job derived and handed over.
+if [ -n "$TREE" ]; then
+	LIBS=$(bash "$REPO_ROOT/scripts/symlinked-libraries.sh" "$TREE") || {
+		echo "PROBE: FAIL — the list of names could not be derived from $TREE"
+		exit 2
+	}
+elif [ -n "${PROBE_LIBS:-}" ]; then
+	LIBS="$PROBE_LIBS"
+else
+	echo "PROBE: FAIL — pass --tree DIR, or PROBE_LIBS with the list scripts/symlinked-libraries.sh" \
+		"derived from base/Makefile; probing a list of our own invention is how" \
+		"the libblas.so failure reached a build in the first place" >&2
+	exit 2
+fi
 
 cat > "$WORK/probe.c" <<'EOF'
 #define _GNU_SOURCE
@@ -145,6 +162,9 @@ readelf -lW "$WORK/probe" | sed -n 's@.*\[Requesting program interpreter: \(.*\)
 [ -n "$LW" ] && readelf -d "$LW" | grep -E 'RUNPATH|RPATH|NEEDED' | sed 's/^/libwhich: /'
 
 fail=0
+# Say which names the derivation produced: a build job that silently received an
+# empty list would otherwise report a pass over nothing.
+printf 'names: %s\n' "$(printf '%s\n' $LIBS | sort | paste -sd' ' -)"
 
 # Before blaming dlopen: does a binary built here even reach main()?  A dead-on-
 # arrival binary makes every library below look unresolvable.
@@ -159,8 +179,13 @@ else
 fi
 
 for lib in $LIBS; do
+	# An absent file is not "nothing to check": base/Makefile asks the loader for
+	# this exact name and aborts julia-base when the answer is empty, so a name
+	# the prefix does not carry means the recipe fails to depend on the package
+	# that owns it.
 	if [ ! -e "$PREFIX/lib/$lib" ] && [ ! -e "$PREFIX/lib/julia/$lib" ]; then
-		printf 'MISS  %-28s absent from %s/lib (nothing to resolve)\n' "$lib" "$PREFIX"
+		printf 'FAIL  %-28s MISS: absent from %s/lib\n' "$lib" "$PREFIX"
+		fail=$((fail + 1))
 		continue
 	fi
 	out=$("$WORK/probe" "$lib" 2>"$WORK/stderr.txt"); rc=$?
