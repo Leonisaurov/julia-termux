@@ -431,6 +431,29 @@ else
 	lib_fail=1
 fi
 
+# ---- the platform string the sysimage will embed ----
+# base/Makefile:85 puts $(BB_TRIPLET_LIBGFORTRAN_CXXABI) into build_h.jl as
+# `const BUILD_TRIPLET` and Make.inc:1380 fills it from a $(shell) whose exit
+# status nobody reads, so a triple contrib/normalize_triplet.py does not know
+# (clang on Android: aarch64-unknown-linux-android24) embeds that script's
+# stdout error text.  It surfaces 47 minutes later as an ArgumentError in
+# binaryplatforms.jl during the sysimage build (run 37841320064).
+echo
+echo "===== embedded platform triplet ====="
+triplet_fail=0
+if triplet=$(bash "$REPO_ROOT/scripts/embedded-triplet.sh" "$SRCDIR" 2>"$WORK/triplet.txt"); then
+	sed 's/^/  /' "$WORK/triplet.txt"
+	printf '  OK    the sysimage will carry BUILD_TRIPLET = "%s"\n\n' "$triplet"
+else
+	triplet_rc=$?
+	sed 's/^/  /' "$WORK/triplet.txt"
+	case "$triplet_rc" in
+		2) echo "  FAIL  the triplet could not be derived from the staged tree" ;;
+		*) echo "  FAIL  julia-base would embed a triplet the sysimage cannot parse" ;;
+	esac
+	triplet_fail=1
+fi
+
 # ---- declared packages must exist in the Termux repository ----
 echo
 echo "===== declared packages ====="
@@ -451,13 +474,14 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$repo_fail"
+printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$repo_fail"
 if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
-	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
+	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] \
+	|| [ "$triplet_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, and the triplet the sysimage embeds parses)"
 exit 0
