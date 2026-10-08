@@ -27,6 +27,12 @@ Repositorio independiente que cross-compila [Julia v1.12.6](https://julialang.or
 ./scripts/build-local.sh --dry-run --jobs 2         # Validar sin compilar
 ./scripts/build-local.sh --continue -j2             # Reanudar tras fallo
 
+# Gate estático (obligatorio antes de cualquier run de CI; no compila nada)
+bash scripts/lint-workflows.sh                      # YAML + bash -n + uses: locales
+bash scripts/rehearse-recipe.sh                     # replay de parches/configure + sonda
+bash scripts/probe-library-resolution.sh --tree DIR # el loader y el tool real, sobre la
+                                                    # lista que derivan base/Makefile+Make.inc
+
 # CI/CD (GitHub Actions)
 git push origin main                                # Dispara build-package.yml
 
@@ -41,6 +47,12 @@ ls output/                                          # Paquetes compilados
 - TODO `sed` lleva `|| echo "Warning: ..." >&2` o `2>/dev/null || true`
 - Clasificación: A-P = dependencias/config, F1-F13 = linker/config, H0-H12 = source fixes
 - Archivos externos en `packages/julia/patches/` para patches que no son sed inline
+- Un gate nunca mantiene su propia copia de lo que el build hace: si necesita una
+  lista (los sonames que `base/Makefile` resolverá, los `USE_SYSTEM_*` activos, los
+  commits que bajan `deps/*.mk`), la deriva con `make`/`grep` sobre el árbol
+  parcheado.  Una lista escrita a mano es un segundo fuente de verdad y ya costó
+  un run: el gate medía `libopenblas.so` mientras `julia-base` moría en
+  `libblas.so` (run 37823556050); ver `scripts/symlinked-libraries.sh`.
 
 ---
 
