@@ -45,9 +45,10 @@ def dep_names(spec):
 
 def main():
     index = sys.argv[1] if len(sys.argv) > 1 else "Packages"
+    roots = sys.argv[2:] or ROOTS
     packages = parse(index)
     resolved, missing = {}, set()
-    frontier = list(ROOTS)
+    frontier = list(roots)
     while frontier:
         current = frontier.pop()
         if current in resolved:
@@ -59,9 +60,12 @@ def main():
         resolved[current] = filename
         frontier.extend(dep_names(depends))
 
+    seen_files = set()
     for name in sorted(resolved):
-        print(resolved[name])
-    roots_missing = [name for name in ROOTS if name in missing]
+        if resolved[name] not in seen_files:
+            seen_files.add(resolved[name])
+            print(resolved[name])
+    roots_missing = [name for name in roots if name in missing]
     print(f"# resolved={len(resolved)} unresolved={len(missing)}", file=sys.stderr)
     if missing:
         print("# unresolved: " + " ".join(sorted(missing)), file=sys.stderr)

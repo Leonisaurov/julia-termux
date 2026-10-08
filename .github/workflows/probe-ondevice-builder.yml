@@ -1,0 +1,132 @@
+name: probe-ondevice-builder
+
+# Third and last feasibility probe.  probe-bionic-exec showed bionic/aarch64 ELFs run
+# on ubuntu-24.04-arm; probe-native-termux showed Termux's clang can compile and link
+# there.  This one asks the decisive question: can termux-packages' own build system,
+# in its on-device mode, build a real package inside a Termux rootfs materialised on a
+# Linux arm64 runner?  If yes, the Julia/LLVM builds in CI use exactly the code path
+# that already works on the phone.  Test subject is a small real package, not Julia.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  ROOT: /data/data/com.termux/files/usr
+
+jobs:
+  builder:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Materialise the Android runtime
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 origin ci/probe-rootfs
+          git show FETCH_HEAD:ci-probe-rootfs.tar.gz > rootfs.tar.gz
+          echo "1f2e6ab823955f2220561191b2bfe1715b84b8fdc8ed5c7e7d9b20cc690fd746  rootfs.tar.gz" | sha256sum -c -
+          sudo tar -xzf rootfs.tar.gz -C / system
+          # build-package.sh enables TERMUX_ON_DEVICE_BUILD when this file exists
+          sudo touch /system/bin/app_process
+          sudo chmod -R a+rX /system
+          ls -l /system/bin | head -5
+
+      - name: Resolve the build environment closure
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz \
+            -o Packages.gz
+          gzip -dc Packages.gz > Packages
+          python3 .github/scripts/probe-resolver.py Packages \
+            clang lld llvm libllvm libcompiler-rt ndk-sysroot binutils llvm-tools \
+            libc++ libandroid-support termux-exec dpkg apt make cmake ninja pkg-config \
+            perl python git patch sed grep findutils diffutils tar gzip bzip2 xz-utils \
+            lzip unzip which file jq ca-certificates openssl zlib zstd liblzma libexpat \
+            libiconv ncurses pcre2 autoconf automake libtool m4 bison flex gettext \
+            bsdtar uuid-utils > urls.txt 2> resolver.log
+          cat resolver.log
+          wc -l < urls.txt
+
+      - name: Install the closure into the prefix
+        run: |
+          set -euo pipefail
+          base=https://packages.termux.dev/apt/termux-main
+          mkdir -p debs
+          while read -r path; do
+            curl --fail --silent --show-error --location --retry 3 "$base/$path" -o "debs/$(basename "$path")"
+          done < urls.txt
+          du -sh debs
+          sudo mkdir -p "$ROOT"
+          for f in debs/*.deb; do sudo dpkg-deb -x "$f" /; done
+          sudo mkdir -p "$ROOT/var/lib/dpkg" "$ROOT/tmp"
+          sudo touch "$ROOT/var/lib/dpkg/status"
+          sudo chmod 1777 "$ROOT/tmp"
+          sudo chown -R "$(id -u):$(id -g)" /data "$ROOT"
+          sudo chmod -R a+rX /data
+          ls -l "$ROOT/bin/clang" "$ROOT/lib/libtermux-exec.so" | head -4
+
+      - name: Environment sanity
+        run: |
+          set -uo pipefail
+          export LD_PRELOAD="$ROOT/lib/libtermux-exec.so"
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          export TERMUX_APP_PACKAGE_MANAGER=apt
+          if [ ! -f "$ROOT/bin/termux-setup-package-manager" ]; then
+            printf '#!/data/data/com.termux/files/usr/bin/bash\nexport TERMUX_APP_PACKAGE_MANAGER=apt\n' > "$ROOT/bin/termux-setup-package-manager"
+          fi
+          chmod +x "$ROOT/bin/termux-setup-package-manager"
+          echo "uname -o: $(uname -o)  app_process: $([ -e /system/bin/app_process ] && echo yes || echo no)"
+          echo "id -u: $(id -u)  (the builder refuses root)"
+          echo "dpkg arch: $("$ROOT/bin/dpkg" --print-architecture)"
+          for t in clang ld.lld make cmake ninja pkg-config perl python git patch sed grep dpkg-deb file tar; do
+            printf '%-12s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          done
+
+      - name: Clone termux-packages
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/termux/termux-packages tp
+
+      - name: Build a real package with the on-device code path
+        run: |
+          set -uo pipefail
+          export LD_PRELOAD="$ROOT/lib/libtermux-exec.so"
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          export TERMUX_APP_PACKAGE_MANAGER=apt
+          cd tp
+          # -s: our materialised prefix has an empty dpkg status, so the dependency
+          #     check would fail on packages that are actually present as files.
+          # -c is "continue build", not "clean": it needs prior state and is not what
+          #     a first run wants.
+          timeout 1500 ./build-package.sh -s -q --format debian -o ../output libandroid-glob >../build.log 2>&1
+          echo "build rc=$?"
+          tail -60 ../build.log
+          echo "--- output dir ---"
+          ls -l ../output 2>/dev/null | head -10
+          for f in ../output/*.deb; do
+            [ -e "$f" ] || continue
+            echo "--- $(basename "$f") ---"
+            dpkg-deb -I "$f" | head -14
+            dpkg-deb -x "$f" ../unpacked
+            (cd ../unpacked && find . -name '*.so*' -type f -o -name '*.so*' -type l | head)
+            ELF=$(cd ../unpacked && find . -type f -name '*.so*' | head -1)
+            [ -n "$ELF" ] || continue
+            echo "--- readelf of $ELF ---"
+            readelf -h "../unpacked/$ELF" | grep -E 'Class|Machine|Type'
+            readelf -d "../unpacked/$ELF" | grep -E 'RUNPATH|RPATH|TEXTREL' || echo "  (no RUNPATH/RPATH/TEXTREL)"
+          done
+
+      - name: Record what the runner gave us
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "machine: $(uname -m)  nproc: $(nproc)"
+            free -m | head -3
+            df -h / "$ROOT" 2>/dev/null | tail -2
+            echo "builder files in tp: $(find tp -maxdepth 1 -type d | wc -l) dirs"
+            [ -e tp/build/packages/libandroid-glob ] && du -sh tp/build/packages/libandroid-glob
+          done | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
