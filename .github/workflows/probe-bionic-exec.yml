@@ -37,8 +37,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo tar -xzf ci-probe-rootfs.tar.gz -C /
+          # the fixture was packed inside a 0700 mktemp tree; make it traversable
+          # by the unprivileged user that would run the real build
+          sudo chmod -R a+rX /system /data
           ls -l /system/bin/linker64
           ls -l /data/data/com.termux/files/usr/bin/pt
+          id
           readelf -l /data/data/com.termux/files/usr/bin/pt | sed -n '/INTERP/,+1p'
 
       - name: Execute natively (arm64 host)
@@ -49,12 +53,15 @@ jobs:
           uname -r
           echo "--- direct run ---"
           /data/data/com.termux/files/usr/bin/pt
-          echo "rc=$?"
+          rc1=$?
+          echo "direct rc=$rc1"
           echo "--- via explicit interpreter ---"
           /system/bin/linker64 /data/data/com.termux/files/usr/bin/pt
-          echo "rc=$?"
+          rc2=$?
+          echo "interp rc=$rc2"
           echo "--- dmesg tail ---"
           sudo dmesg | tail -5
+          [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]
 
       - name: Execute under qemu-user (x86_64 host)
         if: matrix.mode == 'qemu'
@@ -65,4 +72,6 @@ jobs:
           qemu-aarch64 --version | head -1
           echo "--- run under qemu ---"
           qemu-aarch64 -L / /data/data/com.termux/files/usr/bin/pt
-          echo "rc=$?"
+          rc=$?
+          echo "qemu rc=$rc"
+          [ "$rc" -eq 0 ]
