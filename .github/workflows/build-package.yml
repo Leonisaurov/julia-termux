@@ -166,8 +166,24 @@ jobs:
           #     and without it a failed download would silently start building
           #     dependencies from source.
           # No -c and no -f: see the cache contract above.
-          ./build-package.sh -s --format debian -j "$(nproc)" \
-            -o "$GITHUB_WORKSPACE/output" "$PKG" 2>&1 |
+          # Start the build from the prefix's own bash, not from this step's shell.
+          # build-package.sh begins with `#!/bin/bash`, and the shell that gets here
+          # is the runner's glibc bash with bionic's libtermux-exec only in the
+          # environment - so the kernel would exec a glibc /bin/bash carrying that
+          # preload and its loader dies on "invalid ELF header" without printing a
+          # line (run 37789690789).  Run by the prefix's bash the preload is real,
+          # and the FHS paths termux-packages and Julia's makefiles assume
+          # (/bin/sh, /usr/bin/env perl) resolve into the prefix like they do on a
+          # phone.
+          printf '%s\n' \
+            '#!/data/data/com.termux/files/usr/bin/bash' \
+            'set -uo pipefail' \
+            'cd "$RUNNER_TEMP/tp" || exit 1' \
+            './build-package.sh -s --format debian -j "$(nproc)" \' \
+            '  -o "$GITHUB_WORKSPACE/output" "$PKG"' \
+            > "$RUNNER_TEMP/run-build.sh"
+          chmod 755 "$RUNNER_TEMP/run-build.sh"
+          "$RUNNER_TEMP/run-build.sh" 2>&1 |
             tee "$RUNNER_TEMP/build.log" |
             grep -vE 'linkerconfig|ld.config.txt'
           rc=${PIPESTATUS[0]}
@@ -278,6 +294,9 @@ jobs:
         if: always()
         shell: bash
         run: |
+          # Report only, never a verdict: with -e this step turned the job red for
+          # `du` on a directory the failed build had not created (run 37789690789).
+          set +e
           set -uo pipefail
           LOG="$RUNNER_TEMP/build.log"
           if [ ! -f "$LOG" ]; then
