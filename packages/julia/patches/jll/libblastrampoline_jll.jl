@@ -26,11 +26,23 @@ else
     "libblastrampoline.so.5"
 end
 
+# Julia builds libblastrampoline itself (USE_SYSTEM_LIBBLASTRAMPOLINE=0) and
+# installs it into $(prefix)/lib/julia, which is the same absolute path at
+# system-image generation time and on the device.
+const termux_julia_libdir = joinpath(dirname(Sys.BINDIR), "lib", "julia")
+const termux_lbt_path = joinpath(termux_julia_libdir, libblastrampoline)
+
 function __init__()
-    global libblastrampoline_handle = dlopen(libblastrampoline)
-    global libblastrampoline_path = dlpath(libblastrampoline_handle)
+    # See the note in OpenBLAS_jll: `dlpath()` cannot be used on Bionic, and an
+    # empty `libblastrampoline_path` baked into sys.so breaks BLAS resolution.
+    global libblastrampoline_handle = dlopen(termux_lbt_path)
+    if libblastrampoline_handle == C_NULL
+        error("libblastrampoline_jll: could not dlopen ", termux_lbt_path,
+              " — check that libblastrampoline was installed into ", termux_julia_libdir)
+    end
+    global libblastrampoline_path = termux_lbt_path
     global artifact_dir = dirname(Sys.BINDIR)
-    LIBPATH[] = dirname(libblastrampoline_path)
+    LIBPATH[] = termux_julia_libdir
     push!(LIBPATH_list, LIBPATH[])
 end
 

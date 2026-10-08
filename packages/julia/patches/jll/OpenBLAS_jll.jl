@@ -32,15 +32,21 @@ else
     const libsuffix = ""
 end
 
+# Termux ships OpenBLAS as a plain system library in $PREFIX/lib; there is no
+# artifact directory to discover.  `Sys.BINDIR` is $PREFIX/bin both when the
+# system image is generated and on the device, so this path is stable.
+const termux_libdir = joinpath(dirname(Sys.BINDIR), "lib")
+const termux_openblas_path = joinpath(termux_libdir, "libopenblas$(libsuffix).so")
+
 if Sys.iswindows()
     const libopenblas = "libopenblas$(libsuffix).dll"
-    const _libgfortran = string("libgfortran-", libgfortran_version(HostPlatform()).major, ".dll")
+    const _libgfortran = string("libgfortran-", something(libgfortran_version(HostPlatform()), v"0.0.0").major, ".dll")
 elseif Sys.isapple()
     const libopenblas = "@rpath/libopenblas$(libsuffix).dylib"
-    const _libgfortran = string("@rpath/", "libgfortran.", libgfortran_version(HostPlatform()).major, ".dylib")
+    const _libgfortran = string("@rpath/", "libgfortran.", something(libgfortran_version(HostPlatform()), v"0.0.0").major, ".dylib")
 else
     const libopenblas = "libopenblas$(libsuffix).so"
-    const _libgfortran = string("libgfortran.so.", libgfortran_version(HostPlatform()).major)
+    const _libgfortran = string("libgfortran.so.", something(libgfortran_version(HostPlatform()), v"0.0.0").major)
 end
 
 function __init__()
@@ -62,13 +68,26 @@ function __init__()
         ENV["OPENBLAS_DEFAULT_NUM_THREADS"] = "1"
     end
 
-    # NOTE: dlopen(_libgfortran) removed — Termux/OpenBLAS links Fortran runtime statically
-    # via flang, so libgfortran.so does not exist on the system.
+    # NOTE: dlopen(_libgfortran) is not performed.  Termux's OpenBLAS is linked
+    # against the Fortran runtime statically, so libgfortran.so does not exist.
 
-    global libopenblas_handle = dlopen(libopenblas)
-    global libopenblas_path = dlpath(libopenblas_handle)
+    # `dlpath()` is deliberately NOT used here: it routes through
+    # `jl_pathname_for_handle`, whose glibc implementation relies on
+    # `dlinfo(RTLD_DI_LINKMAP)`, which Bionic does not provide.  A NULL return
+    # used to make `unsafe_string` throw "cannot convert NULL to string"; the
+    # error was caught, `libopenblas_path` stayed "" and that empty string got
+    # baked into sys.so, so libblastrampoline was told to forward to "" and
+    # every Julia process died at BLAS init.  The path is known statically, so
+    # this stub must never depend on the loader to report it.
+    global libopenblas_handle = dlopen(termux_openblas_path)
+    if libopenblas_handle == C_NULL
+        error("OpenBLAS_jll: could not dlopen ", termux_openblas_path,
+              " — check that the libopenblas package is installed and that ",
+              termux_libdir, " contains libopenblas", libsuffix, ".so")
+    end
+    global libopenblas_path = termux_openblas_path
     global artifact_dir = dirname(Sys.BINDIR)
-    LIBPATH[] = dirname(libopenblas_path)
+    LIBPATH[] = termux_libdir
     push!(LIBPATH_list, LIBPATH[])
 end
 
