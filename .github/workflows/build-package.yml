@@ -204,7 +204,12 @@ jobs:
           _foreign() { # <dir> [allowed name ...]
             local _d="$1" _n _expr
             shift
-            [ -d "$_d" ] || return 0
+            if [ ! -d "$_d" ]; then
+              # An expected directory missing from the payload means the find below
+              # would check nothing at all, so say so instead of passing quietly.
+              [ -e "$_d" ] && printf 'FAIL  foreign: %s (not a directory)\n' "$_d"
+              return 0
+            fi
             _expr=("$_d" -mindepth 1 -maxdepth 1)
             for _n in "$@"; do _expr+=( ! -name "$_n" ); done
             find "${_expr[@]}" -printf 'FAIL  foreign: %p\n'
