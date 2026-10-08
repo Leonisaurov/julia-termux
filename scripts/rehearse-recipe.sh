@@ -513,6 +513,23 @@ if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" 2>"$W
 			echo "  FAIL  build.sh does not create the aliases the source demands before make starts"
 			soname_fail=1
 		fi
+		# Linking into a directory that make has not created yet is not a missing
+		# library: run 37859841658 died 4 minutes in with
+		#	ln: failed to create symbolic link 'usr/lib/julia/libcurl.so.4': No such file or directory
+		# so whoever links before make must also mkdir, and the gate says so
+		# instead of letting the runner discover it.
+		for fn in $producers; do
+			body=$(awk -v f="$fn" '
+				index($0, f"() {") == 1 { inb = 1; next }
+				inb && /^\}/ { inb = 0 }
+				inb' "$RECIPE")
+			if printf '%s\n' "$body" | grep -q 'mkdir -p'; then
+				printf '  OK    %s creates the directory it links into\n' "$fn"
+			else
+				printf '  FAIL  %s links into a directory it never creates\n' "$fn"
+				soname_fail=1
+			fi
+		done
 	fi
 	echo
 else
