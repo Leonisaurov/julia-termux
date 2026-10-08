@@ -120,6 +120,7 @@ fi
 echo
 echo "-- per declared patch target --"
 missing=0
+guarded=0
 same=0
 ok=0
 while read -r rel; do
@@ -127,8 +128,15 @@ while read -r rel; do
 	hb=$(awk -v f="./$rel" '$2==f {print $1; exit}' "$WORK/hash-before.txt")
 	ha=$(awk -v f="./$rel" '$2==f {print $1; exit}' "$WORK/hash-after.txt")
 	if [ -z "$hb" ]; then
-		printf 'MISS  %-48s absent in upstream tarball\n' "$rel"
-		missing=$((missing + 1))
+		# `if [ -f X ]` guards are legitimate for files that upstream deleted or
+		# that the build generates (src/flisp/host/Makefile); they are not misses.
+		if grep -qE "\[ (-f|-e) .?$rel\\b" "$RECIPE"; then
+			printf 'GUARD %-48s absent here, but the recipe tests for it first\n' "$rel"
+			guarded=$((guarded + 1))
+		else
+			printf 'MISS  %-48s absent in upstream tarball\n' "$rel"
+			missing=$((missing + 1))
+		fi
 	elif [ "$hb" = "$ha" ]; then
 		printf 'SAME  %-48s exists but the patch stage did not modify it\n' "$rel"
 		same=$((same + 1))
@@ -166,7 +174,7 @@ done < "$WORK/ext_refs.txt"
 
 echo
 echo "===== summary ====="
-printf 'ok=%s same=%s missing=%s external_missing=%s hook_rc=%s\n' "$ok" "$same" "$missing" "$ext_missing" "$HOOK_RC"
+printf 'ok=%s same=%s missing=%s guarded=%s external_missing=%s hook_rc=%s\n' "$ok" "$same" "$missing" "$guarded" "$ext_missing" "$HOOK_RC"
 if [ "$missing" -gt 0 ] || [ "$ext_missing" -gt 0 ] || [ "$same" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
