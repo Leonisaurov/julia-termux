@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del proyecto julia-termux
 
-> Última actualización: 2026-10-08 ~20:45 UTC
+> Última actualización: 2026-10-08 ~22:10 UTC
 >
 > Este archivo es el **registro de evidencia**: qué se intentó, qué falló, por
 > qué y qué gate local cerró ese fallo. Las decisiones de diseño viven en
@@ -15,8 +15,9 @@ Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
 **Estado**: la arquitectura de build está validada de punta a punta hasta el
-minuto 43; el compilador ya llega a `src/`. Qedan por demostrarse la parte
-final (`sysimg`, `base/`, empaquetado) y la verificación en dispositivo.
+minuto 47; el compilador ya llega a `src/`, enlaza `julia-base` con los 19
+symlinks y muere en el bootstrap de la imagen.  Quedan por demostrarse `sysimg`,
+`stdlib`/precompile, empaquetado y la verificación en dispositivo.
 
 | Pieza | Estado |
 |---|---|
@@ -24,7 +25,8 @@ final (`sysimg`, `base/`, empaquetado) y la verificación en dispositivo.
 | Gates estáticos locales | OK y en el DAG de CI |
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
-| `src/` de Julia | OK (flisp y el runtime se compilan); `julia-base` aborta al enlazar las system libs |
+| `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
+| Sysimage (`sysimg`/`base/`) | aborta en `sysimage.mk:129`; causa raíz cerrada en el gate, sin medir todavía en CI |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -86,32 +88,39 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   `scripts/probe-library-resolution.sh` solo trabaja con esa lista (el job lint
   se la pasa al job build por output del job); un nombre ausente del prefijo es
   `FAIL`, porque `julia-base` aborta justo ahí.
+- `scripts/embedded-triplet.sh` — le pide a `make` el valor que `base/Makefile:85`
+  va a empotrar como `const BUILD_TRIPLET` (`$(BB_TRIPLET_LIBGFORTRAN_CXXABI)`,
+  salida de `Make.inc:1380`) y exige que ese valor sobreviva un round-trip por
+  `contrib/normalize_triplet.py` invocado con el propio `$(PYTHON)`/`invoke_python`
+  de Make.inc.  No se compara contra una expectativa escrita: la pregunta es si la
+  cadena que se empotra es expresable en la gramática que
+  `base/binaryplatforms.jl` tiene que parsear, y eso lo responde el mismo script
+  que la produce.
 - `.github/scripts/termux-closure-resolver.py` — cierre de dependencias del
   índice de Termux (roots = bootstrap recortado + Tier 1 de
   `scripts/setup-termux.sh` + `termux-elf-cleaner` + `TERMUX_PKG_*DEPENDS` de la
   receta).
 
-**Hipótesis del próximo run** — sigue siendo la de `libblas.so`, porque el run
-anterior no llegó a ponerla a prueba: `julia-base` abortaba en `Makefile:250`
-porque el prefijo del runner no tenía `libblas.so`; con `USE_SYSTEM_BLAS := 1`
-Make.inc fija `LIBBLASNAME := libblas` y ese alias lo aporta el paquete split
-`blas-openblas`, que la receta no declaraba (ahora está en
-`TERMUX_PKG_BUILD_DEPENDS`; el symlink resultante es absoluto a
-`$PREFIX/lib/libopenblas.so`, que ya cubre el runtime). La lista que se sonda es
-la que derivan `make` + `base/Makefile` — 19 nombres, dos más que los 18
-inventados que el gate verificaba contra la librería equivocada. Ya está medido
-en **ambos** entornos: teléfono (`resolution=0`, `libblas.so → libopenblas.so`,
-gate12 19:35 UTC) y prefijo del runner (`19 name(s) must resolve`,
-`-- 19 soname(s) probed, 0 failure(s) --`, `PROBE: PASS` en 37833826111), y la
-closure del action lo resuelve (`blas-openblas_0.3.34`, 115 paquetes,
-`unresolved=0`). Lo que falta es `make -C base`: si `libblas.so` y
-`liblapack.so` se enlazan y el build avanza, el siguiente punto de dolor está
-después de los symlinks. Ese run se cayó en un paso propio del traspaso de la
-lista al job build (`tr '\n' ' '` dejaba un espacio final y la validación anclada
-del mismo paso lo rechazó, con razón); reproducido en el teléfono en 1 s y
-corregido con `paste -sd' '`. Como `packages/**` entra en la clave de caché y
-todavía no hay artefacto cacheado, el próximo run paga la compilación completa
-(~45 min).
+**Hipótesis del próximo run** — el bootstrap pasa de `binaryplatforms.jl` y
+`sysimage.mk:129` produce `sysbase-o.a`. La cadena que abortaba ya está medida en
+sus dos extremos: `clang -dumpmachine` es `aarch64-unknown-linux-android24` en el
+teléfono y en el runner, `contrib/normalize_triplet.py` no conoce ese formato y
+`Make.inc:1380` convierte su stdout de error en `const BUILD_TRIPLET`
+(`base/Makefile:85`) sin mirar el rc. Con el parche, el gate deriva
+`aarch64-linux-gnu-cxx11` y ese valor sobrevive el round-trip por el propio script
+y matchea el `triplet_regex` de `base/binaryplatforms.jl` transcrito (con y sin
+`-julia_version+1.12.6`); `USE_BINARYBUILDER := 0` en `Make.user` sigue ganando al
+`?=` de `Make.inc:1366`, así que el probe de BinaryBuilder no se activa y no hay
+descargas nuevas. Los tres detectores de `host_triplet()` (`libgfortran`, `cxx`,
+`libstdc++`) devuelven `nothing` con clang/libc++ (ninguna de esas librerías está
+en el `dllist`), y `libgfortran.so.5` salió de la lista de symlinks porque el
+segundo hunk deja de reclamar una versión que Bionic no tiene.
+
+Riesgo residual declarado: después de `sysimage.mk:129` vienen `julia-sysimg-*`,
+el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que todavía no corrió en
+Android; si el run cae ahí, la nueva línea de `make` y el `LoadError` dicen desde
+dónde ampliar el gate. Como `packages/**` y `scripts/**` cambian, la clave de
+caché no hit y el run vuelve a pagar la compilación completa (~45-47 min).
 
 ---
 
@@ -136,6 +145,7 @@ convirtió en gate local cuando era reproducible fuera del runner.
 | 37820685855 | 18:00 | `GATE: FAIL` con `resolution=1` en el job lint: el build ni empezó | la sonda nueva heredaba el algoritmo fatal de libwhich, así que reproducía el síntoma sin poder explicarlo: `FAIL  libpcre2-8.so` con el detalle vacío, porque el proceso moría antes de imprimir | la sonda reporta por etapas (`CTRL` de arranque, `LOAD <soname> ok` con `flush`, `NEEDED` del binario, stderr completo): un stdout vacío ahora significa "no llegó a `main()`" y un `LOAD … ok` prueba que el loader encontró la librería |
 | 37823556050 | 18:20 | `GATE: PASS` y `PROBE: PASS` (`18 soname(s) probed, 0 failure(s)`) en el runner, pero a los ~44 min `System library symlink failure: Unable to locate libblas.so on your system!` → `Makefile:250` → `Makefile:93: julia-base`; el fix de libwhich sí había funcionado (`ln -sf $PREFIX/lib/libpcre2-8.so usr/lib/julia/libpcre2-8.so` en el build real) | el nombre que faltaba no era el que se verificaba: con `USE_SYSTEM_BLAS := 1`, Make.inc fija `LIBBLASNAME := libblas` / `LIBLAPACKNAME := liblapack` y `base/Makefile` pregunta por **esos alias**, que en Termux pertenecen al paquete split `blas-openblas` (dueño de `libblas.so`, `libblas.so.3`, `liblapack.so*`) — la receta solo declaraba `libopenblas`. Y tanto el gate como la sonda llevaban la lista escrita a mano con `libopenblas.so`, así que `resolution=0` mediía otra cosa | `blas-openblas` en `TERMUX_PKG_BUILD_DEPENDS` (el symlink que crea `julia-base` es absoluto a `$PREFIX/lib/libopenblas.so`, ya cubierto en runtime); `scripts/symlinked-libraries.sh` deriva los 19 nombres con `make` sobre el árbol parcheado y `rehearse-recipe.sh`/el job build los consumen (`PROBE_LIBS` del output `lint.probe_libs`); `MISS` pasó a ser `FAIL`: un nombre que el prefijo no tiene es exactamente el abort de `julia-base` |
 | 37833826111 | 19:41 | el job build **nunca arrancó**: `GATE: PASS` con la lista derivada (`19 name(s) must resolve`, `-- 19 soname(s) probed, 0 failure(s) --`, `PROBE: PASS` sobre el prefijo del runner) y en cambio falló el paso nuevo que le pasa esa lista al job build | `tr '\n' ' '` convierte el último salto de línea en un espacio **final**, y la validación anclada `^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$` del propio paso lo rechaza — el guard era correcto; quien normalizaba mal era el join | `paste -sd' '` (sin separador colante). Reproducido en el teléfono antes de tocar nada: `old join: REJECTED`, `paste join: VALID (19 names)`. La hipótesis de `libblas.so` sigue sin medir en el build: este run es el primero que llega a `make` con la lista buena |
+| 37841320064 | 21:33 | `GATE: PASS` + `PROBE: PASS` y **la hipótesis de `libblas.so` confirmada en el build real**: `System library symlink failure` aparece 0 veces en el log y se crean 19 `ln -sf /data…`, entre ellos `libblas.so → $PREFIX/lib/libopenblas.so` y `liblapack.so → …`; `julia-base` termina y el run muere ~47 min después en `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1` → `Makefile:114: julia-sysimg-release Error 2`, con `LoadError("binaryplatforms.jl", 0, ArgumentError("Platform \`ERROR: Unmatchable platform string 'aarch64-unknown-linux-gnu24'!-julia_version+1.12.6\` is not an officially supported platform"))` | `base/Makefile:85` empotra `$(BB_TRIPLET_LIBGFORTRAN_CXXABI)` como `const BUILD_TRIPLET`, y esa variable es el stdout de `contrib/normalize_triplet.py $(BUILD_MACHINE)` invocado en `Make.inc:1380` **sin mirar el rc**. `clang -dumpmachine` en Termux es `aarch64-unknown-linux-android24` (medido en el teléfono; en el runner: `checking host system type... aarch64-unknown-linux-android24`, línea 4306 del log) y las tablas del script no conocen android, así que el script imprimió su queja y **ese texto se convirtió en la constante**; `binaryplatforms.jl:958` le añade `-julia_version+1.12.6` y `parse` (línea 769) aborta el bootstrap. El parche que había (`base-binaryplatforms.jl.patch`, `replace("-android" => "-gnu")` dentro de `parse`) actuaba una capa más abajo: reescribía el mensaje de error — de ahí la `24` escrita como `gnu` — y no podía arreglar nada. Verificado con el `triplet_regex` de `base/binaryplatforms.jl:678-695` transcrito a Python: ni la cadena cruda, ni la reescrita, ni el triple crudo matchean; `aarch64-linux-gnu-cxx11(-julia_version+1.12.6)` sí | `packages/julia/contrib-normalize_triplet.py.patch` en dos hunks: canoniza `-android<api>` → `-gnu` donde nace la cadena y deja de reclamar `-libgfortran5` (con el triple arreglado el default "sin versión → libgfortran5" habría añadido la etiqueta, `Make.inc:1385` la convierte en `LIBGFORTRAN_VERSION=5` y `base/Makefile:239` pide `libgfortran.so.5` **sin** `ALLOW_FAILURE`: la lista derivada pasó de 19 a 20 nombres y la sonda lo marcó como `MISS` antes de gastar un run); se elimina `base-binaryplatforms.jl.patch`; `USE_BINARYBUILDER := 0` de `Make.user` sigue ganando al `?=` de `Make.inc:1366`, así que arreglar el script no activa las descargas de BinaryBuilder. Gate nuevo `scripts/embedded-triplet.sh` + sección `embedded platform triplet` en `rehearse-recipe.sh`: pregunta a `make` el valor que se va a empotrar y exige que sobreviva un round-trip por el propio `contrib/normalize_triplet.py` con el `$(PYTHON)`/`invoke_python` de Make.inc. Rojo→verde en el teléfono: gate13 `triplet=1` (FAIL), gate14 `triplet=0 resolution=1` (libgfortran), gate15 `triplet=0 resolution=0`, 19 nombres, `PROBE: PASS` |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
@@ -150,8 +160,9 @@ pida `dlopen` del linker del runner.
 
 `12 ms` (ni arrancaba) → `4 min` (parches + configure) → `4.5 min`
 (deps/libuv/LBT) → `43 min` (LLVM 18.1.7-4 completo; flisp caía en endianness) →
-`~47 min` (flisp compila, `src/` se construye, muere en `julia-base` al enlazar
-las system libs).
+`44 min` (flisp compila, `src/` se construye, muere en `julia-base` al enlazar las
+system libs) → `47 min` (`julia-base` termina con sus 19 symlinks; aborta
+`sysimage.mk:129` por el `BUILD_TRIPLET` empotrado).
 
 ---
 
