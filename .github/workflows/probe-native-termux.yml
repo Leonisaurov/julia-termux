@@ -46,7 +46,7 @@ jobs:
             https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz \
             -o Packages.gz
           gzip -dc Packages.gz > Packages
-          python3 .github/scripts/probe-resolver.py Packages > urls.txt 2> resolver.log
+          python3 .github/scripts/termux-closure-resolver.py Packages > urls.txt 2> resolver.log
           cat resolver.log
           wc -l < urls.txt
           head -3 urls.txt

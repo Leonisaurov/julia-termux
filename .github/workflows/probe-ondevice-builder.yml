@@ -41,7 +41,7 @@ jobs:
             -o Packages.gz
           gzip -dc Packages.gz > Packages
           # `set -e` would abort before the resolver's own report; print it either way.
-          python3 .github/scripts/probe-resolver.py Packages \
+          python3 .github/scripts/termux-closure-resolver.py Packages \
             clang lld llvm libllvm libcompiler-rt ndk-sysroot binutils llvm-tools \
             libc++ libandroid-support termux-exec dpkg apt termux-keyring gpgv \
             termux-elf-cleaner termux-tools make cmake ninja pkg-config \

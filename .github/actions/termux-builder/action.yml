@@ -1,0 +1,198 @@
+name: Materialise a Termux build prefix
+description: >
+  Recreate, on a Linux arm64 runner, the environment termux-packages' build-package.sh
+  expects on a phone: /system present (that file is what switches on
+  TERMUX_ON_DEVICE_BUILD), a $PREFIX holding Termux's own binaries, and a dpkg database
+  apt is willing to install into.
+
+  Everything downstream — the static gate and the build — runs through this same code
+  path, which is the one already validated on a device.
+
+inputs:
+  recipe:
+    description: >
+      Path, relative to the repository, of a termux-packages build.sh whose
+      TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS should be installed into the
+      prefix.  The recipe stays the single source of truth for what the build needs.
+    required: false
+    default: ''
+  packages:
+    description: >
+      Space-separated Termux packages to apt-install on top of the bootstrap set and
+      the recipe's own lists.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Materialise the Android runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        # /system comes from the ci/probe-rootfs branch of this repository: an archive of
+        # the Android dynamic loader and its config.  Bionic ELFs on this runner have
+        # PT_INTERP /system/bin/linker64, so without it nothing Termux-shipped can execute;
+        # probe-bionic-exec (run 37716844030) measured that.  Treat the branch as a build
+        # asset, not as scratch: deleting it breaks every job that uses this action.
+        git -C "$GITHUB_WORKSPACE" fetch --depth 1 origin ci/probe-rootfs
+        git -C "$GITHUB_WORKSPACE" show FETCH_HEAD:ci-probe-rootfs.tar.gz > "$RUNNER_TEMP/rootfs.tar.gz"
+        echo "1f2e6ab823955f2220561191b2bfe1715b84b8fdc8ed5c7e7d9b20cc690fd746  $RUNNER_TEMP/rootfs.tar.gz" \
+          | sha256sum -c -
+        sudo tar -xzf "$RUNNER_TEMP/rootfs.tar.gz" -C / system
+        # build-package.sh:38 enables on-device mode on this file's existence, and its
+        # target arch then comes from `dpkg --print-architecture`.
+        sudo mkdir -p /system/bin
+        sudo touch /system/bin/app_process
+        sudo chmod -R a+rX /system
+        ls -l /system/bin | head -5
+
+    - name: Resolve the bootstrap closure
+      shell: bash
+      run: |
+        set -euo pipefail
+        # packages-cf.termux.dev serves an AAAA record; these runners resolve IPv4 only,
+        # so the plain hostname is used here and apt is forced to IPv4 below.
+        curl --fail --silent --show-error --location --retry 3 \
+          https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz \
+          -o "$RUNNER_TEMP/Packages.gz"
+        gzip -dc "$RUNNER_TEMP/Packages.gz" > "$RUNNER_TEMP/Packages"
+        python3 "$GITHUB_WORKSPACE/.github/scripts/termux-closure-resolver.py" \
+          "$RUNNER_TEMP/Packages" > "$RUNNER_TEMP/urls.txt" 2> "$RUNNER_TEMP/resolver.log" || rc=$?
+        # The resolver's own report is the diagnosis; print it whether or not it failed.
+        cat "$RUNNER_TEMP/resolver.log"
+        echo "closure size: $(wc -l < "$RUNNER_TEMP/urls.txt") packages"
+        exit "${rc:-0}"
+
+    - name: Extract the closure and seed the package database
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        base=https://packages.termux.dev/apt/termux-main
+        debs=$RUNNER_TEMP/debs
+        mkdir -p "$debs"
+        while read -r path; do
+          curl --fail --silent --show-error --location --retry 3 \
+            "$base/$path" -o "$debs/$(basename "$path")"
+        done < "$RUNNER_TEMP/urls.txt"
+        du -sh "$debs"
+        sudo mkdir -p "$ROOT"
+        for f in "$debs"/*.deb; do sudo dpkg-deb -x "$f" /; done
+        # Without a dpkg database the on-device path dies with apt's code 100:
+        # termux_step_start_build.sh runs `apt install -y termux-elf-cleaner`
+        # unconditionally for bionic builds.  Seed the status the way
+        # generate-bootstraps.sh does (the control member carries no Status field).
+        sudo mkdir -p "$ROOT/var/lib/dpkg/info" "$ROOT/var/lib/dpkg/triggers" \
+          "$ROOT/var/lib/dpkg/updates" "$ROOT/var/log/apt" "$ROOT/tmp" \
+          "$ROOT/var/lib/apt/lists/partial" "$ROOT/var/lib/apt/extended_states.d" \
+          "$ROOT/etc/apt/apt.conf.d" "$ROOT/etc/apt/preferences.d" \
+          /data/data/com.termux/cache/apt/archives/partial
+        status=$RUNNER_TEMP/status.part
+        : > "$status"
+        for f in "$debs"/*.deb; do
+          d=$(mktemp -d "$RUNNER_TEMP/ctrl.XXXXXX")
+          dpkg-deb -e "$f" "$d"
+          { cat "$d/control"; echo 'Status: install ok installed'; echo; } >> "$status"
+          rm -rf "$d"
+        done
+        grep -c '^Package: ' "$status" | sed 's/^/seeded packages: /'
+        sudo tee -a "$ROOT/var/lib/dpkg/status" > /dev/null < "$status"
+        sudo chmod 1777 "$ROOT/tmp"
+        # The runner user, not root: build-package.sh refuses to run as root, and apt
+        # needs to write the lists it creates below.
+        sudo chown -R "$(id -u):$(id -g)" /data "$ROOT"
+        sudo chmod -R a+rX /data
+
+    - name: Configure apt in the materialised prefix
+      shell: bash
+      run: |
+        set -uo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        cat > "$ROOT/etc/apt/sources.list" <<'EOF'
+        deb [trusted=yes] https://packages.termux.dev/apt/termux-main stable main
+        EOF
+        printf 'Acquire::ForceIPv4 "true";\n' > "$ROOT/etc/apt/apt.conf.d/99force-ipv4"
+        # build-package.sh:438 sources this file to learn the package manager; a runner
+        # has no Termux app to ship it.
+        if [ ! -f "$ROOT/bin/termux-setup-package-manager" ]; then
+          printf '#!/data/data/com.termux/files/usr/bin/bash\nexport TERMUX_APP_PACKAGE_MANAGER=apt\n' \
+            > "$ROOT/bin/termux-setup-package-manager"
+        fi
+        chmod +x "$ROOT/bin/termux-setup-package-manager"
+        export LD_PRELOAD="$ROOT/lib/libtermux-exec.so" PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+        rc=0
+        # Every bionic exec on a Linux kernel prints the linkerconfig noise; it buries
+        # the actual apt output.
+        apt update > "$RUNNER_TEMP/apt-update.log" 2>&1 || rc=$?
+        echo "apt update rc=$rc"
+        grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-update.log" | tail -8
+        [ "$rc" -eq 0 ] || exit 1
+        apt install -y termux-elf-cleaner > "$RUNNER_TEMP/apt-elfcleaner.log" 2>&1 || rc=$?
+        echo "apt install termux-elf-cleaner rc=$rc"
+        grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-elfcleaner.log" | tail -6
+        [ "$rc" -eq 0 ] || exit 1
+        # This is the exact binary termux_step_start_build.sh looks up after installing
+        # it; if it is not on PATH the build fails minutes later with a confusing error.
+        command -v termux-elf-cleaner || { echo "termux-elf-cleaner missing after apt install"; exit 1; }
+
+    - name: Install the packages the build needs
+      shell: bash
+      env:
+        RECIPE: ${{ inputs.recipe }}
+        EXTRA: ${{ inputs.packages }}
+      run: |
+        set -uo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        # Same parsing scripts/rehearse-recipe.sh uses for its repository check:
+        # version predicates and soname suffixes are not package names.
+        recipe_deps=""
+        if [ -n "${RECIPE// /}" ]; then
+          recipe_deps=$(grep -h '^TERMUX_PKG_DEPENDS=\|^TERMUX_PKG_BUILD_DEPENDS=' \
+              "$GITHUB_WORKSPACE/$RECIPE" | sed 's/^[^=]*="//; s/"$//' | tr ',' '\n' |
+            sed 's/^ *//; s/ *$//; s/[<>(].*$//; s/\*.*$//' | grep -v '^$' | sort -u | tr '\n' ' ')
+          echo "from $RECIPE: $recipe_deps"
+        fi
+        # shellcheck disable=SC2086
+        set -- $recipe_deps $EXTRA
+        if [ "$#" -eq 0 ]; then
+          echo "no extra packages requested"
+          exit 0
+        fi
+        export LD_PRELOAD="$ROOT/lib/libtermux-exec.so" PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+        echo "installing: $*"
+        rc=0
+        apt install -y "$@" > "$RUNNER_TEMP/apt-install.log" 2>&1 || rc=$?
+        echo "apt install rc=$rc"
+        grep -vE 'linkerconfig|ld.config.txt' "$RUNNER_TEMP/apt-install.log" | tail -25
+        [ "$rc" -eq 0 ] || exit 1
+
+    - name: Publish the prefix environment
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        # LD_PRELOAD stays out of GITHUB_ENV: preloading a bionic library into the
+        # runner's own glibc tools makes every command print an ld.so error.  Steps that
+        # run Termux binaries source this file instead.
+        cat > "$HOME/.termux-builder-env.sh" <<EOF
+        export TERMUX_BUILDER_ROOT=$ROOT
+        export LD_PRELOAD=$ROOT/lib/libtermux-exec.so
+        export PATH=$ROOT/bin:\$PATH
+        export TMPDIR=$ROOT/tmp
+        export TERMUX_APP_PACKAGE_MANAGER=apt
+        export TERMUX_PREFIX=$ROOT
+        export TERMUX_BASE_DIR=$ROOT
+        export TERMUX_ANDROID_HOME=/data/data/com.termux/files/home
+        EOF
+        echo "TERMUX_BUILDER_ENV=$HOME/.termux-builder-env.sh" >> "$GITHUB_ENV"
+        echo "PREFIX=$ROOT" >> "$GITHUB_ENV"
+        set -o allexport; . "$HOME/.termux-builder-env.sh"; set +o allexport
+        echo "uname: $(uname -m)  nproc: $(nproc)  dpkg arch: $(dpkg --print-architecture)"
+        free -m | head -3
+        df -h "$ROOT" | tail -1
+        for t in clang ld.lld make cmake ninja pkg-config perl python git patch sed grep \
+                 dpkg-deb file tar curl patchelf which dpkg apt bsdtar xz zstd 7z; do
+          printf '%-12s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+        done
