@@ -292,3 +292,52 @@ runs:
         curl --fail --silent --show-error --max-time 60 --range 0-0 \
           -o /dev/null https://github.com/JuliaLang/julia/releases/download/v1.12.6/julia-1.12.6.tar.gz
         echo "OK    curl from the prefix environment fetches the recipe's own URL"
+
+    - name: Give the prefix a make that CMake can execute
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=/data/data/com.termux/files/usr
+        # CMake's Unix Makefiles generator probes for `gmake` before `make` and
+        # records what it finds as an absolute path.  On a phone the probe finds
+        # nothing and $PREFIX/bin/make is used; on this runner the host's
+        # /usr/bin/gmake answers, and executing that path from a bionic process
+        # hits the libtermux-exec rewrite into the prefix, where there is no
+        # gmake: run 37801929253 lost LLVM's configure to
+        #   Run Build Command(s): .../cmake -E env VERBOSE=1 /usr/bin/gmake ...
+        #   no such file or directory
+        # The alias makes the probe find a binary a bionic process can run, and
+        # it fixes every cmake-based dep at once (LLVM, utf8proc, dSFMT) rather
+        # than one -DCMAKE_MAKE_PROGRAM at a time.
+        if [ ! -e "$ROOT/bin/gmake" ]; then
+          ln -s make "$ROOT/bin/gmake"
+        fi
+        set -o allexport; . "$HOME/.termux-builder-env.sh"; set +o allexport
+        echo "gmake -> $(command -v gmake) -> $(readlink -f "$(command -v gmake)")"
+        gmake --version | head -1
+        # Prove the exact thing that failed: a CMake project that configures and
+        # links its generated Makefile through the prefix environment.
+        proj=$(mktemp -d "$ROOT/tmp/cmake-probe.XXXXXX")
+        trap 'rm -rf "$proj"' EXIT
+        cat > "$proj/CMakeLists.txt" <<'CMAKE'
+        cmake_minimum_required(VERSION 3.25)
+        project(termux_builder_probe C)
+        add_executable(probe probe.c)
+        CMAKE
+        printf 'int main(void){return 0;}\n' > "$proj/probe.c"
+        # Report first, then decide: this step exists to name the unreachable tool
+        # in one minute, so cmake's own output has to survive to the log.
+        rc=0
+        cmake -S "$proj" -B "$proj/build" -DCMAKE_BUILD_TYPE=Release > "$proj/cfg.log" 2>&1 || rc=$?
+        grep -vE 'linkerconfig|ld.config.txt' "$proj/cfg.log" | tail -25 || true
+        [ "$rc" -eq 0 ] || { echo "FAIL  cmake cannot configure here (rc=$rc)"; exit 1; }
+        rc=0
+        cmake --build "$proj/build" > "$proj/build.log" 2>&1 || rc=$?
+        grep -vE 'linkerconfig|ld.config.txt' "$proj/build.log" | tail -15 || true
+        [ "$rc" -eq 0 ] || {
+          echo "FAIL  cmake cannot run its own build tool (rc=$rc) - the"
+          echo "      CMAKE_MAKE_PROGRAM recorded above is unreachable from a bionic process"
+          exit 1
+        }
+        "$proj/build/probe"
+        echo "OK    cmake configures and builds in the materialised prefix"
