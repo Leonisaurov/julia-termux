@@ -1,13 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Static gate for packages/<pkg>/build.sh: replays the patch stage, the configure
-# stage and Julia's own Make.inc parse against the real upstream tarball WITHOUT
-# compiling anything.
+# Static gate for packages/<pkg>/build.sh: replays the patch stage, the
+# endianness decision the patched tree makes, the configure stage and Julia's
+# own Make.inc parse against the real upstream tarball WITHOUT compiling
+# anything.
 #
 # Why this exists: a *.patch that no longer matches upstream silently produces a
 # `.rej` and a half-patched tree, and a USE_SYSTEM_* flag pointing at a library
-# Termux does not ship only fails ~70 minutes into a CI build.  Both are
+# Termux does not ship only fails ~70 minutes into a CI build.  All of it is
 # answerable in seconds from the tarball and $PREFIX, so CI is not allowed to
-# start until they are.
+# start until it is.
 #
 # Usage: bash scripts/rehearse-recipe.sh [package]      (default: julia)
 #   REHEARSAL_KEEP=1  leave the workdir in place for inspection
@@ -122,6 +123,31 @@ for patch in $(find "$REPO_ROOT/packages/$PKG" -mindepth 1 -maxdepth 1 \
 	fi
 done
 echo "-- $applied_count patch file(s) applied against $(basename "$SRCDIR") --"
+
+# ---- the endianness decision the patched tree actually makes ----
+# flisp's `#if BYTE_ORDER == BIG_ENDIAN` guards a branch upstream never
+# compiles and that does not even parse (src/flisp/flisp.c:990 is a #define
+# without its line continuation), so when <sys/endian.h> and dtypes.h form a
+# macro cycle the build dies there instead of at a #error (run 37803324627).
+# Preprocessing one header answers the question for free; compiling flisp.c
+# costs a runner minute to learn the same thing.
+echo
+echo "===== endianness macros ====="
+endian_fail=0
+cat > "$WORK/endian-probe.c" <<'EOF'
+#include "src/support/dtypes.h"
+#if BYTE_ORDER == BIG_ENDIAN
+#error "the big-endian branch would be compiled"
+#endif
+int probe_byte_order_is_little[BYTE_ORDER == LITTLE_ENDIAN ? 1 : -1];
+EOF
+if clang -std=gnu11 -fsyntax-only -I "$SRCDIR" "$WORK/endian-probe.c" 2> "$WORK/endian.txt"; then
+	echo "OK    BYTE_ORDER resolves to a value; flisp's big-endian branch stays dead"
+else
+	echo "FAIL  the patched tree does not settle BYTE_ORDER"
+	grep -E 'error|is not defined|expanded from' "$WORK/endian.txt" | head -8 | sed 's/^/        /'
+	endian_fail=1
+fi
 
 # ---- run the recipe's own configure steps ----
 mkdir -p "$WORK/massage"
@@ -383,13 +409,13 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$repo_fail"
-if [ "$patch_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
+printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$repo_fail"
+if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
 	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, configure produces a Make.user Make.inc accepts, every system dep is real)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real)"
 exit 0
