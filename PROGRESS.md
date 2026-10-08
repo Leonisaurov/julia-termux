@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del proyecto julia-termux
 
-> Última actualización: 2026-10-08 ~16:55 UTC
+> Última actualización: 2026-10-08 ~18:15 UTC
 >
 > Este archivo es el **registro de evidencia**: qué se intentó, qué falló, por
 > qué y qué gate local cerró ese fallo. Las decisiones de diseño viven en
@@ -81,12 +81,20 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   `scripts/setup-termux.sh` + `termux-elf-cleaner` + `TERMUX_PKG_*DEPENDS` de la
   receta).
 
+**Hipótesis del próximo run**: `julia-base` no abortaba porque el loader del
+runner ignorara `$PREFIX/lib`, sino porque el propio `libwhich` moría al
+re-`dlopen`ear `/system/bin/linker64`; con el mapa sondeado en `RTLD_NOLOAD`
+las 18 system libs responden y `make -C base` pasa de los symlinks. Que el gate
+del job lint dé `resolution=0` sobre el tool real es la parte barata de este
+run (~2 min); si aun así el loader del runner no boundea ningún soname, el
+`LOAD <soname> <motivo>` de la sonda lo dice en la misma línea.
+
 ---
 
 ## Cadena de modos de fallo (evidencia fechada, todos 2026-10-08)
 
-El mismo entorno falló de ocho maneras distintas; cada una se cerró con un run y
-se convirtió en gate local cuando era reproducible fuera del runner.
+El mismo entorno falló de maneras distintas; cada una se cerró con un run y se
+convirtió en gate local cuando era reproducible fuera del runner.
 
 | Run | UTC | Síntoma | Causa raíz | Cierre |
 |---|---|---|---|---|
@@ -100,14 +108,17 @@ se convirtió en gate local cuando era reproducible fuera del runner.
 | 37795904301 | 14:51 | `Make.inc:1434 … without a functioning fortran compiler!` | `Make.inc:541` fija `FC := gfortran`; Termux no trae `gfortran` y OpenBLAS usa `-DC_LAPACK=ON` | `FC := $PREFIX/bin/clang` en `Make.user` + sonda `-dM -E/__GNUC__` (`755fab0`) |
 | 37801929253 | 15:34 | CMake: `/usr/bin/gmake: no such file or directory` | CMake ancla `CMAKE_MAKE_PROGRAM` a la ruta del host; `make` de Termux no provee `gmake` | `$PREFIX/bin/gmake -> make` + sonda que configura **y compila** un proyecto (`e2802de`) |
 | 37803324627 | 15:45 | 4 errores en `src/flisp/flisp.c:991` | ciclo de macros: `BYTE_ORDER → __BYTE_ORDER` (dtypes.h) y `__BYTE_ORDER → BYTE_ORDER` (`sys/endian.h`); el preprocessor corta la recursión, ambos valen 0 y `#if BYTE_ORDER == BIG_ENDIAN` es `0 == 0`, así que se compila la rama big-endian, cuyo `#define` en `flisp.c:990` carece de barra de continuación (bug latente de upstream) | `#ifndef` alrededor de los tres `#define` de dtypes.h + sección "endianness macros" en el gate (`f1f9638`) |
-| 37811196090 | 16:44 | `System library symlink failure: Unable to locate libpcre2-8.so on your system!` → `Makefile:93: julia-base` a los ~47 min; flisp y LLVM ya estaban compilados | en medición: `base/Makefile:166` hace `libwhich -p <soname> 2>/dev/null` y se queda con `[ -e "$REALPATH" ]`; el `2>/dev/null` descarta el motivo y en todo el log no hay ni un `ln -sf`, o sea que el sondeo no resolvió nada. En el dispositivo el mismo binario resuelve los 18 sonames solo por el RUNPATH que inyecta clang; el runner no tiene `/linkerconfig/ld.config.txt` | sonda `scripts/probe-library-resolution.sh`: compila el `libwhich` parcheado y corre la cadena de shell exacta sobre cada soname; entra como sección "library resolution" del gate del job lint y como precondición del build, así la pregunta se responde en minutos y no a los 47 |
+| 37811196090 | 16:44 | `System library symlink failure: Unable to locate libpcre2-8.so on your system!` → `Makefile:93: julia-base` a los ~47 min; flisp y LLVM ya estaban compilados | el `libwhich` parcheado **moría al responder**, no era el `dlopen` del soname: su rama sin `dlinfo` re-`dlopen`ea cada imagen que `dl_iterate_phdr` reporta para comparar el handle, y la primera es `/system/bin/linker64`. En el teléfono ese pedido se rechaza por namespace y devuelve `NULL` inofensivamente; en el runner, sin `/linkerconfig/ld.config.txt`, `/system/bin` sí es ruta de búsqueda y bionic se niega a cargarse a sí mismo (`error: linker cannot load itself`) matando el proceso **con stdout sin flush** → `libwhich -p` respondió `""` con rc=1 y el `2>/dev/null` de `base/Makefile:166` se llevó la única pista | `RTLD_LAZY \| RTLD_NOLOAD` al sondear el mapa (la rama Apple de libwhich ya lo usa) + saltar las entradas sin `/` inicial, en `patches/deps/termux-libwhich-dlinfo-android.patch`; verificado con el tool real en el gate: 18/18 `loader bound …` y 18 `TOOL` |
+| 37820685855 | 18:00 | `GATE: FAIL` con `resolution=1` en el job lint: el build ni empezó | la sonda nueva heredaba el algoritmo fatal de libwhich, así que reproducía el síntoma sin poder explicarlo: `FAIL  libpcre2-8.so` con el detalle vacío, porque el proceso moría antes de imprimir | la sonda reporta por etapas (`CTRL` de arranque, `LOAD <soname> ok` con `flush`, `NEEDED` del binario, stderr completo): un stdout vacío ahora significa "no llegó a `main()`" y un `LOAD … ok` prueba que el loader encontró la librería |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
 `__bionic_open_tzdata: …`, `bionic-icu: couldn't open libicu.so`,
 `expr: syntax error: unexpected argument 'Warning:'` (el anterior se cuela en
 una sustitución de comando de `configure`; autoconf cae a su default y sigue),
-y `Warning: git information unavailable`.
+y `Warning: git information unavailable`.  NO es ruido `error: linker cannot load
+itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
+pida `dlopen` del linker del runner.
 
 ### Avance medible del build
 
