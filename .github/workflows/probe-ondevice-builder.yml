@@ -42,7 +42,8 @@ jobs:
           gzip -dc Packages.gz > Packages
           python3 .github/scripts/probe-resolver.py Packages \
             clang lld llvm libllvm libcompiler-rt ndk-sysroot binutils llvm-tools \
-            libc++ libandroid-support termux-exec dpkg apt make cmake ninja pkg-config \
+            libc++ libandroid-support termux-exec dpkg apt apt-utils termux-keyring gpgv \
+            termux-elf-cleaner termux-tools make cmake ninja pkg-config \
             perl python git patch sed grep findutils diffutils tar gzip bzip2 xz-utils \
             lzip unzip which file jq ca-certificates openssl zlib zstd liblzma libexpat \
             libiconv ncurses pcre2 autoconf automake libtool m4 bison flex gettext \
@@ -61,12 +62,44 @@ jobs:
           du -sh debs
           sudo mkdir -p "$ROOT"
           for f in debs/*.deb; do sudo dpkg-deb -x "$f" /; done
-          sudo mkdir -p "$ROOT/var/lib/dpkg" "$ROOT/tmp"
-          sudo touch "$ROOT/var/lib/dpkg/status"
+          # Record what we extracted as installed packages.  Without a dpkg
+          # database build-package.sh's on-device path dies immediately: it calls
+          # `apt install -y termux-elf-cleaner` (termux_step_start_build.sh:124),
+          # and apt on an unprovisioned prefix returns 100.
+          sudo mkdir -p "$ROOT/var/lib/dpkg" "$ROOT/var/lib/apt" "$ROOT/tmp" "$ROOT/etc/apt"
+          : > status.part
+          for f in debs/*.deb; do
+            d=$(mktemp -d)
+            dpkg-deb -e "$f" "$d"
+            # dpkg needs an explicit Status field; the control member has none.
+            { echo 'Status: install ok installed'; cat "$d/control"; echo; } >> status.part
+            rm -rf "$d"
+          done
+          grep -c '^Package: ' status.part
+          sudo tee -a "$ROOT/var/lib/dpkg/status" > /dev/null < status.part
           sudo chmod 1777 "$ROOT/tmp"
           sudo chown -R "$(id -u):$(id -g)" /data "$ROOT"
           sudo chmod -R a+rX /data
-          ls -l "$ROOT/bin/clang" "$ROOT/lib/libtermux-exec.so" | head -4
+          ls -l "$ROOT/bin/clang" "$ROOT/bin/termux-elf-cleaner" "$ROOT/lib/libtermux-exec.so" | head -4
+
+      - name: Check that apt is usable in the materialised prefix
+        run: |
+          set -uo pipefail
+          export LD_PRELOAD="$ROOT/lib/libtermux-exec.so"
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          echo "--- sources shipped by the apt package ---"
+          cat "$ROOT/etc/apt/sources.list"
+          ls -l "$ROOT/etc/apt/trusted.gpg.d" | head -5
+          rc=0
+          apt update >../apt-update.log 2>&1 || rc=$?
+          echo "apt update rc=$rc"
+          grep -vE 'linkerconfig|ld.config.txt' ../apt-update.log | tail -15
+          # The exact call termux_step_start_build.sh makes on the device path.
+          rc=0
+          apt install -y termux-elf-cleaner >../apt-install.log 2>&1 || rc=$?
+          echo "apt install termux-elf-cleaner rc=$rc"
+          grep -vE 'linkerconfig|ld.config.txt' ../apt-install.log | tail -10
+          command -v termux-elf-cleaner || echo "termux-elf-cleaner still missing"
 
       - name: Environment sanity
         run: |
@@ -104,10 +137,14 @@ jobs:
           rc=0
           timeout 1500 ./build-package.sh -s --format debian -o ../output libandroid-glob >../build.log 2>&1 || rc=$?
           echo "build rc=$rc"
-          echo "--- build.log (last 120) ---"
-          tail -120 ../build.log
-          echo "--- first error-looking lines ---"
-          grep -nE 'error_exit|ERROR|No such file|not supported|requires|command not found' ../build.log | head -20
+          # Every bionic exec on a Linux kernel prints this; it hides real output.
+          clean() { grep -vE 'linkerconfig|ld.config.txt' "$1"; }
+          echo "--- build.log: first 40 ---"
+          clean ../build.log | head -40
+          echo "--- build.log: last 40 ---"
+          clean ../build.log | tail -40
+          echo "--- error-looking lines ---"
+          clean ../build.log | grep -nE 'ERROR|error_exit|No such file|not supported|not found|command not found|E: ' | head -20
           echo "--- output dir ---"
           ls -l ../output 2>/dev/null | head -10
           for f in ../output/*.deb; do
