@@ -11,8 +11,9 @@ TERMUX_PKG_HOSTBUILD=false
 
 # Runtime: every library below is either DT_NEEDED by libjulia-* or dlopen'ed
 # by a stdlib.  Termux's libgmp/libmpfr/libopenblas/libpcre2-8 ship without a
-# versioned soname, so Julia's hardcoded "libgmp.so.10"-style names are
-# satisfied by the symlinks created in termux_step_post_make_install.
+# versioned soname, while Julia's source asks the loader for the glibc-style
+# versioned names by literal - see termux_link_soname_aliases below, which
+# derives the aliases from the source rather than from this comment.
 TERMUX_PKG_DEPENDS="7zip, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, libopenblas, libssh2, openssl, pcre2, suitesparse, zlib"
 # The build tools are not implicit here: the deps/ build downloads and patches
 # tarballs (curl, xz for .tar.xz), Make.inc calls contrib/relative_path.py to
@@ -135,8 +136,41 @@ EOF
 	echo "[build.sh] generated Make.user with CLANG_RT_BUILTINS=${_builtins}"
 }
 
+# Which versioned names the loader will be asked for is a property of Julia's
+# source, so soname-aliases.sh reads it from the source: this recipe cannot drift
+# from what the sysimage demands, and no hand-kept list decides what must exist.
+# The helper reports one verdict per demanded name on stdout; only the "alias"
+# ones need a link here, because "native" already answers itself and "built" gets
+# its versioned file from deps/ or from julia's own make.
+termux_link_soname_aliases() {
+	local _dir="${1:?usage: termux_link_soname_aliases <directory>}"
+	local _verdict _want _target _out
+
+	if ! _out=$(bash "${TERMUX_PKG_BUILDER_DIR}/soname-aliases.sh" \
+		"${TERMUX_PKG_SRCDIR}" "${TERMUX_PREFIX}/lib"); then
+		termux_error_exit "soname-aliases.sh could not derive the versioned names"
+	fi
+	while read -r _verdict _want _target; do
+		[ "${_verdict}" = alias ] || continue
+		ln -sfn "${TERMUX_PREFIX}/lib/${_target}" "${_dir}/${_want}"
+	done <<<"${_out}"
+}
+
 termux_step_make() {
 	cd "${TERMUX_PKG_SRCDIR}"
+
+	# Julia dlopens glibc-style versioned names that it spells as literals
+	# (base/gmp.jl:32 "libgmp.so.10", base/mpfr.jl:40 "libmpfr.so.6") and
+	# Android's dlopen matches the *file name*, so the request is not satisfied by
+	# $PREFIX/lib/libgmp.so however correct that library is.  Upstream does not
+	# notice because it builds its own GMP, whose SONAME does carry the version.
+	# These names are therefore asked *while the sysimage is bootstrapping*, which
+	# is inside make: run 37851961397 died at sysimage.mk:129 with
+	#	LoadError("gmp.jl", 32, "could not load library \"libgmp.so.10\"")
+	# 49 minutes in, once the triplet was fixed - a link created after install
+	# cannot help a build that never reaches install.
+	termux_link_soname_aliases usr/lib/julia
+
 	# Precompilation spawns one Julia process per task; keep it at the same
 	# width as the make parallelism so the runner's memory is not oversubscribed.
 	export JULIA_NUM_PRECOMPILE_TASKS="${TERMUX_PKG_MAKE_PROCESSES}"
@@ -153,15 +187,12 @@ termux_step_make_install() {
 termux_step_post_make_install() {
 	cd "${TERMUX_PREFIX}/lib/julia"
 
-	# Base hardcodes glibc-style versioned names (base/gmp.jl, base/mpfr.jl).
-	local _pair _want _target
-	for _pair in "libgmp.so.10:libgmp.so" "libmpfr.so.6:libmpfr.so" "libpcre2-8.so.0:libpcre2-8.so"; do
-		_want="${_pair%%:*}"
-		_target="${_pair##*:}"
-		if [ -e "${TERMUX_PREFIX}/lib/${_target}" ] && [ ! -e "${_want}" ]; then
-			ln -sf "${TERMUX_PREFIX}/lib/${_target}" "${_want}"
-		fi
-	done
+	# The installed tree is what julia runs from, so it needs the same versioned
+	# names the build tree got before make.  make install does not carry them: it
+	# copies $(JULIA_LIBS) by content, which would duplicate GMP into the package
+	# instead of pointing at it - so the derivation is re-run here, against the
+	# same source, and one list cannot disagree with the other.
+	termux_link_soname_aliases "${TERMUX_PREFIX}/lib/julia"
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
@@ -180,7 +211,7 @@ termux_step_post_make_install() {
 			grep -q 'JL_LLVM_18\.1' || \
 			termux_error_exit "libLLVM-18jl.so lacks the JL_LLVM_18.1 symbol version"
 	fi
-	unset _pair _want _target _f _readelf
+	unset _f _readelf
 }
 
 # termux-packages packages an on-device build by copying everything *newer than the
