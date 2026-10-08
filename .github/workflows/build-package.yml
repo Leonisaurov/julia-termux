@@ -113,7 +113,10 @@ jobs:
             echo "no list derived from base/Makefile" >&2
             exit 1
           fi
-          list=$(tr '\n' ' ' < "$RUNNER_TEMP/symlinked-libs.txt")
+          # paste, not tr: tr leaves the last line's separator behind as a
+          # trailing space and the anchored check below rightly rejects it
+          # (run 37833826111 - the gate passed, this handoff killed the job).
+          list=$(paste -sd' ' "$RUNNER_TEMP/symlinked-libs.txt")
           if ! printf '%s' "$list" | grep -Eq '^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$'; then
             echo "the derived list holds characters that are not library names" >&2
             exit 1
