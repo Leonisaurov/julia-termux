@@ -12,6 +12,12 @@
 # fixed.  Which names are asked is a property of the source, so it is read from
 # the source instead of from a list somebody keeps.
 #
+# Coverage boundary, stated rather than guessed: this reads *literals*.  A name
+# built by interpolation ("libgfortran.so." * major, "libopenblas$(libsuffix).so")
+# is not a literal and is not reported here; those sites belong to the stdlib
+# patches that skip or resolve their own dlopen, and PROGRESS.md names them as the
+# candidate blockers of the precompile stage.
+#
 # Usage: bash soname-aliases.sh <julia source tree> [<prefix>]
 #   stdout  one verdict per demanded name, machine readable:
 #             native <name>                    $PREFIX/lib answers it as spelled

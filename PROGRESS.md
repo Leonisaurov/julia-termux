@@ -204,6 +204,20 @@ pida `dlopen` del linker del runner.
   puso en `termux_step_make` y no solo tras install.  `--cpu-target=native` es
   el siguiente candidato a problema si `sys-o.a` falla: aún no hay evidencia.
 
+- **El runtime GNU no existe en el prefijo; `CompilerSupportLibraries_jll` es el
+  candidato nombrado para `sys-o.a`.** Medido en el teléfono (2026-10-08 ~18:00
+  local): no hay `libgcc_s*`, `libgfortran*`, `libstdc++*`, `libgomp*` ni `libssp*`
+  ni en `$PREFIX/lib` ni en `$PREFIX/lib/julia` (Termux usa clang + libc++), y
+  `stdlib/CompilerSupportLibraries_jll/src/…:57-64` los dlopen **con throw**.  Sus
+  únicas aristas de dependencia son `OpenBLAS_jll/Project.toml` y
+  `p7zip_jll/Project.toml`, y el propio `OpenBLAS_jll` upstream tiene comentado el
+  `using CompilerSupportLibraries_jll` (nuestro `stdlib-OpenBLAS_jll.jl.patch` ya
+  salta el `dlopen(_libgfortran)`).  instantiate ≠ init: un módulo congelado en la
+  imagen no ejecuta `__init__` si nadie lo carga, así que esto **no** está
+  demostrado como bloqueo; si `sys-o.a` muere con
+  `could not load library "libgcc_s.so.1"`, el parche es ese archivo (o bajar
+  `JULIA_PRECOMPILE` a 0), no otro alias.
+
 ### Avance medible del build
 
 `12 ms` (ni arrancaba) → `4 min` (parches + configure) → `4.5 min`
