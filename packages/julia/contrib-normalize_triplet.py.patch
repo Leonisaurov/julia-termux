@@ -1,0 +1,60 @@
+# Termux/Bionic port: contrib/normalize_triplet.py
+#
+# Make.inc:1380 builds BB_TRIPLET_LIBGFORTRAN_CXXABI from a $(shell) call of this
+# script and never inspects its exit status, and base/Makefile:85 writes the result
+# into build_h.jl as `const BUILD_TRIPLET`.  Termux clang answers -dumpmachine with
+# aarch64-unknown-linux-android24, which the tables below do not know, so the script
+# answered with its "Unmatchable platform string" message on stdout and that message
+# became the embedded triplet: base/binaryplatforms.jl:958 appended
+# "-julia_version+1.12.6" to it, parse(Platform, ...) matched nothing and the
+# sysimage aborted at sysimage.mk:129 (run 37841320064, 47 minutes in).
+#
+# Canonicalising the triple here fixes every consumer at once.  The earlier attempt
+# to do it in base/binaryplatforms.jl (replace "-android" => "-gnu" inside parse)
+# only rewrote the error text one layer lower, and corrupted the diagnostic that
+# named the real string; it is removed with this patch.
+#
+# The second hunk is not cosmetic either.  With no compiler version to read
+# (Make.inc leaves FC_OR_CC_VERSION empty for clang) this script used to assume the
+# newest libgfortran, so the fixed triplet claimed -libgfortran5; Make.inc derives
+# LIBGFORTRAN_VERSION from that tag and base/Makefile:239 then asks the loader for
+# libgfortran.so.5 WITHOUT ALLOW_FAILURE - a library Bionic does not have, so
+# julia-base would have died at the symlinks again with one name more (measured by
+# the gate: the derived list grew 19 -> 20 and the probe failed on it).
+# Bionic has no libgfortran at all, so no version is claimed, exactly as for musl.
+--- a/contrib/normalize_triplet.py
++++ b/contrib/normalize_triplet.py
+@@ -9,6 +9,19 @@
+     print("Usage: {} <host triplet> [<gcc version>] [<cxxabi11>]".format(sys.argv[0]))
+     sys.exit(1)
+ 
++# Termux/Bionic port: clang on Android answers `-dumpmachine` with a four-field
++# triple ending in "-android<api level>", which none of the tables below knows,
++# so the match fails and this script prints its complaint to stdout.  Make.inc
++# captures that stdout without looking at the exit status and base/Makefile
++# embeds it as `const BUILD_TRIPLET`, so the sysimage build dies in
++# binaryplatforms.jl trying to parse it.  Bionic is a Linux userland and
++# ArtifactHub publishes no android platform, so the closest triplet this
++# grammar can express is linux-gnu; the API level is not part of any triplet
++# grammar, so it is dropped here rather than re-mangled one layer lower.
++android_triplet = bool(re.search(r"-android\d*$", sys.argv[1]))
++if android_triplet:
++    sys.argv[1] = re.sub(r"-android\d*$", "-gnu", sys.argv[1])
++
+ arch_mapping = {
+     'x86_64': '(x86_|amd)64',
+     'i686': "i\\d86",
+@@ -111,7 +124,12 @@
+ # "-libgfortran5" tag at the end of the triplet, but only if it has otherwise
+ # not been specified.
+ if libgfortran_version == "blank_libgfortran":
+-    if len(sys.argv) >= 3:
++    # Bionic ships no libgfortran, and a version tag here is not cosmetic:
++    # Make.inc derives LIBGFORTRAN_VERSION from it and base/Makefile then
++    # demands libgfortran.so.5 with no ALLOW_FAILURE, aborting julia-base on
++    # a library that does not exist on Android.  The default below exists for
++    # glibc toolchains whose compiler version we cannot see.
++    if len(sys.argv) >= 3 and not android_triplet:
+         # If there was no gfortran/gcc version passed in, default to the latest libgfortran version
+         if not sys.argv[2]:
+             libgfortran_version = "libgfortran5"
