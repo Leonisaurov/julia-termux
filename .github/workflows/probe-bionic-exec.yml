@@ -1,0 +1,68 @@
+name: probe-bionic-exec
+
+# Feasibility probe, not a build: does a bionic/aarch64 ELF (Android's linker64 +
+# Termux userland) execute on a GitHub-hosted runner?  The Julia build must run the
+# freshly compiled target julia to generate the system image, so this decides the
+# whole CI architecture.  Fixture lives on the orphan branch ci/probe-rootfs.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            mode: native
+          - os: ubuntu-24.04
+            mode: qemu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Fetch fixture
+        run: |
+          set -euo pipefail
+          git init -q probe
+          cd probe
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}"
+          git fetch -q --depth 1 origin ci/probe-rootfs
+          git show FETCH_HEAD:ci-probe-rootfs.tar.gz > ../ci-probe-rootfs.tar.gz
+          cd ..
+          echo "1f2e6ab823955f2220561191b2bfe1715b84b8fdc8ed5c7e7d9b20cc690fd746  ci-probe-rootfs.tar.gz" | sha256sum -c -
+
+      - name: Materialise the Android runtime at its absolute paths
+        run: |
+          set -euo pipefail
+          sudo tar -xzf ci-probe-rootfs.tar.gz -C /
+          ls -l /system/bin/linker64
+          ls -l /data/data/com.termux/files/usr/bin/pt
+          readelf -l /data/data/com.termux/files/usr/bin/pt | sed -n '/INTERP/,+1p'
+
+      - name: Execute natively (arm64 host)
+        if: matrix.mode == 'native'
+        run: |
+          set -uo pipefail
+          uname -m
+          uname -r
+          echo "--- direct run ---"
+          /data/data/com.termux/files/usr/bin/pt
+          echo "rc=$?"
+          echo "--- via explicit interpreter ---"
+          /system/bin/linker64 /data/data/com.termux/files/usr/bin/pt
+          echo "rc=$?"
+          echo "--- dmesg tail ---"
+          sudo dmesg | tail -5
+
+      - name: Execute under qemu-user (x86_64 host)
+        if: matrix.mode == 'qemu'
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static binfmt-support
+          qemu-aarch64 --version | head -1
+          echo "--- run under qemu ---"
+          qemu-aarch64 -L / /data/data/com.termux/files/usr/bin/pt
+          echo "rc=$?"
