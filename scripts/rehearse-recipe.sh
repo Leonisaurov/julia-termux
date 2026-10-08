@@ -121,9 +121,10 @@ echo
 echo "-- per declared patch target --"
 missing=0
 guarded=0
+cond=0
 same=0
 ok=0
-while read -r rel; do
+while read -r ind rel; do
 	[ -n "$rel" ] || continue
 	hb=$(awk -v f="./$rel" '$2==f {print $1; exit}' "$WORK/hash-before.txt")
 	ha=$(awk -v f="./$rel" '$2==f {print $1; exit}' "$WORK/hash-after.txt")
@@ -138,8 +139,17 @@ while read -r rel; do
 			missing=$((missing + 1))
 		fi
 	elif [ "$hb" = "$ha" ]; then
-		printf 'SAME  %-48s exists but the patch stage did not modify it\n' "$rel"
-		same=$((same + 1))
+		# A recipe this script cannot judge: the sed only runs inside a guarded
+		# block (`if [ -n "$BUILTINS_LIB" ]`), and the fake prefix does not have
+		# what the guard looks for.  Deeper indentation than the recipe's
+		# top-level statements is the signal.
+		if [ "$ind" -gt 4 ]; then
+			printf 'COND  %-48s only patched inside a guarded block (indent %s)\n' "$rel" "$ind"
+			cond=$((cond + 1))
+		else
+			printf 'SAME  %-48s exists but the patch stage did not modify it\n' "$rel"
+			same=$((same + 1))
+		fi
 	else
 		printf 'OK    %-48s\n' "$rel"
 		ok=$((ok + 1))
@@ -154,7 +164,7 @@ awk 'NR==FNR{h[$2]=1;next} !($2 in h) {print "NEW  " $2}' \
 	"$WORK/hash-before.txt" "$WORK/hash-after.txt" | sort | head -20 | sed 's/^/   /'
 sed 's|^|MOD  |' "$WORK/changed.txt" | head -25 | sed 's/^/   /'
 wc -l < "$WORK/changed.txt" | tr -d ' ' | sed 's/^/   modified files: /'
-notnamed=$(comm -23 "$WORK/changed.txt" <(sed 's|^|./|' "$WORK/targets.static.txt" | sort) | head -20)
+notnamed=$(comm -23 "$WORK/changed.txt" <(cut -f2 "$WORK/targets.static.txt" | sed 's|^|./|' | sort) | head -20)
 [ -n "$notnamed" ] && { echo "   -- modified but not declared as a sed target --"; echo "$notnamed" | sed 's/^/      /'; }
 
 echo
@@ -174,7 +184,7 @@ done < "$WORK/ext_refs.txt"
 
 echo
 echo "===== summary ====="
-printf 'ok=%s same=%s missing=%s guarded=%s external_missing=%s hook_rc=%s\n' "$ok" "$same" "$missing" "$guarded" "$ext_missing" "$HOOK_RC"
+printf 'ok=%s same=%s missing=%s guarded=%s conditional=%s external_missing=%s hook_rc=%s\n' "$ok" "$same" "$missing" "$guarded" "$cond" "$ext_missing" "$HOOK_RC"
 if [ "$missing" -gt 0 ] || [ "$ext_missing" -gt 0 ] || [ "$same" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5

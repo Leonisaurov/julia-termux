@@ -82,22 +82,29 @@ def main():
         print(f"usage: {sys.argv[0]} SCRIPT", file=sys.stderr)
         return 2
     source = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-    found = set()
+    # target -> shallowest indentation among the sed statements naming it.
+    # Indentation is how the caller tells a top-level patch from one buried in
+    # `if [ -n "$SOME_LIB" ]`, which a rehearsal with a fake prefix cannot reach.
+    depths = {}
     statements = 0
     unresolved = 0
     for line in join_continuations(source):
         if re.search(r"(^|[;&|(\s])sed(\s|$)", line) is None:
             continue
         statements += 1
+        indent = len(line) - len(line.lstrip())
         matched = False
         for tok in operands(line):
             if looks_like_target(tok):
-                found.add(tok)
                 matched = True
+                if tok in depths:
+                    depths[tok] = min(depths[tok], indent)
+                else:
+                    depths[tok] = indent
         if not matched:
             unresolved += 1
-    for tok in sorted(found):
-        print(tok)
+    for tok in sorted(depths):
+        print(f"{depths[tok]}\t{tok}")
     # An operand built from a loop variable ($f) or a prefix ($src) is not
     # statically resolvable; say so instead of quietly shrinking the report.
     print(f"# sed_statements={statements} resolved={statements - unresolved} "
