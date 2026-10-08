@@ -17,13 +17,16 @@ TERMUX_PKG_DEPENDS="7zip, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, li
 # The build tools are not implicit here: the deps/ build downloads and patches
 # tarballs (curl, xz for .tar.xz), Make.inc calls contrib/relative_path.py to
 # compute the loader's DEP_LIBS rpath strings (python), and termux_step_patch_package
-# plus deps/*.mk both shell out to patch.
-TERMUX_PKG_BUILD_DEPENDS="binutils, clang, cmake, diffutils, file, findutils, gawk, lld, llvm, m4, make, patch, patchelf, perl, pkg-config, python, sed, tar, which, xz-utils"
+# plus deps/*.mk both shell out to patch.  dsymutil/ar/ranlib/objcopy/readelf come
+# from llvm (Termux does not take them from binutils), and git is probed by the CI
+# gate as well as used by contrib/*.sh.  ca-certificates is what makes the deps/
+# downloads over TLS work at all.
+TERMUX_PKG_BUILD_DEPENDS="binutils, ca-certificates, clang, cmake, diffutils, file, findutils, gawk, git, lld, llvm, m4, make, patch, patchelf, perl, pkg-config, python, sed, tar, which, xz-utils"
 
 # The *.patch files sitting next to this recipe are applied by
 # termux_step_patch_package() before configure.  patches/deps/*.patch are
 # content patches for Julia's own bundled deps; deps/*.mk reads them from
-# $(SRCDIR)/deps/patches/ (see deps-libuv.mk.patch / deps-libwhich.mk.patch).
+# $(SRCDIR)/patches/, because deps/Makefile redefines SRCDIR to deps/ itself.
 termux_step_pre_configure() {
 	mkdir -p "${TERMUX_PKG_SRCDIR}/deps/patches"
 	# shellcheck disable=SC2086
@@ -149,4 +152,53 @@ termux_step_post_make_install() {
 			termux_error_exit "libLLVM-18jl.so lacks the JL_LLVM_18.1 symbol version"
 	fi
 	unset _pair _want _target _f _readelf
+}
+
+# termux-packages packages an on-device build by copying everything *newer than the
+# build timestamp* out of the live $PREFIX (scripts/build/
+# termux_step_copy_into_massagedir.sh).  Anything an unrelated process touched while
+# Julia compiled therefore arrives in the payload: a libandroid-glob .deb built on a
+# phone shipped var/log/ntfy/ntfy.log and opt/flutter/** that way.  Julia's own
+# footprint is small and known, so drop the rest before massaging - and print each
+# pruned path, because a wrong guess must show up in the log instead of as a missing
+# file in the package.
+termux_step_pre_massage() {
+	local _junk
+	for _junk in var opt tmp run home srv; do
+		[ -e "${_junk}" ] || continue
+		echo "pre-massage: pruning foreign ${_junk}/"
+		rm -rf "${_junk}"
+	done
+	unset _junk
+
+	# Keeps only the listed name patterns at depth 1 of the given directory.
+	_prune_foreign() {
+		local _dir="$1"; shift
+		[ -d "${_dir}" ] || return 0
+		local _expr=("${_dir}" -mindepth 1 -maxdepth 1)
+		local _keep
+		for _keep in "$@"; do
+			_expr+=( ! -name "${_keep}" )
+		done
+		find "${_expr[@]}" -print -exec rm -rf -- {} +
+		unset _expr _keep
+	}
+
+	# Footprint taken from `dpkg -L julia` on the validated 1.12.6 install, which is
+	# exactly: bin/julia, etc/julia/, include/julia/, lib/julia/ plus lib/libjulia*
+	# and lib/libopenlibm*, libexec/julia/{7z,dsymutil,lld,...}, share/{julia,doc/
+	# julia,man/man1/julia.1,metainfo/julia.appdata.xml,applications/julia.desktop}.
+	# Note the metainfo file is julia.appdata.xml, not the org.julialang.* name other
+	# desktop apps use - keeping the wrong pattern would delete the package's own file.
+	_prune_foreign bin 'julia*'
+	_prune_foreign etc julia
+	_prune_foreign include julia
+	_prune_foreign lib julia 'libjulia*' 'libopenlibm*'
+	_prune_foreign libexec julia
+	_prune_foreign share julia doc man metainfo applications
+	_prune_foreign share/doc julia
+	_prune_foreign share/man man1
+	_prune_foreign share/man/man1 'julia*'
+	_prune_foreign share/metainfo 'julia*'
+	_prune_foreign share/applications 'julia*'
 }
