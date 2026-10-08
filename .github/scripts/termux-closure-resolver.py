@@ -7,10 +7,11 @@ missing leaf (a virtual package, an Pre-Depends on something Termux expresses
 differently) must not abort the whole prefix setup.
 
 The default roots are the bootstrap set of scripts/generate-bootstraps.sh in
-termux-packages, trimmed to what a build prefix needs.  Roots given on the command
-line are added to them, not substituted for them: the caller passes the recipe's own
-TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS, and a prefix without the bootstrap
-is not a prefix at all.
+termux-packages, trimmed to what a build prefix needs, plus the Tier 1 of
+scripts/setup-termux.sh - the tools the core build scripts themselves exec.  Roots
+given on the command line are added to them, not substituted for them: the caller
+passes the recipe's own TERMUX_PKG_DEPENDS and TERMUX_PKG_BUILD_DEPENDS, and a
+prefix without the bootstrap is not a prefix at all.
 
 Nothing here reaches the network: these runners cannot resolve DNS from inside
 bionic (measured on run 37782123436 - apt's https method reports
@@ -32,6 +33,22 @@ ROOTS = [
     # returns 0 even with empty apt lists (measured with apt-get -s on a real
     # prefix); without it the build dies before configuring anything.
     "termux-elf-cleaner",
+    # Tier 1 of termux-packages' own scripts/setup-termux.sh - "requirements for
+    # the core build scripts in scripts/build/" - that the bootstrap above does
+    # not already cover.  build-package.sh:64 reads repo.json through jq on every
+    # invocation, before any package is parsed: run 37790992541 died there with
+    # "./build-package.sh: line 64: /usr/bin/jq: cannot execute: required file
+    # not found", because libtermux-exec rewrites /usr/bin/jq into the prefix,
+    # where no jq had been extracted (see the aliasing note in AGENTS.md).  unzip
+    # is what termux_unpack_src_archive.sh:13 uses for *.zip sources and lzip is
+    # the *.tar.lz handler tar looks for.
+    #
+    # Deliberately absent from this list: python (Tier 1 too, but already a root
+    # through the recipe's TERMUX_PKG_BUILD_DEPENDS) and gnupg, whose only use in
+    # the build path is build-package.sh:657-672 and termux_get_repo_files.sh:42 -
+    # both guarded so that `-s` (TERMUX_SKIP_DEPCHECK=true,
+    # termux_step_get_dependencies.sh:2) never reaches them.
+    "jq", "lzip", "unzip",
 ]
 
 

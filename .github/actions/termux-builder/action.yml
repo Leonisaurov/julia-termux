@@ -243,11 +243,14 @@ runs:
         } || true
         # The tools the build actually execs.  Their packages being installed (the
         # step above) does not mean they are on PATH: ar, ranlib, objcopy and readelf
-        # come from Termux's llvm, not from binutils, and 7z from 7zip.
+        # come from Termux's llvm, not from binutils, and 7z from 7zip.  jq is not an
+        # optional extra: build-package.sh:64 calls it on repo.json before it has read
+        # any recipe, so a prefix without it fails at once - and asks for the host's
+        # /usr/bin/jq, which libtermux-exec rewrites into this prefix anyway.
         fail=0
         for t in clang clang++ ld.lld dsymutil ar ranlib objcopy readelf make perl \
                  python git patch sed grep tar file dpkg-deb patchelf which pkg-config \
-                 termux-elf-cleaner; do
+                 termux-elf-cleaner jq unzip lzip; do
           found=$(command -v "$t" || true)
           if [ -n "$found" ]; then printf 'OK    %-20s %s\n' "$t" "$found"
           else printf 'FAIL  %-20s absent from PATH\n' "$t"; fail=1; fi
