@@ -20,8 +20,14 @@ TERMUX_PKG_DEPENDS="7zip, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, li
 # plus deps/*.mk both shell out to patch.  dsymutil/ar/ranlib/objcopy/readelf come
 # from llvm (Termux does not take them from binutils), and git is probed by the CI
 # gate as well as used by contrib/*.sh.  ca-certificates is what makes the deps/
-# downloads over TLS work at all.
-TERMUX_PKG_BUILD_DEPENDS="binutils, ca-certificates, clang, cmake, diffutils, file, findutils, gawk, git, lld, llvm, m4, make, patch, patchelf, perl, pkg-config, python, sed, tar, which, xz-utils"
+# downloads over TLS work at all.  blas-openblas is not a typo for libopenblas:
+# with USE_SYSTEM_BLAS=1 Make.inc names the library after the alias
+# (LIBBLASNAME=libblas, LIBLAPACKNAME=liblapack), and base/Makefile links
+# -lblas/-llapack against it and asks the loader to resolve those very sonames, so
+# the build needs the alias package.  A build dependency only: the symlink
+# julia-base writes into usr/lib/julia is absolute to $PREFIX/lib/libopenblas.so,
+# which the runtime list above already covers.
+TERMUX_PKG_BUILD_DEPENDS="binutils, blas-openblas, ca-certificates, clang, cmake, diffutils, file, findutils, gawk, git, lld, llvm, m4, make, patch, patchelf, perl, pkg-config, python, sed, tar, which, xz-utils"
 
 # The *.patch files sitting next to this recipe are applied by
 # termux_step_patch_package() before configure.  patches/deps/*.patch are
