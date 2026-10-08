@@ -5,7 +5,7 @@
 [![Termux Package](https://img.shields.io/badge/termux-aarch64-blue)](https://termux.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Cross-compilación de [Julia](https://julialang.org) para Termux/Android (aarch64) usando el build system oficial de termux-packages.**
+**Build de [Julia](https://julialang.org) v1.12.6 para Termux/Android (aarch64) con el build system oficial de termux-packages, en modo on-device sobre CI arm64.**
 
 Este proyecto adapta el build system de Julia —uno de los más complejos del ecosistema open source— para que funcione sobre la libc de Android (bionic) en lugar de glibc. Incluye ~22 parches inline para resolver diferencias entre bionic y glibc, un pipeline CI/CD optimizado con zram, y soporte completo para Julia v1.12.6 funcionando nativamente en Termux sin contenedores ni emulación.
 

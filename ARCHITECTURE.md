@@ -1,5 +1,14 @@
 # ARCHITECTURE.md — Diseño Técnico Detallado
 
+> **ADVERTENCIA (2026-10-08)**: el "sistema de cross-compilación" que este
+> documento describe (Paso 5 *Host flisp Bootstrap*, Paso 6
+> *Cross-Compilación Principal*, `XC_HOST`, NDK) fue **abandonado**: compilaba
+> LLVM 60–76 minutos para morir en `llvm-min-tblgen: Exec format error`. El
+> build vigente es **modo on-device de termux-packages sobre un runner arm64**
+> (host == target, clang de Termux, LLVM bundled). La secuencia de pasos, el
+> papel de Make.inc/Make.user y el flujo `USE_SYSTEM_*` siguen siendo la mejor
+> referencia del árbol; el estado real, con evidencia, está en `PROGRESS.md`.
+
 > **Propósito**: Documentar la arquitectura completa del build system de Julia para Termux, incluyendo el pipeline de compilación, el sistema de cross-compilación, la gestión de dependencias, y las decisiones de diseño detrás de cada componente.
 
 ---

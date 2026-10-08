@@ -1,5 +1,17 @@
 # AGENTS.md — Documentación Técnica para Agentes AI
 
+> **ADVERTENCIA (2026-10-08)**: este archivo todavía describe la arquitectura de
+> **cross-compilación en Docker que fue abandonada** (XC_HOST, host-flisp
+> bootstrap, `scripts/Dockerfile`, `scripts/run-docker.sh`,
+> `scripts/build-deps-docker.sh`). Hoy el build corre en **modo on-device sobre
+> un runner arm64**, host == target, con LLVM bundled. `scripts/build-local.sh`
+> sí es de ese modo (invoca `build-package.sh -I -s`), pero no es la vía
+> soportada: un build local tarda horas y no cabe en la RAM del teléfono. Lee
+> `PROGRESS.md` primero y no sigas las instrucciones de esta guía hasta que se
+> reescriba. Lo que sigue vigente es el detalle de Make.inc/Make.user y las
+> reglas de parches; lo que no aplica es todo el vocabulario de cross (XC_HOST,
+> HOSTCC, BUILDING_HOST_TOOLS, `--host`).
+
 > **Propósito**: Este archivo contiene información crítica que un agente AI necesita conocer antes de modificar el build system de Julia para Termux. Incluye bugs conocidos, trampas comunes, arquitectura del Makefile de Julia, y reglas para añadir nuevos parches. Sin esta información, los cambios pueden romper silenciosamente el build.
 
 ## Resumen del Proyecto
