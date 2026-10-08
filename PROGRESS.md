@@ -156,6 +156,29 @@ y `Warning: git information unavailable`.  NO es ruido `error: linker cannot loa
 itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
+### Tramo siguiente (`sys-o.a` + precompile): riesgos ya medidos
+
+- **`RTLD_DEEPBIND` no rompe nada.** `contrib/generate_precompile.jl:231` hace
+  `dlopen("libjulia", RTLD_LAZY | RTLD_DEEPBIND)` y `base/libdl.jl:30` define
+  `RTLD_DEEPBIND = 0x40` como constante hardcodeada, así que parecía un abort
+  seguro: medido en el teléfono (2026-10-08 ~22:20 UTC), `dlopen("libz.so",
+  RTLD_LAZY|0x40)` sobre la libc devuelve `invalid flags to dlopen: 41`. Pero el
+  `dlopen` de Julia no pasa la bandera cruda: `src/dlload.c:210` la envuelve en
+  `#if defined(RTLD_DEEPBIND)` y bionic **no** la define (probe con
+  `#ifdef`: `RTLD_NODELETE` sí, `RTLD_DEEPBIND`/`RTLD_FIRST` no), así que
+  `jl_dlopen` la descarta y `default_rtld_flags = RTLD_LAZY|RTLD_DEEPBIND`
+  (`base/libdl.jl:49`) es inofensivo en Android. La falla solo aparece al
+  llamar a la libc directamente, que es lo que sondeé primero.
+- **Las stdlibs externas ya se bajaron bien en CI.** 15 de las 66 entradas de
+  `stdlib/` son ficheros `*.version` (`Pkg`, `LinearAlgebra`, `SparseArrays`,
+  `Distributed`, `LibCURL`, `StyledStrings`, …) que `deps/tools/stdlib-external.mk`
+  descarga de `api.github.com/repos/…/tarball/$SHA`. En 37841320064 el log no
+  tiene ni una línea de `Pkg` (GitHub omitió la ventana 21:25→21:33), pero
+  `Makefile:113` hace a `julia-stdlib` prerequisito de `julia-sysimg-release` y
+  el recipe de ese target fue el que corrió `sysimage.mk`, así que la descarga
+  terminó con éxito: el límite de tasa anónimo de `api.github.com` no es un
+  bloqueo observado.
+
 ### Avance medible del build
 
 `12 ms` (ni arrancaba) → `4 min` (parches + configure) → `4.5 min`
