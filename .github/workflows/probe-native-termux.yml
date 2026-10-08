@@ -1,0 +1,103 @@
+name: probe-native-termux
+
+# Decides the CI architecture.  probe-bionic-exec proved a bionic/aarch64 ELF runs
+# natively on ubuntu-24.04-arm.  This checks whether Termux's *toolchain* also works
+# when its prefix is materialised at the absolute path baked into the binaries.  If
+# yes, Julia and LLVM can be built natively inside a Termux rootfs on CI: no cross
+# compilation, no host-tool Exec-format workarounds, and CI then uses the same method
+# that already works on the device.  Nothing here compiles Julia.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  rootfs:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Machine capabilities
+        run: |
+          set -uo pipefail
+          uname -m
+          uname -r
+          nproc
+          lscpu | grep -E 'Model name|Architecture|MHz' | head -4
+          free -m
+          df -h /
+          sudo swapon --show || true
+
+      - name: Materialise the bionic runtime (linker64 + /system libs)
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 origin ci/probe-rootfs
+          git show FETCH_HEAD:ci-probe-rootfs.tar.gz > rootfs.tar.gz
+          echo "1f2e6ab823955f2220561191b2bfe1715b84b8fdc8ed5c7e7d9b20cc690fd746  rootfs.tar.gz" | sha256sum -c -
+          sudo tar -xzf rootfs.tar.gz -C / system
+          sudo chmod -R a+rX /system
+          ls -l /system/bin/linker64 /system/lib64/
+
+      - name: Resolve the Termux aarch64 package closure
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz \
+            -o Packages.gz
+          gzip -dc Packages.gz > Packages
+          python3 .github/scripts/probe-resolver.py Packages > urls.txt 2> resolver.log
+          cat resolver.log
+          wc -l < urls.txt
+          head -3 urls.txt
+
+      - name: Download the .debs
+        run: |
+          set -euo pipefail
+          base=https://packages.termux.dev/apt/termux-main
+          mkdir -p debs
+          while read -r path; do
+            curl --fail --silent --show-error --location --retry 3 "$base/$path" -o "debs/$(basename "$path")"
+          done < urls.txt
+          du -sh debs
+
+      - name: Unpack into the absolute Termux prefix
+        run: |
+          set -euo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          sudo mkdir -p "$ROOT/tmp"
+          for f in debs/*.deb; do sudo dpkg-deb -x "$f" /; done
+          sudo chmod -R a+rX /data
+          sudo mkdir -p "$ROOT/tmp"
+          sudo chmod 1777 "$ROOT/tmp"
+          ls -l "$ROOT/bin/clang" "$ROOT/bin/ld.lld" "$ROOT/bin/make" 2>&1 | head -5
+
+      - name: Toolchain probe (native, no emulation)
+        run: |
+          set -uo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          export TMPDIR="$ROOT/tmp" HOME=/root PATH="$ROOT/bin:$PATH"
+          echo "--- clang --version ---"
+          "$ROOT/bin/clang" --version
+          echo "clang rc=$?"
+          echo "--- search dirs and crt files ---"
+          "$ROOT/bin/clang" -print-search-dirs | head -3
+          "$ROOT/bin/clang" -print-file-name=crtbegin_dynamic.o
+          "$ROOT/bin/clang" -print-file-name=libc.so
+          echo "--- compile, link and run a bionic program ---"
+          printf '%s\n' '#include <stdio.h>' '#include <pthread.h>' \
+            'void *f(void *a){ puts("thread ran"); return 0; }' \
+            'int main(void){ pthread_t t; pthread_create(&t,0,f,0); pthread_join(t,0); puts("native clang build OK"); return 0; }' \
+            > "$TMPDIR/probe.c"
+          "$ROOT/bin/clang" -O0 -o "$TMPDIR/probe" "$TMPDIR/probe.c"
+          echo "compile rc=$?"
+          "$TMPDIR/probe"
+          echo "run rc=$?"
+          echo "--- other build tools ---"
+          "$ROOT/bin/make" --version | head -1
+          "$ROOT/bin/perl" -e 'print "perl ok\n"'
+          "$ROOT/bin/python" -c 'print("python ok")'
+          "$ROOT/bin/cmake" --version | head -1
+          "$ROOT/bin/pkg-config" --version
+          echo "--- interpreter of a produced binary ---"
+          readelf -l "$TMPDIR/probe" | sed -n '/INTERP/,+1p'
