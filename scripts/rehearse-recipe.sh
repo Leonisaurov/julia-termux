@@ -23,17 +23,19 @@ RECIPE="$REPO_ROOT/packages/$PKG/build.sh"
 
 CACHE_DIR="${REHEARSAL_CACHE:-$PREFIX/tmp/$PKG-rehearse-cache}"
 KEEP="${REHEARSAL_KEEP:-0}"
-# CI sources the builder environment before running this, which puts the
-# materialised rootfs first on PATH - and bionic's curl has no working DNS on
-# the GitHub ARM runners ("Could not resolve host: github.com", run
-# 37786008765).  The host's curl resolves the same names, but preloading
-# bionic's libtermux-exec into a glibc binary makes its loader reject the
-# prefix's libc, so the preload has to go with it.  On a phone /usr/bin/curl
-# does not exist and the Termux curl is the right one.
+# CI sources the builder environment before running this, so this shell runs with
+# libtermux-exec loaded, and that rewrites every /usr, /bin, /etc, /lib and /var
+# path given to execve() or open().  Asking for /usr/bin/curl therefore gets the
+# prefix's bionic curl - which on the GitHub ARM runners has no working resolver
+# ("Could not resolve host: github.com", runs 37786008765 and 37786844653).  The
+# builder action stages a copy of the host's curl outside the aliased prefixes
+# for exactly this.  On a phone the variable is unset and Termux's curl is the
+# right one, DNS and all.
 FETCH=(curl)
-if [ -x /usr/bin/curl ]; then
-	FETCH=(env -u LD_PRELOAD /usr/bin/curl)
+if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "$TERMUX_BUILDER_HOSTBIN/curl" ]; then
+	FETCH=("$TERMUX_BUILDER_HOSTBIN/curl")
 fi
+echo "== downloader: ${FETCH[*]}"
 WORK="$(mktemp -d "$PREFIX/tmp/$PKG-rehearse.XXXXXX")"
 cleanup() {
 	if [ "$KEEP" = 1 ]; then
