@@ -45,6 +45,24 @@ termux_step_configure() {
 		termux_error_exit "libclang_rt.builtins-${TERMUX_ARCH}-android.a not found under ${TERMUX_PREFIX}/lib/clang"
 	fi
 
+	# Make.inc hardcodes FC := gfortran (Make.inc:541) and then refuses to
+	# configure at all when `$(FC) -dM -E` reports no __GNUC__ (Make.inc:1431-1434)
+	# - run 37795904301 died there with
+	# "Attempting to build OpenBLAS or SuiteSparse without a functioning fortran
+	# compiler!".  Nothing in this configuration compiles a Fortran source: BLAS
+	# and LAPACK come from Termux's OpenBLAS, built with -DC_LAPACK=ON (pure C),
+	# and SuiteSparse from Termux's package, so the guard is the only consumer of
+	# $(FC) left - deps/csl.mk, the other parse-time user, is inert because
+	# USE_SYSTEM_CSL := 1.  Termux's Fortran compiler is flang, but it drags a
+	# second LLVM toolchain (mlir, libllvm, libandroid-complex-math-static) into
+	# the closure to satisfy a probe, so point FC at the clang that
+	# BUILD_DEPENDS already guarantees.  The override has to live in Make.user:
+	# Make.inc includes it a second time at Make.inc:754, after line 541 ran.
+	_julia_fc="${TERMUX_PREFIX}/bin/clang"
+	if [ -z "$("${_julia_fc}" -dM -E - < /dev/null 2>/dev/null | grep __GNUC__ | cut -d' ' -f3)" ]; then
+		termux_error_exit "${_julia_fc} does not answer the probe Julia's Make.inc makes of FC (-dM -E, __GNUC__)"
+	fi
+
 	# Single source of truth for the build configuration.  Do NOT add CC/CXX:
 	# Make.inc detects clang from `cc --version` and picks USECLANG itself, and
 	# Termux's clang already targets the device's Android API level.
@@ -85,6 +103,11 @@ USE_SYSTEM_LIBUV := 0
 USE_SYSTEM_UTF8PROC := 0
 USE_SYSTEM_DSFMT := 0
 USE_SYSTEM_LIBWHICH := 0
+
+# Fortran: see termux_step_pre_configure.  Make.inc:541 sets FC := gfortran
+# before the second include of Make.user, this line is what turns that guard off,
+# and nothing below deps/ ever runs the compiler.
+FC := ${_julia_fc}
 
 # Termux's libopenblas exports ILP32 symbols (dgemm_), not the 64_ suffixed ones.
 USE_BLAS64 := 0

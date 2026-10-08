@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Static gate for packages/<pkg>/build.sh: replays the patch stage and the
-# configure stage against the real upstream tarball WITHOUT compiling anything.
+# Static gate for packages/<pkg>/build.sh: replays the patch stage, the configure
+# stage and Julia's own Make.inc parse against the real upstream tarball WITHOUT
+# compiling anything.
 #
 # Why this exists: a *.patch that no longer matches upstream silently produces a
 # `.rej` and a half-patched tree, and a USE_SYSTEM_* flag pointing at a library
@@ -188,6 +189,44 @@ else
 		| sed 's/^/   /'
 fi
 
+# ---- Make.inc must accept the generated Make.user ----
+# Make.inc decides at parse time whether the toolchain is usable: it hardcodes
+# FC := gfortran (Make.inc:541) and aborts the build when the compiler behind it
+# does not answer `-dM -E` with __GNUC__ (Make.inc:1431).  That check fires
+# before a single object file is compiled, so it costs an hour to learn from CI
+# and a second to learn here.
+echo
+echo "===== Make.inc parse ====="
+inc_fail=0
+if [ "$make_user_fail" -gt 0 ]; then
+	echo "SKIP  no Make.user to parse"
+elif [ ! -f "$SRCDIR/Make.inc" ]; then
+	echo "FAIL  $SRCDIR/Make.inc absent"
+	inc_fail=1
+else
+	probe="$SRCDIR/rehearse-parse-probe.mk"
+	{
+		echo 'JULIAHOME := $(CURDIR)'
+		echo 'include Make.inc'
+		echo 'rehearse-parse-probe:'
+		printf '\t@echo "OS=$(OS) USECLANG=$(USECLANG) USEGCC=$(USEGCC) FC=$(FC) FC_VERSION=$(FC_VERSION)"\n'
+	} > "$probe"
+	parse_out=$(cd "$SRCDIR" && make -f "$(basename "$probe")" rehearse-parse-probe 2>&1)
+	parse_rc=$?
+	rm -f "$probe"
+	printf '%s\n' "$parse_out" | tail -8 | sed 's/^/   /'
+	if [ "$parse_rc" -ne 0 ]; then
+		printf 'FAIL  Make.inc rejected the configuration (rc=%s)\n' "$parse_rc"
+		inc_fail=1
+	else
+		# Empty FC_VERSION means the guard in Make.inc:1431 would fire; the parse
+		# succeeds only because nothing here calls $(error) yet - check the value.
+		printf '%s\n' "$parse_out" | grep -Eq 'FC_VERSION=[^ "]' \
+			&& echo "OK    Make.inc parses the configuration" \
+			|| { echo "FAIL  FC_VERSION is empty: Make.inc would demand a fortran compiler"; inc_fail=1; }
+	fi
+fi
+
 # ---- every USE_SYSTEM_* := 1 must be backed by a real library or binary ----
 echo
 echo "===== system dependency reality check ====="
@@ -344,13 +383,13 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s pre_rc=%s conf_rc=%s make_user=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$repo_fail"
+printf 'patches_applied=%s patch_failures=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$repo_fail"
 if [ "$patch_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
-	|| [ "$make_user_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
+	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
 	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, configure produces a clean Make.user, every system dep is real)"
+echo "GATE: PASS (every patch applies, configure produces a Make.user Make.inc accepts, every system dep is real)"
 exit 0
