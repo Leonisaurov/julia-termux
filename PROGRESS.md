@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del proyecto julia-termux
 
-> Última actualización: 2026-10-08 ~19:40 UTC
+> Última actualización: 2026-10-08 ~20:45 UTC
 >
 > Este archivo es el **registro de evidencia**: qué se intentó, qué falló, por
 > qué y qué gate local cerró ese fallo. Las decisiones de diseño viven en
@@ -91,20 +91,27 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   `scripts/setup-termux.sh` + `termux-elf-cleaner` + `TERMUX_PKG_*DEPENDS` de la
   receta).
 
-**Hipótesis del próximo run**: `julia-base` volvió a abortar en un symlink, ahora
-en `Makefile:250`, porque el prefijo del runner no tiene `libblas.so`: con
-`USE_SYSTEM_BLAS := 1` Make.inc fija `LIBBLASNAME := libblas` y ese alias lo
-aporta el paquete split `blas-openblas`, que la receta no declaraba (declarado
-queda en `TERMUX_PKG_BUILD_DEPENDS`; el symlink resultante es absoluto a
-`$PREFIX/lib/libopenblas.so`, que ya está en runtime). La lista que se sonda es
+**Hipótesis del próximo run** — sigue siendo la de `libblas.so`, porque el run
+anterior no llegó a ponerla a prueba: `julia-base` abortaba en `Makefile:250`
+porque el prefijo del runner no tenía `libblas.so`; con `USE_SYSTEM_BLAS := 1`
+Make.inc fija `LIBBLASNAME := libblas` y ese alias lo aporta el paquete split
+`blas-openblas`, que la receta no declaraba (ahora está en
+`TERMUX_PKG_BUILD_DEPENDS`; el symlink resultante es absoluto a
+`$PREFIX/lib/libopenblas.so`, que ya cubre el runtime). La lista que se sonda es
 la que derivan `make` + `base/Makefile` — 19 nombres, dos más que los 18
-inventados que el gate venía verificando contra la librería equivocada. El gate
-local ya pasó sobre esa lista (`resolution=0`, `libblas.so → libopenblas.so`,
-gate12 19:35 UTC) y la closure del action la resuelve (`blas-openblas_0.3.34`,
-115 paquetes, `unresolved=0`). Como `packages/**` entra en la clave de caché,
-este run paga la compilación completa (~45 min): si vuelve a caer, el punto es
-`Makefile:252` (`liblapack.so`) o más allá de los symlinks, y la lista derivada
-lo dice antes de que arranque el build.
+inventados que el gate verificaba contra la librería equivocada. Ya está medido
+en **ambos** entornos: teléfono (`resolution=0`, `libblas.so → libopenblas.so`,
+gate12 19:35 UTC) y prefijo del runner (`19 name(s) must resolve`,
+`-- 19 soname(s) probed, 0 failure(s) --`, `PROBE: PASS` en 37833826111), y la
+closure del action lo resuelve (`blas-openblas_0.3.34`, 115 paquetes,
+`unresolved=0`). Lo que falta es `make -C base`: si `libblas.so` y
+`liblapack.so` se enlazan y el build avanza, el siguiente punto de dolor está
+después de los symlinks. Ese run se cayó en un paso propio del traspaso de la
+lista al job build (`tr '\n' ' '` dejaba un espacio final y la validación anclada
+del mismo paso lo rechazó, con razón); reproducido en el teléfono en 1 s y
+corregido con `paste -sd' '`. Como `packages/**` entra en la clave de caché y
+todavía no hay artefacto cacheado, el próximo run paga la compilación completa
+(~45 min).
 
 ---
 
@@ -128,6 +135,7 @@ convirtió en gate local cuando era reproducible fuera del runner.
 | 37811196090 | 16:44 | `System library symlink failure: Unable to locate libpcre2-8.so on your system!` → `Makefile:93: julia-base` a los ~47 min; flisp y LLVM ya estaban compilados | el `libwhich` parcheado **moría al responder**, no era el `dlopen` del soname: su rama sin `dlinfo` re-`dlopen`ea cada imagen que `dl_iterate_phdr` reporta para comparar el handle, y la primera es `/system/bin/linker64`. En el teléfono ese pedido se rechaza por namespace y devuelve `NULL` inofensivamente; en el runner, sin `/linkerconfig/ld.config.txt`, `/system/bin` sí es ruta de búsqueda y bionic se niega a cargarse a sí mismo (`error: linker cannot load itself`) matando el proceso **con stdout sin flush** → `libwhich -p` respondió `""` con rc=1 y el `2>/dev/null` de `base/Makefile:166` se llevó la única pista | `RTLD_LAZY \| RTLD_NOLOAD` al sondear el mapa (la rama Apple de libwhich ya lo usa) + saltar las entradas sin `/` inicial, en `patches/deps/termux-libwhich-dlinfo-android.patch`; verificado con el tool real en el gate: 18/18 `loader bound …` y 18 `TOOL` |
 | 37820685855 | 18:00 | `GATE: FAIL` con `resolution=1` en el job lint: el build ni empezó | la sonda nueva heredaba el algoritmo fatal de libwhich, así que reproducía el síntoma sin poder explicarlo: `FAIL  libpcre2-8.so` con el detalle vacío, porque el proceso moría antes de imprimir | la sonda reporta por etapas (`CTRL` de arranque, `LOAD <soname> ok` con `flush`, `NEEDED` del binario, stderr completo): un stdout vacío ahora significa "no llegó a `main()`" y un `LOAD … ok` prueba que el loader encontró la librería |
 | 37823556050 | 18:20 | `GATE: PASS` y `PROBE: PASS` (`18 soname(s) probed, 0 failure(s)`) en el runner, pero a los ~44 min `System library symlink failure: Unable to locate libblas.so on your system!` → `Makefile:250` → `Makefile:93: julia-base`; el fix de libwhich sí había funcionado (`ln -sf $PREFIX/lib/libpcre2-8.so usr/lib/julia/libpcre2-8.so` en el build real) | el nombre que faltaba no era el que se verificaba: con `USE_SYSTEM_BLAS := 1`, Make.inc fija `LIBBLASNAME := libblas` / `LIBLAPACKNAME := liblapack` y `base/Makefile` pregunta por **esos alias**, que en Termux pertenecen al paquete split `blas-openblas` (dueño de `libblas.so`, `libblas.so.3`, `liblapack.so*`) — la receta solo declaraba `libopenblas`. Y tanto el gate como la sonda llevaban la lista escrita a mano con `libopenblas.so`, así que `resolution=0` mediía otra cosa | `blas-openblas` en `TERMUX_PKG_BUILD_DEPENDS` (el symlink que crea `julia-base` es absoluto a `$PREFIX/lib/libopenblas.so`, ya cubierto en runtime); `scripts/symlinked-libraries.sh` deriva los 19 nombres con `make` sobre el árbol parcheado y `rehearse-recipe.sh`/el job build los consumen (`PROBE_LIBS` del output `lint.probe_libs`); `MISS` pasó a ser `FAIL`: un nombre que el prefijo no tiene es exactamente el abort de `julia-base` |
+| 37833826111 | 19:41 | el job build **nunca arrancó**: `GATE: PASS` con la lista derivada (`19 name(s) must resolve`, `-- 19 soname(s) probed, 0 failure(s) --`, `PROBE: PASS` sobre el prefijo del runner) y en cambio falló el paso nuevo que le pasa esa lista al job build | `tr '\n' ' '` convierte el último salto de línea en un espacio **final**, y la validación anclada `^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$` del propio paso lo rechaza — el guard era correcto; quien normalizaba mal era el join | `paste -sd' '` (sin separador colante). Reproducido en el teléfono antes de tocar nada: `old join: REJECTED`, `paste join: VALID (19 names)`. La hipótesis de `libblas.so` sigue sin medir en el build: este run es el primero que llega a `make` con la lista buena |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
