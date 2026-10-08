@@ -99,11 +99,15 @@ jobs:
           cd tp
           # -s: our materialised prefix has an empty dpkg status, so the dependency
           #     check would fail on packages that are actually present as files.
-          # -c is "continue build", not "clean": it needs prior state and is not what
-          #     a first run wants.
-          timeout 1500 ./build-package.sh -s -q --format debian -o ../output libandroid-glob >../build.log 2>&1
-          echo "build rc=$?"
-          tail -60 ../build.log
+          # GitHub runs this with `bash -e`, so capture rc instead of letting a
+          # non-zero build abort the step before the log is printed.
+          rc=0
+          timeout 1500 ./build-package.sh -s --format debian -o ../output libandroid-glob >../build.log 2>&1 || rc=$?
+          echo "build rc=$rc"
+          echo "--- build.log (last 120) ---"
+          tail -120 ../build.log
+          echo "--- first error-looking lines ---"
+          grep -nE 'error_exit|ERROR|No such file|not supported|requires|command not found' ../build.log | head -20
           echo "--- output dir ---"
           ls -l ../output 2>/dev/null | head -10
           for f in ../output/*.deb; do
@@ -111,7 +115,7 @@ jobs:
             echo "--- $(basename "$f") ---"
             dpkg-deb -I "$f" | head -14
             dpkg-deb -x "$f" ../unpacked
-            (cd ../unpacked && find . -name '*.so*' -type f -o -name '*.so*' -type l | head)
+            (cd ../unpacked && find . \( -name '*.so*' \) | head)
             ELF=$(cd ../unpacked && find . -type f -name '*.so*' | head -1)
             [ -n "$ELF" ] || continue
             echo "--- readelf of $ELF ---"
@@ -127,6 +131,9 @@ jobs:
             echo "machine: $(uname -m)  nproc: $(nproc)"
             free -m | head -3
             df -h / "$ROOT" 2>/dev/null | tail -2
-            echo "builder files in tp: $(find tp -maxdepth 1 -type d | wc -l) dirs"
+            echo "tp/scripts present:"
+            ls tp/scripts 2>/dev/null | head -20
+            echo "on-device prefix contract in the clone:"
+            grep -rn "TERMUX_PREFIX.*termux-build\|Building on-device\|On-device builds" tp/scripts/build/*.sh tp/build-package.sh 2>/dev/null | head -10
             [ -e tp/build/packages/libandroid-glob ] && du -sh tp/build/packages/libandroid-glob
-          done | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          } | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
