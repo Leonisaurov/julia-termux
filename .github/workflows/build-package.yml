@@ -1,187 +1,367 @@
 name: Build Julia for Termux
 
+# Architecture (October 2026): the build runs termux-packages in its own on-device
+# mode on an arm64 runner, so host == target and Termux's clang is the compiler.
+# That is what makes the bundled LLVM 18.1.7 buildable at all: the x86_64 Docker
+# builder used to compile LLVM's host tools as aarch64 and die on
+# `llvm-min-tblgen: Exec format error`, 60-76 minutes into every run.
+#
+# DAG: lint (static gate) -> build (.deb) -> bundle (.pkg.tar.xz + tar.gz) -> publish.
+# Nothing expensive starts unless the gate passed; see AGENTS.md "no CI run without
+# the local gate".
+
 on:
   push:
     branches: [main]
     paths:
-      - 'packages/julia/**'
+      - 'packages/**'
       - 'scripts/**'
-      - '.github/workflows/**'
       - '.github/actions/**'
-  workflow_dispatch:
+      - '.github/scripts/**'
+      - '.github/workflows/build-package.yml'
+  workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PKG: julia
+  ARCH: aarch64
+  RECIPE: packages/julia/build.sh
+
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 720
+  lint:
+    name: Static gate (no compilation)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Prepare termux-packages checkout
-      id: termux-packages
-      run: |
-        set -euo pipefail
-        TP_DIR="$HOME/.cache/julia-termux/termux-packages"
-        TP_REF="master"
-        if [ ! -d "$TP_DIR/.git" ]; then
-          git clone --depth=1 --branch "$TP_REF" https://github.com/termux/termux-packages.git "$TP_DIR"
-        else
-          git -C "$TP_DIR" fetch --depth=1 origin "$TP_REF"
-          git -C "$TP_DIR" reset --hard FETCH_HEAD
-        fi
-        printf 'sha=%s\n' "$(git -C "$TP_DIR" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-        mkdir -p "$TP_DIR/packages/julia"
-        cp packages/julia/build.sh "$TP_DIR/packages/julia/build.sh"
-        chmod +x "$TP_DIR/packages/julia/build.sh"
-        echo "termux-packages: $(git -C "$TP_DIR" rev-parse --short HEAD)"
+      - uses: ./.github/actions/termux-builder
+        with:
+          recipe: ${{ env.RECIPE }}
 
-    - name: Restore build cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.termux-build
-        key: julia-build-v3-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-${{ hashFiles('packages/julia/**', 'scripts/**', '.github/actions/**', '.github/workflows/build-package.yml') }}
-        restore-keys: |
-          julia-build-v3-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-
-          julia-build-v3-ubuntu24-aarch64-
+      - name: Shell syntax and style
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          for f in scripts/*.sh packages/*/build.sh; do
+            if bash -n "$f"; then
+              printf 'OK    %s\n' "$f"
+            else
+              printf 'FAIL  %s does not parse\n' "$f"
+              fail=$((fail + 1))
+            fi
+          done
+          bash scripts/lint-workflows.sh || fail=$((fail + 1))
+          if ! command -v shellcheck > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y shellcheck
+          fi
+          # Errors are the gate.  Warning-level output is printed but not fatal:
+          # recipes reference variables termux-packages defines (SC2154) and the
+          # triage of that noise is not what a build run should test.
+          if ! shellcheck -S error scripts/*.sh packages/*/build.sh; then
+            printf 'FAIL  shellcheck reported errors\n'
+            fail=$((fail + 1))
+          fi
+          shellcheck -S warning -f gcc scripts/*.sh packages/*/build.sh \
+            | sed 's/^/  advisory: /' | head -40 || true
+          exit "$fail"
 
-    - name: Restore compiler cache
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.cache/julia-termux/ccache
-        key: ccache-v2-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-${{ hashFiles('packages/julia/**', 'scripts/**', '.github/actions/**', '.github/workflows/build-package.yml') }}
-        restore-keys: |
-          ccache-v2-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-
-          ccache-v2-ubuntu24-aarch64-
+      - name: Rehearse the recipe against the pinned sources
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$TERMUX_BUILDER_ENV"
+          # The gate replays termux_step_patch_package() and the recipe's configure
+          # hooks over the real Julia tarball, then probes every USE_SYSTEM_* flag
+          # against this prefix.
+          export REHEARSAL_CACHE="$RUNNER_TEMP/rehearse-cache"
+          bash scripts/rehearse-recipe.sh "$PKG"
 
-    - name: Enable zram (16GB comprimido para builds grandes)
-      uses: ./.github/actions/zram
-      with:
-        algorithm: zstd
-        size: 16G
-        priority: 100
-        device_name: /dev/zram0
+      - name: Record the verdict
+        if: always()
+        shell: bash
+        run: |
+          echo "gate ran on $(uname -m) with $(nproc) cores; the GATE line of the" \
+            "previous step is the verdict" >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Check cache state
-      run: |
-        echo "Build cache: $(du -sh ~/.termux-build 2>/dev/null | cut -f1 || echo 0)"
-        echo "LLVM objects: $(find ~/.termux-build/julia/src/deps/scratch/llvm-julia-*/build_Release -name '*.o' 2>/dev/null | wc -l)"
-        echo "ccache: $(du -sh ~/.cache/julia-termux/ccache 2>/dev/null | cut -f1 || echo 0)"
+  build:
+    name: Build julia .deb (native bionic, on-device mode)
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Verify Docker
-      run: docker version
+      - uses: ./.github/actions/termux-builder
+        with:
+          recipe: ${{ env.RECIPE }}
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Clone termux-packages and stage the recipe
+        id: tp
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/termux/termux-packages "$RUNNER_TEMP/tp"
+          tp_sha=$(git -C "$RUNNER_TEMP/tp" rev-parse HEAD)
+          echo "sha=$tp_sha" >> "$GITHUB_OUTPUT"
+          # The whole package directory, not just build.sh: the *.patch files next to
+          # the recipe are what termux_step_patch_package() consumes.
+          rm -rf "$RUNNER_TEMP/tp/packages/$PKG"
+          cp -a "packages/$PKG" "$RUNNER_TEMP/tp/packages/$PKG"
+          test -f "$RUNNER_TEMP/tp/packages/$PKG/build.sh"
+          echo "staged $(find "$RUNNER_TEMP/tp/packages/$PKG" -name '*.patch' | wc -l) patch files"
+          # A bump of any library in the Termux repository changes the binary we
+          # produce, so the repository state belongs in the cache key.  The bootstrap
+          # index the action fetched is the cheapest fingerprint of it.
+          repo_stamp=$(sha256sum "$RUNNER_TEMP/Packages" | cut -c 1-16)
+          echo "repo_stamp=$repo_stamp" >> "$GITHUB_OUTPUT"
 
-    - name: Build CI package-builder image
-      uses: docker/build-push-action@v6
-      with:
-        context: scripts/
-        load: true
-        tags: julia-termux/package-builder:ci
-        cache-from: type=gha,scope=package-builder
-        cache-to: type=gha,mode=max,scope=package-builder
+      # Cache contract: what is cached is the *artifact*, keyed by everything that
+      # feeds into it (termux-packages commit, repository state, recipe + patches).
+      # The build tree itself is deliberately not cached: termux-packages deletes
+      # $TERMUX_PKG_SRCDIR at the start of every build (scripts/build/
+      # termux_step_setup_build_folders.sh:20, reached from termux_step_start_build
+      # because only -c skips it), and with -c the packaging would then sweep only
+      # the files newer than its fresh timestamp file.  A rebuilt artifact is the
+      # honest result; the artifact cache is what makes a repeat of an unchanged
+      # recipe free.
+      - name: Restore the artifact cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: output
+          key: julia-deb-v1-aarch64-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}-${{ hashFiles('packages/julia/**') }}
 
-    - name: Fix cache permissions for Docker
-      run: |
-        mkdir -p ~/.termux-build ~/.cache/julia-termux/ccache
-        chmod 777 ~/.termux-build ~/.cache/julia-termux/ccache
+      - name: Build the package
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          . "$TERMUX_BUILDER_ENV"
+          cd "$RUNNER_TEMP/tp"
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          # -s: the prefix already holds the recipe's DEPENDS and BUILD_DEPENDS
+          #     (installed by the action), so no dependency resolution is needed -
+          #     and without it a failed download would silently start building
+          #     dependencies from source.
+          # No -c and no -f: see the cache contract above.
+          ./build-package.sh -s --format debian -j "$(nproc)" \
+            -o "$GITHUB_WORKSPACE/output" "$PKG" 2>&1 |
+            tee "$RUNNER_TEMP/build.log" |
+            grep -vE 'linkerconfig|ld.config.txt'
+          rc=${PIPESTATUS[0]}
+          echo "build rc=$rc"
+          ls -l "$GITHUB_WORKSPACE/output"
+          exit "$rc"
 
-    - name: Build Julia dependencies via Docker
-      env:
-        TERMUX_BUILDER_IMAGE_NAME: julia-termux/package-builder:ci
-      run: |
-        ./scripts/run-docker.sh bash -c '
-          export TERMUX_PROOT_DISABLED=1
-          /home/builder/julia-termux/scripts/patch-fuse-overlayfs.sh /home/builder/termux-packages || true
-          /home/builder/julia-termux/scripts/build-deps-docker.sh
-        '
+      - name: Inspect the artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$TERMUX_BUILDER_ENV"
+          cd "$GITHUB_WORKSPACE"
+          DEB=$(ls output/julia_*_aarch64.deb 2>/dev/null | head -1)
+          if [ -z "${DEB:-}" ]; then
+            echo "no julia .deb in output/ - the build did not produce an artifact"
+            exit 1
+          fi
+          dpkg-deb -I "$DEB"
+          rm -rf unpack && mkdir -p unpack
+          dpkg-deb -x "$DEB" unpack
+          P=unpack/data/data/com.termux/files/usr
+          fail=0
+          for f in "$P/bin/julia" "$P"/lib/julia/sys.so "$P"/lib/julia/libblastrampoline.so*; do
+            if [ -e "$f" ]; then printf 'OK    %s\n' "${f#"$P"/}"
+            else printf 'FAIL  %s absent from the package\n' "${f#"$P"/}"; fail=1; fi
+          done
+          printf -- '--- bin/julia: target and dynamic section ---\n'
+          file "$P/bin/julia"
+          readelf -h "$P/bin/julia" | grep -E 'Class|Machine|Type'
+          readelf -d "$P/bin/julia" | grep -E 'RUNPATH|RPATH' || {
+            echo "FAIL  no RUNPATH: Julia's stdlibs would not find \$PREFIX/lib/julia"; fail=1; }
+          if readelf -d "$P/bin/julia" | grep -q TEXTREL; then
+            echo "FAIL  DT_TEXTREL: Android's linker rejects this"; fail=1
+          fi
+          printf -- '--- NEEDED of the codegen library ---\n'
+          CG=$(ls "$P"/lib/julia/libjulia-codegen.so* 2>/dev/null | head -1)
+          if [ -n "$CG" ]; then
+            readelf -d "$CG" | grep NEEDED
+            if readelf -d "$CG" | grep -q 'libLLVM-21'; then
+              echo "FAIL  linked against Termux's LLVM 21; Julia 1.12 needs its own 18.1.7"; fail=1
+            fi
+          else
+            echo "FAIL  no libjulia-codegen.so in the package"; fail=1
+          fi
+          printf -- '--- LLVM symbol version (Julia expects JL_LLVM_18.1) ---\n'
+          LL=$(ls "$P"/lib/julia/libLLVM-18jl.so* 2>/dev/null | head -1)
+          if [ -n "$LL" ]; then
+            readelf -V "$LL" | grep -c 'JL_LLVM_18.1' | sed 's/^/  symvers: /'
+          else
+            echo "WARN  libLLVM-18jl.so not in the package (was it linked statically?)"
+          fi
+          printf -- '--- payload ---\n'
+          du -sh "$P" | sed 's/^/  /'
+          find unpack -name '*.so*' | wc -l | sed 's/^/  shared objects: /'
+          exit "$fail"
 
-    - name: Build Julia incrementally via Docker
-      env:
-        TERMUX_BUILDER_IMAGE_NAME: julia-termux/package-builder:ci
-      run: |
-        ./scripts/run-docker.sh bash -c '
-          export TERMUX_PROOT_DISABLED=1
-          . /home/builder/julia-termux/scripts/setup-ccache-docker.sh
-          cd /home/builder/termux-packages
-          ./build-package.sh -I -s --format debian -j 2 -a aarch64 julia
-        '
+      - name: Save the artifact cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: output
+          key: julia-deb-v1-aarch64-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}-${{ hashFiles('packages/julia/**') }}
 
-    - name: Save build cache
-      if: always()
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.termux-build
-        key: julia-build-v3-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-${{ hashFiles('packages/julia/**', 'scripts/**', '.github/actions/**', '.github/workflows/build-package.yml') }}
+      - name: Where the time went
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/build.log"
+          if [ ! -f "$LOG" ]; then
+            echo "## Build log"
+            echo "no build.log: the artifact cache supplied output/julia_*.deb" \
+              "and the build step was skipped." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Build log"
+            echo "- size: $(du -h "$LOG" | cut -f1), $(wc -l < "$LOG") lines"
+            echo "- first errors:"
+            grep -nE 'error:|Error [0-9]|Killed|cannot find|No such file|undefined reference' \
+              "$LOG" | head -10 | sed 's/^/      /'
+            echo "- largest build directories:"
+            du -sh "$HOME/.termux-build" 2>/dev/null | sed 's/^/      /'
+            du -sh "$HOME"/.termux-build/*/src/deps/scratch/* \
+              "$HOME"/.termux-build/*/src/usr/* 2>/dev/null | sort -h | tail -8 | sed 's/^/      /'
+            echo "- last 60 lines:"
+            grep -vE 'linkerconfig|ld.config.txt' "$LOG" | tail -60 | sed 's/^/      /'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Save compiler cache
-      if: always()
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.cache/julia-termux/ccache
-        key: ccache-v2-ubuntu24-aarch64-${{ steps.termux-packages.outputs.sha }}-${{ hashFiles('packages/julia/**', 'scripts/**', '.github/actions/**', '.github/workflows/build-package.yml') }}
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
 
-    - name: Cleanup Docker container
-      if: always()
-      run: docker rm -f julia-termux-builder 2>/dev/null || true
+      - name: Upload the artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: julia-deb
+          path: output/julia_*_aarch64.deb
+          if-no-files-found: error
 
-    - name: Debug - Show build log on failure
-      if: failure()
-      run: |
-        echo "=== Build failed ==="
-        ls -la ~/.termux-build/ 2>/dev/null || echo "No .termux-build dir"
-        find ~/.termux-build -name '*.log' -o -name '*.err' 2>/dev/null | head -20
-        find ~/.termux-build -name '*.log' -exec tail -50 {} \; 2>/dev/null | tail -100
+  bundle:
+    name: Repackage for pacman and bundle
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Collect package files
-      if: success()
-      run: |
-        mkdir -p artifacts
-        for d in "$HOME/.termux-build/output" "$HOME/.cache/julia-termux/termux-packages/output" ./output; do
-          find "$d" -maxdepth 1 -type f \
-            \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) \
-            -exec cp -f {} artifacts/ \; 2>/dev/null || true
-        done
-        find artifacts -maxdepth 1 -type f -print
+      - uses: actions/download-artifact@v4
+        with:
+          name: julia-deb
+          path: incoming
 
-    - name: Upload artifact
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: julia-aarch64-${{ github.run_id }}
-        path: artifacts/*
-        if-no-files-found: error
+      - name: Build the distributable set
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v bsdtar > /dev/null || {
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y libarchive-tools
+          }
+          DEB=$(ls incoming/julia_*_aarch64.deb)
+          echo "input: $DEB"
+          mkdir -p bundle
+          cp "$DEB" bundle/
+          bash scripts/make-pacman-pkg.sh "$DEB" bundle
+          ( cd bundle && tar -czf julia-termux-aarch64.tar.gz \
+              "$(basename "$DEB")" julia-*.pkg.tar.xz )
+          ( cd bundle && sha256sum * > SHA256SUMS.txt )
+          ls -l bundle
+          cat bundle/SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the bundle is self-consistent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/bundle"
+          sha256sum -c SHA256SUMS.txt
+          # The two formats must carry the same bytes; compare the payload file lists.
+          dpkg-deb -x julia_*_aarch64.deb "$RUNNER_TEMP/debx"
+          mkdir -p "$RUNNER_TEMP/pacx"
+          tar -xf julia-*.pkg.tar.xz -C "$RUNNER_TEMP/pacx"
+          diff <(cd "$RUNNER_TEMP/debx" && find . | sort) \
+               <(cd "$RUNNER_TEMP/pacx" && find . -not -name '.PKGINFO' \
+                   -and -not -name '.BUILDINFO' -and -not -name '.MTREE' | sort)
+          echo "payload identical between .deb and .pkg.tar.xz"
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: julia-termux-bundle
+          path: bundle
+          if-no-files-found: error
 
   publish:
-    needs: build
-    if: needs.build.result == 'success'
+    name: Publish the mutable release
+    needs: bundle
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    timeout-minutes: 15
     steps:
-    - uses: actions/download-artifact@v4
-      with:
-        name: julia-aarch64-${{ github.run_id }}
-        path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: julia-termux-bundle
+          path: bundle
 
-    - name: Upload to GitHub Release
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        set -euo pipefail
-        FILE=$(find artifacts -maxdepth 1 -type f \( -name 'julia-*.deb' -o -name 'julia-*.pkg.tar.*' \) -print -quit)
-        [ -n "$FILE" ]
-        gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
-        gh release create julia-latest "$FILE" \
-          --repo "${{ github.repository }}" \
-          --title "julia-latest" \
-          --latest \
-          --notes "Julia for Termux aarch64 - Build from ${{ github.sha }}"
+      - name: Upload to the julia-latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd bundle
+          [ -s SHA256SUMS.txt ]
+          ls julia_*_aarch64.deb julia-*.pkg.tar.xz julia-termux-aarch64.tar.gz
+          cat > notes.md <<EOF
+          Built by run $RUN_ID at $COMMIT, in termux-packages' own on-device mode on an
+          arm64 runner.
+
+          Install the format your Termux uses:
+
+              dpkg -i julia_*_aarch64.deb        # apt-based Termux
+              pacman -U julia-*.pkg.tar.xz       # pacman-based Termux
+
+          Check the bytes first: sha256sum -c SHA256SUMS.txt.
+
+          A green run here means the artifact was built and inspected, not that it works
+          on a phone: run scripts/device-smoke.sh on the device for that.
+          EOF
+          gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create julia-latest \
+            julia_*_aarch64.deb julia-*.pkg.tar.xz \
+            julia-termux-aarch64.tar.gz SHA256SUMS.txt notes.md \
+            --title "Julia 1.12.6 for Termux (aarch64)" \
+            --latest \
+            --notes-file notes.md
