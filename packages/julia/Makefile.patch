@@ -1,0 +1,41 @@
+# Termux/Bionic port: top-level Makefile
+#
+# `make install` must not build the HTML documentation.  Its prerequisite rule
+# (Makefile:65 "Build the HTML docs (skipped if already exists, notably in
+# tarballs)") recurses into `docs`, whose doc/Makefile:47 html target runs
+# doc/make.jl, and that instantiates an environment of its own from the General
+# registry: network at install time, and versions that recipe does not pin.
+# Run 37891178350 is the measurement - the build reached install after compiling
+# everything and precompiling every stdlib, then died with
+# 	RequestError: Could not resolve host: pkg.julialang.org
+# 	GitError(Code:ERROR, Class:Net, failed to resolve address for github.com
+# from the same step where curl had just downloaded UnicodeData.txt, so this is
+# the runner's resolution of hosts that publish AAAA (see the identical apt
+# symptom and its ForceIPv4 workaround in probe-ondevice-builder.yml), not the
+# build.  Neither belongs in a package build.
+#
+# `make docs` is left intact for whoever does want the HTML; only install stops
+# requiring it, and its copy is made tolerant so an install works whether or not
+# the docs happen to have been built.
+--- a/Makefile
++++ b/Makefile
+@@ -309,7 +309,7 @@
+ endef
+ 
+ 
+-install: $(build_depsbindir)/stringreplace $(BUILDROOT)/doc/_build/html/en/index.html
++install: $(build_depsbindir)/stringreplace
+ 	@$(MAKE) $(QUIET_MAKE) $(JULIA_BUILD_MODE)
+ 	@for subdir in $(bindir) $(datarootdir)/julia/stdlib/$(VERSDIR) $(docdir) $(man1dir) $(includedir)/julia $(libdir) $(private_libdir) $(sysconfdir) $(private_libexecdir); do \
+ 		mkdir -p $(DESTDIR)$$subdir; \
+@@ -409,8 +409,8 @@
+ 	find $(DESTDIR)$(datarootdir)/julia/base -type f -name \*.jl -exec chmod 0444 '{}' \;
+ 	find $(DESTDIR)$(datarootdir)/julia/test -type f -name \*.jl -exec chmod 0444 '{}' \;
+ 
+-	# Copy documentation
+-	cp -R -L $(BUILDROOT)/doc/_build/html $(DESTDIR)$(docdir)/
++	# Copy documentation, when it was built (see the install prerequisites)
++	-cp -R -L $(BUILDROOT)/doc/_build/html $(DESTDIR)$(docdir)/
+ 	# Remove various files which should not be installed
+ 	-rm -f $(DESTDIR)$(datarootdir)/julia/base/version_git.sh
+ 	-rm -f $(DESTDIR)$(datarootdir)/julia/test/Makefile
