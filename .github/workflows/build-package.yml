@@ -395,23 +395,34 @@ jobs:
           readelf -h "$P/bin/julia" | grep -E 'Class|Machine|Type'
           readelf -d "$P/bin/julia" | grep -E 'RUNPATH|RPATH' || {
             echo "FAIL  no RUNPATH: Julia's stdlibs would not find \$PREFIX/lib/julia"; fail=1; }
-          if readelf -d "$P/bin/julia" | grep -q TEXTREL; then
-            echo "FAIL  DT_TEXTREL: Android's linker rejects this"; fail=1
-          fi
+          # Not `| grep -q` under this step's `set -euo pipefail`: grep -q
+          # leaves at the first match, the producer takes SIGPIPE, pipefail
+          # reports 141 and `if` reads that as "absent" - a real TEXTREL would
+          # pass silently.  Test the captured output instead (the same defect
+          # the recipe's LLVM assertion had, run 37904805726).
+          _dyn=$(readelf -d "$P/bin/julia" 2>&1 || true)
+          case "${_dyn}" in
+            *TEXTREL*) echo "FAIL  DT_TEXTREL: Android's linker rejects this"; fail=1 ;;
+          esac
           printf -- '--- NEEDED of the codegen library ---\n'
           CG=$(ls "$P"/lib/julia/libjulia-codegen.so* 2>/dev/null | head -1)
           if [ -n "$CG" ]; then
-            readelf -d "$CG" | grep NEEDED
-            if readelf -d "$CG" | grep -q 'libLLVM-21'; then
-              echo "FAIL  linked against Termux's LLVM 21; Julia 1.12 needs its own 18.1.7"; fail=1
-            fi
+            _dyncg=$(readelf -d "$CG" 2>&1 || true)
+            printf '%s\n' "${_dyncg}" | grep NEEDED || echo "  (no NEEDED entries)"
+            case "${_dyncg}" in
+              *libLLVM-21*) echo "FAIL  linked against Termux's LLVM 21; Julia 1.12 needs its own 18.1.7"; fail=1 ;;
+            esac
           else
             echo "FAIL  no libjulia-codegen.so in the package"; fail=1
           fi
           printf -- '--- LLVM symbol version (Julia expects JL_LLVM_18.1) ---\n'
           LL=$(ls "$P"/lib/julia/libLLVM-18jl.so* 2>/dev/null | head -1)
           if [ -n "$LL" ]; then
-            readelf -V "$LL" | grep -c 'JL_LLVM_18.1' | sed 's/^/  symvers: /'
+            _symvers=$(readelf -V "$LL" 2>&1 || true)
+            case "${_symvers}" in
+              *JL_LLVM_18.1*) echo "  symvers: JL_LLVM_18.1 present" ;;
+              *) echo "  FAIL  the packaged libLLVM-18jl.so lacks JL_LLVM_18.1"; fail=1 ;;
+            esac
           else
             echo "WARN  libLLVM-18jl.so not in the package (was it linked statically?)"
           fi
