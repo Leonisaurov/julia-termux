@@ -484,13 +484,40 @@ if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" 2>"$W
 		done
 		soname_fail=1
 	fi
-	printf '%s\n' "$verdicts" | awk '$1 == "absent" { print $2 }' |
-		while read -r name; do
-			[ -n "$name" ] || continue
-			unversioned=${name%%.so*}.so
-			printf '%s\n' "${symlinked:-}" | grep -qxF -e "$name" -e "$unversioned" ||
-				printf '  note  %s: nothing answers it, and julia-base does not require that library either\n' "$name"
-		done
+	# A name nothing answers is only harmless while *nothing loads it unguarded*.
+	# Run 37876520515 died on exactly that: CompilerSupportLibraries_jll's `__init__`
+	# calls dlopen(libgcc_s) with no throw_error, so the raise happened during the
+	# precompile that pkgimage.mk:28 runs inside make - the same wall the gmp name
+	# put in front of run 37851961397, and this gate called it a note.  The call
+	# sites come from the source, not from a list kept here.
+	absent_names=$(printf '%s\n' "$verdicts" | awk '$1 == "absent" { print $2 }')
+	if [ -n "$absent_names" ]; then
+		if guards=$(printf '%s\n' "$absent_names" |
+				bash "$REPO_ROOT/scripts/unguarded-dlopen.sh" "$SRCDIR" 2>"$WORK/guards.txt"); then
+			sed 's/^/  /' "$WORK/guards.txt"
+			printf '%s\n' "$absent_names" | while read -r name; do
+				[ -n "$name" ] || continue
+				printf '%s\n' "${symlinked:-}" | grep -qxF -e "$name" -e "${name%%.so*}.so" && continue
+				sites=$(printf '%s\n' "$guards" | awk -v n="$name" '$1 == "unguarded" && $2 == n')
+				if [ -n "$sites" ]; then
+					printf '%s\n' "$sites" | while read -r site; do
+						printf '  FAIL  %s is loaded without a guard at %s\n' "$name" "${site#unguarded "$name" }"
+					done
+				elif printf '%s\n' "$guards" | awk -v n="$name" '$2 == n { found = 1 } END { exit !found }'; then
+					printf '  note  %s: nothing answers it, and every load of it is guarded\n' "$name"
+				else
+					printf '  note  %s: nothing answers it, and no code here loads it\n' "$name"
+				fi
+			done
+			if printf '%s\n' "$guards" | grep -q '^unguarded '; then
+				[ -n "$orphans" ] || soname_fail=1
+			fi
+		else
+			sed 's/^/  /' "$WORK/guards.txt"
+			echo "  FAIL  the dlopen call sites of the demanded names could not be read"
+			soname_fail=1
+		fi
+	fi
 	# An alias that is derived but never created is the same run, 49 minutes later.
 	# So the recipe must ask for it, and ask *before* make starts, because the
 	# sysimage bootstraps inside make.  Reaching the derivation through a helper
