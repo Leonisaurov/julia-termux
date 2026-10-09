@@ -184,6 +184,44 @@ while IFS= read -r hit; do
 done < <(grep -nE "^$tab-?cp .*doc/_build" "$SRCDIR/Makefile" || true)
 [ "$goal_fail" -eq 0 ] || echo "FAIL  a goal of the recipe would need network or absent documentation"
 
+# ---- a pipe into `grep -q`, under the pipefail the shell really has ----
+# build-package.sh:21 runs every recipe hook under `set -euo pipefail`, and there
+# `producer | grep -q PAT` stops being a test of the producer's output and becomes
+# a race with it: `grep -q` exits at the first match, the producer is still
+# writing, takes SIGPIPE, pipefail reports 141, and `||` reads that as "no match".
+# Run 37904805726 measured it: the recipe's LLVM symbol-version assertion killed
+# the first `make install` this port ever completed, on a libLLVM that *does*
+# carry JL_LLVM_18.1, because readelf was still printing 35 000 version entries.
+# In an `if` the same shape fails the other way round - the condition reads as
+# "absent" - so a genuine defect would pass silently.  Both must test output
+# already captured in a variable.  Producers that are shell builtins writing one
+# buffered block are outside this: nothing is left to interrupt.
+echo
+echo "===== pipes into grep -q ====="
+pipe_fail=0
+for shellfile in "$RECIPE" "$REPO_ROOT"/.github/workflows/*.yml; do
+	[ -f "$shellfile" ] || continue
+	# Join backslash continuations first: the offending pipe can straddle them.
+	# A comment is not a command, even when it quotes one (this gate caught
+	# itself explaining the defect).
+	hits=$(awk '
+		/^[ \t]*#/ { next }
+		{ line = $0; n = NR
+			while (line ~ /\\[ \t]*$/ && (getline nxt) > 0) {
+				sub(/\\[ \t]*$/, " ", line); line = line nxt
+			}
+			if (line ~ /\|[ \t]*grep -q/) printf "%s:%s: %s\n", FILENAME, n, line
+		}' "$shellfile")
+	if [ -n "$hits" ]; then
+		printf '%s\n' "$hits"
+		printf 'FAIL  %s: a pipe into grep -q is a race under pipefail\n' "$shellfile"
+		pipe_fail=$((pipe_fail + 1))
+	else
+		printf 'OK    no pipe into grep -q in %s\n' "$shellfile"
+	fi
+done
+[ "$pipe_fail" -eq 0 ] || echo "FAIL  an assertion in the recipe or the workflow can be decided by a SIGPIPE"
+
 # ---- the endianness decision the patched tree actually makes ----
 # flisp's `#if BYTE_ORDER == BIG_ENDIAN` guards a branch upstream never
 # compiles and that does not even parse (src/flisp/flisp.c:990 is a #define
@@ -715,14 +753,14 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s endian=%s goals=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s sonames=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$endian_fail" "$goal_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$soname_fail" "$repo_fail"
-if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$goal_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
+printf 'patches_applied=%s patch_failures=%s endian=%s goals=%s pipes=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s sonames=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$goal_fail" "$pipe_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$soname_fail" "$repo_fail"
+if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$goal_fail" -gt 0 ] || [ "$pipe_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
 	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] \
 	|| [ "$triplet_fail" -gt 0 ] || [ "$soname_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, endianness settles little-endian, the goals the recipe hands to make ask for nothing the network provides, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, the triplet the sysimage embeds parses, and every versioned soname the sysimage dlopens has an answer)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, the goals the recipe hands to make ask for nothing the network provides, no assertion is decided by a SIGPIPE, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, the triplet the sysimage embeds parses, and every versioned soname the sysimage dlopens has an answer)"
 exit 0
