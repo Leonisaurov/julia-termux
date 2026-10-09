@@ -18,7 +18,10 @@ BUNDLE="${1:-}"
 shift
 NETWORK=0
 RUNTESTS=0
-TEST_TAGS="${TEST_TAGS:-linalg sparsearrays libdl sockets errors}"
+# Only the tests `make install` ships are present: 1.12's tarball installs a core
+# subset (no linalg/, sparsearrays/, libdl, sockets or errors tags here).  These
+# are meaningful tags that do exist, and the loop SKIPs any that do not.
+TEST_TAGS="${TEST_TAGS:-ccall llvmcall regex sysinfo threads}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--network) NETWORK=1 ;;
@@ -304,8 +307,12 @@ if [ "$RUNTESTS" = 1 ]; then
 		TCR="$(command -v tcr || echo "$HOME/.local/bin/tcr")"
 		[ -x "$TCR" ] || TCR=""
 		for tag in $TEST_TAGS; do
+			if [ ! -e "$PREFIX/share/julia/test/$tag.jl" ] && [ ! -d "$PREFIX/share/julia/test/$tag" ]; then
+				printf 'SKIP  runtests:%s (not in the installed test suite)\n' "$tag"
+				continue
+			fi
 			log="$WORK/runtest.$tag.log"
-			code="Base.runtests([\"$tag\"]; nthreads=1, verbose=false)"
+			code="Base.runtests([\"$tag\"]; ncores=1)"
 			if [ -n "$TCR" ]; then
 				timeout "${RUNTEST_TIMEOUT:-3600}" "$TCR" julia --startup=no -e "$code" >"$log" 2>&1
 			else

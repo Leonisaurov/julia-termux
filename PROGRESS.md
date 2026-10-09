@@ -620,6 +620,22 @@ dispositivo: **`SMOKE: PASS`, 19 pass / 0 fail** (arpack SKIP), incluidos `Pkg.a
 `Pkg.instantiate` por red, `codegen_llvm`, BLAS/LAPACK, SuiteSparse, threads y
 `interactive_utils` (que captura el `uv_cpu_info: EACCES` de Android).
 
+**Cierre (2026-10-09 ~15:35 UTC):** el run **37943187638** (`68cc0d6`: receta con los
+alias y el cert) deja el DAG entero en verde —Static gate, Build, **Repackage for pacman
+and bundle**, Publish `skipped`— y sube `julia-termux-bundle` (`.deb`, `.pkg.tar.xz`,
+`julia-termux-aarch64.tar.gz` y `SHA256SUMS.txt`).  El smoke corrido **sobre ese bundle**
+(no sobre el árbol parcheado a mano) verifica los tres SHA256 e instala por pacman:
+**19 pass / 0 fail, `SMOKE: PASS`**.  Fase 4 y Fase 5 quedan cerradas.
+
+Un paso más allá del smoke: el **harness** de la suite (`Base.runtests`) **no corre en
+este dispositivo** —muere con `signal 31` (SIGSYS, el seccomp de Android) en
+`runtests.jl:95` y con `uv_cpu_info: EACCES` al reportar—, pero los **ficheros de test
+corren directos** con `julia -e 'using Test; include("x.jl")'`: `ccall` (todo),
+`regex` (170/170), `llvmcall`, `int`, `floatfuncs`, `abstractarray` y `operators` pasan;
+`threads.jl` es el único que se pasa del timeout de 20 min (sus tests de latencia y
+barreras, sin crash).  `Distributed` sí funciona (`addprocs` → `procs=[2]`,
+`remotecall_fetch` → 2).  Nada de eso es del port: es el seccomp/libuv del entorno.
+
 ### Caché de CI: la clave no debe depender de lo que deriva solo
 
 La clave era `julia-deb-v1-aarch64-<HEAD de termux-packages>-<hash del índice
@@ -633,48 +649,26 @@ julia-deb-v2-aarch64-<hash>-`, así un cambio en `scripts/**`, `.github/**` o do
 otra.  `cache-hit` solo distingue el match exacto, así que las condiciones de "Probe",
 "Build" y "Save" pasaron a `steps.cache.outputs.cache-matched-key == ''`.  Compromiso
 declarado: un artefacto restaurado puede venir enlazado contra libs de Termux de horas
-antes — es el precio de no pagar 60 min por tocar un script.
+antes — es el precio de no pagar 60 min por tocar un script.  Medido: el run
+**37951673594** (`14dade7`, sólo `scripts/**` + `PROGRESS.md`) tardó **9 min 24 s** contra
+los ~63 min de un build completo, con
+`Cache hit for restore-key: julia-deb-v2-aarch64-<recipehash>-…` en el log: el job `build`
+restauró el artefacto y no recompiló.
 
 ---
 
 ## Pendientes
 
-1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  Cadena de
-   cierres: `37870492832` cerró la hipótesis del directorio, `37876520515` falsificó
-   la de memoria (`sysbase-o.a` y `sys-o.a` se emiten), `37886407453` **no llegó a
-   `make`** (el gate lo paró en el runner por el stub `OpenLibm_jll`) y
-   `37891178350` **cerró el precompile** —las stdlibs salen con las dos
-   configuraciones y cero `Failed to precompile`— y `37919869465` **cerró el
-   `make install`**: el `Makefile.patch` sin el prerequisito de docs HTML dejó que
-   `make -j1 install` terminara —los `stringreplace` que reescriben las cadenas de
-   dependencias del loader (`Makefile:468-481`), las copias de `base`/`test`/`stdlib`
-   y `termux-elf-cleaner`— y el muro se movió al **chequeo de símbolos indefinidos de
-   `termux_step_massage`** sobre 32 pkgimages (falso positivo: el JIT de Julia los
-   emite `NOTYPE ... UND`, que el proceso resuelve al `dlopen`).  El fix ya está en la
-   receta: `TERMUX_PKG_UNDEF_SYMBOLS_FILES` acota `./share/julia/compiled/*/*/*.so`.
-   `37930497581` **produjo el `.deb`** (job `build` success, `Inspect the artifact`
-   OK, artefacto `julia-deb` de 84,6 MB) y el muro se movió al job **`bundle`**: el
-   conversor `scripts/make-pacman-pkg.sh` escribía el `.pkg.tar.xz` en un
-   `$OUTPUT_DIR` relativo resuelto **después** de `cd "$PAYLOAD"`, o sea dentro del
-   temp que su propio `trap EXIT` borraba.  El próximo run mide **una** hipótesis:
-   que con `OUTPUT_DIR` canonizado antes de cualquier `cd` el job `bundle` completa
-   (`julia-1.12.6-0-aarch64.pkg.tar.xz` + `julia-termux-aarch64.tar.gz` +
-   `SHA256SUMS.txt`, con el payload idéntico al `.deb`) y `Publish` solo queda
-   `skipped` porque no se pidió `publish=true`.  El `.deb` de este run ya está
-   descargado en el teléfono (`$PREFIX/tmp/julia-deb-37930497581/`) para arrancar la
-   Fase 5 sin esperar al próximo run, y su conversión a pacman + bundle ya se validó
-   aquí sobre el artefacto real.
-2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
-   correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
-   Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
-   es "funciona".  **Y sin baseline prestada**: el `julia` de referencia de este
-   teléfono no evalúa código (bullet arriba), así que `device-smoke.sh` se
-   afirma contra sus propios `assert`s, no contra "el otro julia sí anda".
-   **Primera corrida hecha el 2026-10-09** (sección de Fase 5 arriba): el `.deb`
-   de `37930497581` instalado por pacman arranca y evalúa la batería entera, con
-   los tres alias derivados de `DT_NEEDED`.  Queda: repetir sobre el artefacto
-   del próximo run (que ya trae los alias en la receta, no a mano), correr el
-   `.pkg.tar.xz`/bundle publicado y el `Pkg.test` de un paquete puro.
+1. **Fase 4 — CERRADA (2026-10-09)**: el run `37943187638` produce el `.deb` y el job
+   `bundle` arma el set distributable (`.deb` + `.pkg.tar.xz` + `.tar.gz` + `SHA256SUMS`);
+   la receta ya trae los alias de `DT_NEEDED` y el `cert.pem`.  Un cambio sólo en
+   `scripts/**` reusa el artefacto cacheado (`37951673594`: 9 min 24 s).  Queda opcional:
+   publicar la release mutable, que es explícita (`workflow_dispatch` con `publish=true`);
+   hasta entonces `Publish` es `skipped` por diseño.
+2. **Fase 5 — CERRADA (2026-10-09)**: el bundle del CI se instaló en el dispositivo y
+   pasó `device-smoke.sh --network` completo: **19 pass / 0 fail** (arpack SKIP por no ser
+   stdlib en 1.12).  El detalle, las correcciones del smoke y el `uv_cpu_info` de Android
+   están en la sección de Fase 5.
 3. **Foldar el resto de la derivación de `built`**: la lista a mano
    `built_by_us="libblastrampoline libLLVM"` ya no existe (plegada 2026-10-08, ver
    el bullet de `Tramo siguiente`).  Lo que queda es la boundary declarada: un dep
