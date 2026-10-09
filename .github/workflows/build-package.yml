@@ -65,7 +65,7 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
-          for f in scripts/*.sh packages/*/build.sh; do
+          for f in scripts/*.sh packages/*/*.sh; do
             if bash -n "$f"; then
               printf 'OK    %s\n' "$f"
             else
@@ -81,11 +81,11 @@ jobs:
           # Errors are the gate.  Warning-level output is printed but not fatal:
           # recipes reference variables termux-packages defines (SC2154) and the
           # triage of that noise is not what a build run should test.
-          if ! shellcheck -S error scripts/*.sh packages/*/build.sh; then
+          if ! shellcheck -S error scripts/*.sh packages/*/*.sh; then
             printf 'FAIL  shellcheck reported errors\n'
             fail=$((fail + 1))
           fi
-          shellcheck -S warning -f gcc scripts/*.sh packages/*/build.sh \
+          shellcheck -S warning -f gcc scripts/*.sh packages/*/*.sh \
             | sed 's/^/  advisory: /' | head -40 || true
           exit "$fail"
 
@@ -210,15 +210,26 @@ jobs:
       # the files newer than its fresh timestamp file.  A rebuilt artifact is the
       # honest result; the artifact cache is what makes a repeat of an unchanged
       # recipe free.
+      #
+      # The recipe hash is the FIRST key component so `restore-keys` can reuse the
+      # last artifact built from the same recipe when only scripts/**, .github/**,
+      # docs or PROGRESS.md changed.  With the termux-packages commit and the
+      # Termux index hash ahead of it, a one-line fix to scripts/make-pacman-pkg.sh
+      # was about to pay another full ~60 min build (run 37939888448), because
+      # those two components drift on their own within hours.  The strict key is
+      # still what gets saved, so the entry records the environment it was built
+      # in; a restore-keys hit is deliberately NOT re-saved under a different one.
       - name: Restore the artifact cache
         id: cache
         uses: actions/cache/restore@v4
         with:
           path: output
-          key: julia-deb-v1-aarch64-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}-${{ hashFiles('packages/julia/**') }}
+          key: julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}
+          restore-keys: |
+            julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-
 
       - name: Probe the loader's library resolution
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-matched-key == ''
         shell: bash
         env:
           PROBE_LIBS: ${{ needs.lint.outputs.probe_libs }}
@@ -234,7 +245,7 @@ jobs:
           bash scripts/probe-library-resolution.sh
 
       - name: Build the package
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-matched-key == ''
         shell: bash
         run: |
           set +e
@@ -432,11 +443,11 @@ jobs:
           exit "$fail"
 
       - name: Save the artifact cache
-        if: success()
+        if: success() && steps.cache.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: output
-          key: julia-deb-v1-aarch64-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}-${{ hashFiles('packages/julia/**') }}
+          key: julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}
 
       - name: Where the time went
         if: always()

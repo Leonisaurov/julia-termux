@@ -556,6 +556,56 @@ cierra el empaquetado y **el job `build` da `success` y sube el `.deb`** —84,6
 relativo resuelto dentro del temp de `dpkg-deb -x`, que el `trap EXIT` borraba antes
 del `tar`).
 
+### Fase 5 — primera corrida del artefacto en el dispositivo (2026-10-09)
+
+El `.deb` de `37930497581` se convirtió a pacman con el mismo
+`scripts/make-pacman-pkg.sh` y se instaló con `pacman -U --overwrite '*'` (nuestro
+`julia 1.12.6-0` reemplaza al `1.12.6-1` del repo; `pacman -Ql julia` quedó guardado en
+`$PREFIX/tmp/julia-files-before.txt` y `pacman -S julia` lo restaura).  **Resultado: el
+port funciona.**  `julia --version` responde y `-e` evalúa: `println(1+1)`,
+`Sys.MACHINE = aarch64-unknown-linux-android24`, `LinearAlgebra` con `rand(64,64)` y
+`A*A` (BLAS LP64 vía libopenblas), `Dates`, `SparseArrays`, `Printf`, `Random`,
+`Statistics`, `Pkg`, `CompilerSupportLibraries_jll`, `Downloads`, `LibGit2` — todas rc=0.
+
+El único bloqueo fue **`libz.so.1`**: `libLLVM.so.18.1jl` trae RUNPATH `$ORIGIN`
+**solo**, así que cada nombre de su `DT_NEEDED` tiene que existir en `lib/julia` (el
+loader no cae a `$PREFIX/lib`).  `libz.so.1` existe en `$PREFIX/lib` (lo provee `zlib`)
+pero ningún fuente de Julia lo escribe, así que `soname-aliases.sh` —que lee
+**literales**— no lo reclamaba y no había alias.  Síntoma exacto: `dlopen failed:
+library "libz.so.1" not found: needed by .../libLLVM.so.18.1jl`.  Un `ln -sfn` a mano
+en `lib/julia` lo cierra y el árbol entero arranca (probe medido).  Fix:
+`packages/julia/needed-library-aliases.sh` deriva los nombres del `DT_NEEDED` de los ELF
+**instalados** en la carpeta (excluyendo lo que ya responde `/system/lib{,64}`),
+`termux_link_needed_aliases` crea los links en `post_make_install`, y una aserción
+fail-closed vuelve a correr la derivación y exige que salga **vacía**, así el build falla
+en vez de que falle el primer `julia -e`.  Sobre el árbol instalado el helper emite
+exactamente tres: `libz.so.1`, `libc++_shared.so`, `libjulia.so.1.12` (los tres al mismo
+fichero que el loader ya habría resuelto o necesita).  Rojo→verde en el teléfono: sin el
+link, todo `-e` muere con el `dlopen failed`; con el link, la batería entera pasa y el
+re-check del helper sale vacío.
+
+Nota de método: la primera prueba en el dispositivo fue **inválida** —extraje el `.deb` a
+un prefijo temporal— porque `Sys.STDLIB` y los `_jll` se resuelven contra el prefijo de
+build (`/data/data/com.termux/files/usr`), que en el teléfono es el `julia` de pacman:
+los avisos `OpenBLAS_jll init failed` venían del julia del sistema (su `sys.so` no tiene
+el patch; el nuestro sí: `load_openblas` ×2 contra ×0).  Un artefacto de Termux **solo**
+se puede probar instalado en el prefijo real.
+
+### Caché de CI: la clave no debe depender de lo que deriva solo
+
+La clave era `julia-deb-v1-aarch64-<HEAD de termux-packages>-<hash del índice
+Termux>-<hash de packages/julia/**>` y no había `restore-keys`.  Un cambio en `scripts/**`
+(el fix de `make-pacman-pkg.sh`) pagó otro build completo porque las dos primeras
+componentes se mueven solas en horas.  Ahora el hash de la receta va **primero**
+(`julia-deb-v2-aarch64-<hash>-<...>-<...>`) con `restore-keys:
+julia-deb-v2-aarch64-<hash>-`, así un cambio en `scripts/**`, `.github/**` o docs reusa el
+último artefacto de la misma receta; la clave estricta sigue siendo la que se **guarda**
+(con el entorno en que se construyó) y un hit por `restore-keys` **no** se re-guarda bajo
+otra.  `cache-hit` solo distingue el match exacto, así que las condiciones de "Probe",
+"Build" y "Save" pasaron a `steps.cache.outputs.cache-matched-key == ''`.  Compromiso
+declarado: un artefacto restaurado puede venir enlazado contra libs de Termux de horas
+antes — es el precio de no pagar 60 min por tocar un script.
+
 ---
 
 ## Pendientes
@@ -591,8 +641,11 @@ del `tar`).
    es "funciona".  **Y sin baseline prestada**: el `julia` de referencia de este
    teléfono no evalúa código (bullet arriba), así que `device-smoke.sh` se
    afirma contra sus propios `assert`s, no contra "el otro julia sí anda".
-   Antes de fiarse de una comparación, abrir la causa raíz de ese arranque roto
-   (es el paquete de Termux, no esta receta).
+   **Primera corrida hecha el 2026-10-09** (sección de Fase 5 arriba): el `.deb`
+   de `37930497581` instalado por pacman arranca y evalúa la batería entera, con
+   los tres alias derivados de `DT_NEEDED`.  Queda: repetir sobre el artefacto
+   del próximo run (que ya trae los alias en la receta, no a mano), correr el
+   `.pkg.tar.xz`/bundle publicado y el `Pkg.test` de un paquete puro.
 3. **Foldar el resto de la derivación de `built`**: la lista a mano
    `built_by_us="libblastrampoline libLLVM"` ya no existe (plegada 2026-10-08, ver
    el bullet de `Tramo siguiente`).  Lo que queda es la boundary declarada: un dep

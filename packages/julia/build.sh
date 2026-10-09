@@ -189,6 +189,27 @@ termux_link_soname_aliases() {
 	done <<<"${_out}"
 }
 
+# Every DT_NEEDED name the installed objects carry must exist in the same
+# directory, because some of them are linked with RUNPATH '$ORIGIN' only and the
+# loader never falls back to $PREFIX/lib for those.  soname-aliases.sh reads
+# source literals and cannot see a name no Julia code spells - libz.so.1 is one,
+# a DT_NEEDED of libLLVM.so.18.1jl - so these names are read from the objects
+# themselves.  The caller re-runs the derivation and asserts it comes back
+# empty, so a missing link fails the build instead of the artifact's first run.
+termux_link_needed_aliases() {
+	local _dir="${1:?usage: termux_link_needed_aliases <directory>}"
+	local _verdict _want _target _out
+	if ! _out=$(bash "${TERMUX_PKG_BUILDER_DIR}/needed-library-aliases.sh" \
+		"${_dir}" "${TERMUX_PREFIX}/lib"); then
+		termux_error_exit "needed-library-aliases.sh could not read ${_dir}"
+	fi
+	while read -r _verdict _want _target; do
+		[ "${_verdict}" = alias ] || continue
+		ln -sfn "${TERMUX_PREFIX}/lib/${_target}" "${_dir}/${_want}"
+	done <<<"${_out}"
+	unset _out _verdict _want _target
+}
+
 termux_step_make() {
 	cd "${TERMUX_PKG_SRCDIR}"
 
@@ -233,6 +254,24 @@ termux_step_post_make_install() {
 	# RUNPATH '$$ORIGIN:$$ORIGIN/../', so this is where the object that answers the
 	# dlopen lives from now on.
 	termux_link_soname_aliases "${TERMUX_PREFIX}/lib/julia"
+
+	# The literal names are not the whole demand: libLLVM.so.18.1jl carries
+	# RUNPATH '$ORIGIN' only, so its DT_NEEDED names have to exist here too, and
+	# libz.so.1 is one no Julia source spells.  Run 37939888448's artifact
+	# installed cleanly and then refused every command with
+	#	dlopen failed: library "libz.so.1" not found: needed by libLLVM.so.18.1jl
+	# while the same tree ran the moment the link existed (device probe,
+	# 2026-10-09).  After linking, the derivation must come back empty; that is
+	# the build-time form of the check the runtime would otherwise make.
+	termux_link_needed_aliases "${TERMUX_PREFIX}/lib/julia"
+	local _left
+	if ! _left=$(bash "${TERMUX_PKG_BUILDER_DIR}/needed-library-aliases.sh" \
+		"${TERMUX_PREFIX}/lib/julia" "${TERMUX_PREFIX}/lib"); then
+		termux_error_exit "needed-library-aliases.sh could not re-read the installed tree"
+	fi
+	[ -z "${_left}" ] || termux_error_exit \
+		"the installed lib/julia still misses DT_NEEDED names: $(printf '%s' "${_left}" | tr '\n' ' ')"
+	unset _left
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
