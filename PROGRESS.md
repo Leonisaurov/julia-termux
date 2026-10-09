@@ -204,7 +204,10 @@ pida `dlopen` del linker del runner.
   `libgit2.so.1.9`, `libssh2.so.1`, `libnghttp2.so.14`, `libgmpxx.so.4`,
   `libpcre2-8.so.0`) tienen que existir ya en `usr/lib/julia`; por eso el fix se
   puso en `termux_step_make` y no solo tras install.  `--cpu-target=native` es
-  el siguiente candidato a problema si `sys-o.a` falla: aún no hay evidencia.
+  el siguiente candidato a problema si `sys-o.a` falla: es un **literal** de
+  `contrib/generate_precompile.jl:360` (medido: `JULIA_CPU_TARGET` no aparece en
+  el script, así que el `generic` de la receta solo gobierna la invocación externa
+  de `sysimage.mk:118`), y aún no hay evidencia de fallo.
 
 - **El runtime GNU no existe en el prefijo; `CompilerSupportLibraries_jll` es el
   candidato nombrado para `sys-o.a`.** Medido en el teléfono (2026-10-08 ~18:00
