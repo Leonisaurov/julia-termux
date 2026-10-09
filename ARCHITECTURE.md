@@ -102,7 +102,7 @@ receta puede permitirse **compilar LLVM desde `deps/llvm.mk`**:
 - El corolario se verifica en el artefacto, no en la fe: `build-package.yml:309-325`
   rechaza un `libjulia-codegen.so` enlazado contra `libLLVM-21` y exige el
   symver `JL_LLVM_18.1`; la receta ya lo comprueba tras install
-  (`build.sh:210-212`).
+  (`build.sh:230-235`).
 - Medido: LLVM 18.1.7-4 completo en ~43 min (`PROGRESS.md` "Avance medible").
 
 `packages/llvm-julia` **no es la ruta**: es la contingencia cacheada de la
@@ -127,7 +127,7 @@ Por eso existen **dos mitades de la misma defensa**:
 
 - `termux_step_pre_massage()` en la receta poda lo que no es Julia y **imprime
   cada ruta podada**, para que una suposición equivocada se vea en el log en
-  lugar de manifestarse como un fichero que falta (`build.sh:225-263`).
+  lugar de manifestarse como un fichero que falta (`build.sh:249-288`).
 - `build-package.yml:259-300` hace la mitad contraria: desmonta el `.deb` y
   exige que **no haya nada fuera del footprint de Julia**, con la lista de
   nombres permitidos copiada de `termux_step_pre_massage()`. La duplicación es
@@ -279,7 +279,9 @@ en `PROGRESS.md` "Cadena de modos de fallo".
 | 37823556050 | 18:20 | `GATE: PASS` y `PROBE: PASS` en el runner, pero ~44 min después `Unable to locate libblas.so` → `Makefile:250` → `Makefile:93: julia-base`; el fix de libwhich **sí** había funcionado | el nombre que faltaba no era el que se verificaba: con `USE_SYSTEM_BLAS := 1`, `Make.inc` fija `LIBBLASNAME := libblas`/`LIBLAPACKNAME := liblapack` y `base/Makefile` pregunta por **esos alias**, que en Termux pertenecen al paquete split `blas-openblas`; la receta solo declaraba `libopenblas`, y gate y sonda llevaban la lista a mano | `blas-openblas` en `TERMUX_PKG_BUILD_DEPENDS`; `scripts/symlinked-libraries.sh` deriva los 19 nombres con `make` sobre el árbol parcheado; `MISS` pasó a ser `FAIL` |
 | 37833826111 | 19:41 | el job `build` **nunca arrancó**: el gate pasó con la lista derivada (19 nombres, `PROBE: PASS`) y falló el paso nuevo que se la pasa al job build | `tr '\n' ' '` convierte el último salto de línea en un **espacio final**, y la validación anclada `^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$` del propio paso lo rechaza; el guard era correcto, quien normalizaba mal era el join | `paste -sd' '`. Reproducido en el teléfono antes de tocar nada (`build-package.yml:116-119`) |
 | 37841320064 | 21:33 | hipótesis de `libblas.so` **confirmada** en el build (0 apariciones de `System library symlink failure`, 19 `ln -sf` incluidos `libblas.so` y `liblapack.so`); ~47 min después muere en `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1` con `ArgumentError("Platform \`ERROR: Unmatchable platform string 'aarch64-unknown-linux-gnu24'!-julia_version+1.12.6\` …")` | `base/Makefile:85` empotra `$(BB_TRIPLET_LIBGFORTRAN_CXXABI)` como `const BUILD_TRIPLET`, y esa variable es el stdout de `contrib/normalize_triplet.py $(BUILD_MACHINE)` invocado en `Make.inc:1380` **sin mirar el rc**. `BUILD_MACHINE` sale de `$(HOSTCC) -dumpmachine` (`Make.inc:917`) y en Termux es `aarch64-unknown-linux-android24`; las tablas del script no conocen android, así que imprimió su queja y **ese texto se convirtió en la constante**. El parche que había (`base-binaryplatforms.jl.patch`) reescribía `-android`→`-gnu` dentro de `parse`: una capa más abajo, arreglando el mensaje de error | `contrib-normalize_triplet.py.patch` (dos hunks) + eliminación del parche en `binaryplatforms.jl`; gate nuevo `scripts/embedded-triplet.sh`. Rojo→verde en el teléfono: `triplet=1` → `triplet=0 resolution=1` (descubierto el `libgfortran.so.5`, 19→20 nombres) → `triplet=0 resolution=0` con 19 nombres |
-| 37851961397 | 22:12→23:05 | hipótesis del triplet **confirmada** (`Unmatchable` 0 veces, `julia` arranca, `sysimage.mk` invoca el bootstrap); ~49 min después aborta otra vez en `sysimage.mk:129`, ahora con `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\""))` | causa distinta, una capa más abajo: `base/gmp.jl:32` pide `"libgmp.so.10"` y `base/mpfr.jl:40` `"libmpfr.so.6"` como **literales** (upstream no lo nota porque compila su propio GMP, cuyo SONAME sí lleva versión) y el `dlopen` de Android empareja **nombres de fichero**; ningún SONAME del prefijo lleva versión (medido con `readelf -d`). El alias de `base/Makefile:162` no puede ayudar: crea el nombre **sin** versión. Y la receta creaba los symlinks en `termux_step_post_make_install`, **después** de `make` | `packages/julia/soname-aliases.sh` deriva los nombres del fuente y veredicta `native`/`alias`/`built`/`absent`; `termux_link_soname_aliases` los enlaza en `usr/lib/julia` **antes** de `make` (`build.sh:172`) y de nuevo en `$PREFIX/lib/julia` tras install; sección `dlopen'ed versioned sonames` en el gate. Rojo→verde: `sonames=1` (`build.sh never creates the aliases the source demands`, rc=5) → `sonames=0`, 8 alias, 21 `native`, `libblastrampoline.so.5` `built`, 8 `absent` inocuos |
+| 37851961397 | 22:12→23:05 | hipótesis del triplet **confirmada** (`Unmatchable` 0 veces, `julia` arranca, `sysimage.mk` invoca el bootstrap); ~49 min después aborta otra vez en `sysimage.mk:129`, ahora con `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\""))` | causa distinta, una capa más abajo: `base/gmp.jl:32` pide `"libgmp.so.10"` y `base/mpfr.jl:40` `"libmpfr.so.6"` como **literales** (upstream no lo nota porque compila su propio GMP, cuyo SONAME sí lleva versión) y el `dlopen` de Android empareja **nombres de fichero**; ningún SONAME del prefijo lleva versión (medido con `readelf -d`). El alias de `base/Makefile:162` no puede ayudar: crea el nombre **sin** versión. Y la receta creaba los symlinks en `termux_step_post_make_install`, **después** de `make` | `packages/julia/soname-aliases.sh` deriva los nombres del fuente y veredicta `native`/`alias`/`built`/`absent`; `termux_link_soname_aliases` los enlaza **antes** de `make` (hoy `build.sh:192`) y de nuevo tras install, en ambos casos en `usr/lib/julia` — el directorio que falsifica la fila siguiente; sección `dlopen'ed versioned sonames` en el gate. Rojo→verde: `sonames=1` (`build.sh never creates the aliases the source demands`, rc=5) → `sonames=0`, 8 alias, 21 `native`, `libblastrampoline.so.5` `built`, 8 `absent` inocuos |
+| 37859841658 | 23:30→23:35 | `GATE: PASS` en el runner y **la hipótesis no llegó a medirse**: 4 min 21 s, `ln: failed to create symbolic link 'usr/lib/julia/libcurl.so.4': No such file or directory`, `build rc=1` | el fix estaba roto, no la premisa: se enlazaba antes de `make` en un directorio que crea `make`; el gate nuevo era estático (¿se invoca la derivación antes del `make`?) y no preguntaba si el destino existe |
+| 37862103015 | 23:55→00:49 (~54 min) | `mkdir -p` devolvió la cadena a su punto más lejano: los 8 alias creados, ni un `ln: failed` en 12 128 líneas, y `sysimage.mk:129` muere con el mismo `dlopen failed: library "libgmp.so.10" not found` | hipótesis de **presencia** falsificada; la causa es de **directorio**: el objeto que emite el `dlopen` es `libjulia-internal.so`, en `usr/lib`, con `RUNPATH` solo `$ORIGIN` (`Make.inc:1475,1472`; `src/Makefile:417`) |
 
 Las secciones siguientes explican el **por qué** de cada cierre, no el qué.
 
@@ -467,17 +469,42 @@ sitios pertenecen a los parches de stdlib que resuelven o saltan su propio
 `dlopen`, y `PROGRESS.md` los nombra como candidatos del tramo de precompile. Un
 gate que pretende cubrir lo que no puede ver miente en verde.
 
-La segunda parte del cierre es una **cuestión de capa temporal**, y es lo que
-make la derivación obligatoria en dos sitios: la receta creaba los symlinks en
-`termux_step_post_make_install`, es decir **después** de `make`, mientras el
-sysimage se bootstrapa **dentro** de `make`. Por eso `termux_link_soname_aliases
-usr/lib/julia` se llama en `termux_step_make` antes de `make` (`build.sh:159-172`)
-y se repite en `$PREFIX/lib/julia` tras install (`build.sh:187-195`). El gate
-exige esa evidencia, no la asume: localiza el cuerpo de `termux_step_make`,
-encuentra la línea de su `make` y reclama que la derivación aparezca **antes**
-(`rehearse-recipe.sh:494-516`); si no, `FAIL build.sh never creates the aliases
-the source demands`. También cruza los `absent` con la lista REQUIRED de §3.4: un
-nombre letal para `julia-base` y sin respuesta es `FAIL`; uno sin respuesta que
+La segunda parte del cierre es una **cuestión de capa temporal**: la receta creaba
+los symlinks en `termux_step_post_make_install`, es decir **después** de `make`,
+mientras el sysimage se bootstrapa **dentro** de `make`. Por eso
+`termux_link_soname_aliases` se llama en `termux_step_make` antes de `make`
+(`build.sh:176-192`) y se repite en `$PREFIX/lib/julia` tras install
+(`build.sh:207-219`). El gate exige esa evidencia, no la asume: localiza el cuerpo
+de `termux_step_make`, encuentra la línea de su `make` y reclama que la derivación
+aparezca **antes** (`rehearse-recipe.sh:494-515`).
+
+La tercera parte fue **una cuestión de capa espacial**, y costó un run entero:
+37862103015 creó los 8 alias donde se los pedía y el bootstrap murió igual, con
+`dlopen failed: library "libgmp.so.10" not found`. El nombre estaba, el
+**directorio** no era el que el loader lee. El `dlopen` de un nombre sin barra lo
+emite `src/dlload.c:376`, dentro de `libjulia-internal.so`; esa librería se enlaza
+en `$(build_shlibdir)` = `usr/lib` (`src/Makefile:417`, `Make.inc:729,328,320`) con
+`RPATH_LIB := RPATH_ORIGIN = -Wl,-rpath,'$ORIGIN'` (`Make.inc:1475,1472`), así que
+su conjunto de búsqueda es su propio directorio, y `usr/lib/julia` —donde
+`base/Makefile` deja sus 19 nombres sin versión, y donde la receta había puesto los
+alias— no está en él. En el árbol instalado cambia todo: `make install` mueve el
+objeto a `$(private_libdir)` y le fija `RUNPATH '$ORIGIN:$ORIGIN/../'`
+(`Makefile:468-481`), por lo que `$PREFIX/lib/julia` sí es correcto allí. Medido en
+el teléfono con ese layout (`$PREFIX/tmp/ororigin-probe`): una librería en `usr/lib`
+con `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")` devuelve el mensaje exacto
+de CI con el alias en `usr/lib/julia`, y resuelve con el alias en `usr/lib`.
+
+Como un literal escrito a mano ya había costado 50 minutos, el directorio se
+deriva: `scripts/runtime-library-dir.sh` le pregunta a `make` por
+`$(build_shlibdir)`, `$(private_libdir)`, `$(RPATH_LIB)` y
+`$(reverse_private_libdir_rel)`, y **rechaza** el resultado si `RPATH_LIB` deja de
+mencionar `$ORIGIN` (la premisa entera se cae con eso). La sección
+`dlopen'ed versioned sonames` del gate compara esa respuesta con los destinos de
+cada `termux_link_soname_aliases` de la receta (`rehearse-recipe.sh:516-546`):
+`OK the aliases for the build tree go to usr/lib, the directory make names`, y
+`FAIL nothing links the aliases into usr/lib (the build tree)` si alguien vuelve a
+escribir otro. También cruza los `absent` con la lista REQUIRED de §3.4: un nombre
+letal para `julia-base` y sin respuesta es `FAIL`; uno sin respuesta que
 `julia-base` no requiere es solo una nota (`:473-493`).
 
 Hoy: 8 alias (`libcurl.so.4`, `libgit2.so.1.9`, `libgmp.so.10`, `libgmpxx.so.4`,
@@ -696,7 +723,7 @@ La coherencia se comprueba, no se afirma (`build-package.yml:417-430`): `sha256s
 
 | Comprobación | Por qué |
 |---|---|
-| presencia de `bin/julia`, `lib/julia/sys.so`, `lib/julia/libblastrampoline.so*` | una julia sin sysimage o sin codegen **instala limpio y luego no corre**; la receta ya lo exige en `termux_step_post_make_install` (`build.sh:199-203`) |
+| presencia de `bin/julia`, `lib/julia/sys.so`, `lib/julia/libblastrampoline.so*` | una julia sin sysimage o sin codegen **instala limpio y luego no corre**; la receta ya lo exige en `termux_step_post_make_install` (`build.sh:223-227`) |
 | nada fuera del footprint de Julia | la otra mitad de `termux_step_pre_massage` (§1.5) |
 | `readelf -d` exige `RUNPATH` y rechaza `DT_TEXTREL` | sin `RUNPATH` los stdlibs no encuentran `$PREFIX/lib/julia`; Android **rechaza** `DT_TEXTREL` (por eso `cli-Makefile.patch` quita `-Wl,-z,notext`… y por eso hace falta el `--whole-archive` de compiler-rt) |
 | `NEEDED` de `libjulia-codegen.so` y rechazo explícito de `libLLVM-21` | demuestra que el LLVM es el bundled de Julia, no el de Termux (§1.4) |
@@ -825,9 +852,16 @@ Candidatos del tramo siguiente, ya medidos y descartados/afirmados
 - Los 8 alias se crean ahora **antes** de `make`, porque cada etapa de precompile
   abre un `julia` nuevo y los `_jll` del árbol vendido piden `libcurl.so.4`,
   `libgit2.so.1.9`, `libssh2.so.1`, `libnghttp2.so.14`, `libgmpxx.so.4`,
-  `libpcre2-8.so.0`. Que `usr/lib/julia` esté en la búsqueda es medible en el
-  paquete instalado: `readelf -d libjulia-internal.so` da
-  `RUNPATH [$ORIGIN:$ORIGIN/..]`, y `base/Makefile` ya enlaza ahí sus 19 nombres.
+  `libpcre2-8.so.0`. **Dónde** se crean no es simétrico entre los dos árboles, y
+  es medible: en el de build el objeto que emite el `dlopen` vive en `usr/lib` con
+  `RUNPATH $ORIGIN` (por eso `usr/lib/julia`, donde `base/Makefile` enlaza sus 19
+  nombres, no lo resuelve — run 37862103015); en el instalado `make install` lo
+  mueve y le fija `RUNPATH $ORIGIN:$ORIGIN/..`, así que allí `$PREFIX/lib/julia`
+  sí está en la búsqueda. Verificado en un `julia` ya instalado en el teléfono:
+  `readelf -d $PREFIX/lib/julia/libjulia-internal.so` → `RUNPATH
+  [$ORIGIN:$ORIGIN/..]`, mientras `bin/julia` lleva `$ORIGIN/../lib` y
+  `$ORIGIN/../lib/julia` — que no se consultan, porque con `--enable-new-dtags`
+  el RUNPATH del ejecutable no cubre el `dlopen` que hace una librería.
 
 Límites estructurales que no van a desaparecer:
 
@@ -877,7 +911,7 @@ El vocabulario prohibido —`XC_HOST`, `HOSTCC`, `BUILDING_HOST_TOOLS`, `--host`
 | el DAG real (lint → build → bundle → publish) | `.github/workflows/build-package.yml` |
 | cómo se materializa el prefijo en el runner | `.github/actions/termux-builder/action.yml` |
 | el gate local completo | `scripts/rehearse-recipe.sh` |
-| derivación de sonames / triplet / alias versionados | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh` |
+| derivación de sonames / triplet / alias versionados / directorio buscado por el loader | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`, `scripts/runtime-library-dir.sh` |
 | la sonda del loader por etapas | `scripts/probe-library-resolution.sh` |
 | la closure del prefijo | `.github/scripts/termux-closure-resolver.py` |
 | cómo se prueba que funciona | `scripts/device-smoke.sh`, `scripts/device-diag.sh` |

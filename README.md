@@ -33,7 +33,7 @@ Remoto: `https://github.com/Leonisaurov/julia-termux` (rama `main`).
 
 ## Estado (2026-10-08)
 
-La cadena está medida hasta el **minuto ~49**. Todavía **no existe ningún
+La cadena está medida hasta el **minuto ~50**. Todavía **no existe ningún
 `.deb` ni `.pkg.tar.xz` producido**: no hay artefacto que instalar.
 
 | Pieza | Estado |
@@ -43,7 +43,7 @@ La cadena está medida hasta el **minuto ~49**. Todavía **no existe ningún
 | Runner con prefijo Termux (`termux-builder`) | OK |
 | LLVM 18.1.7 bundled (symver `JL_LLVM_18.1`) | OK (~43 min) |
 | `src/`, flisp y `julia-base` con sus symlinks derivados | OK |
-| Arranque de `julia` y bootstrap de la sysimage | en curso: aborta en `sysimage.mk:129` |
+| Arranque de `julia` y bootstrap de la sysimage | en curso: aborta en `sysimage.mk:129`; la causa (el **directorio** de los alias, no su existencia) está medida en el teléfono y el fix ya se deriva de make — falta medirlo en CI |
 | `sys-o.a` + precompile, `pkgimage.mk`, `make install` | **sin demostrar** |
 | `.deb` / `.pkg.tar.xz` / bundle | **sin producir** |
 | Verificación en dispositivo | **pendiente** |
@@ -101,15 +101,19 @@ gh run view <id> --json jobs -q '.jobs[] | {name, conclusion}'
 Ejemplo real (leído el 2026-10-08):
 
 ```json
-[{"conclusion":"failure","createdAt":"2026-10-08T23:30:44Z","databaseId":37859841658,"status":"completed"},
+[{"conclusion":"failure","createdAt":"2026-10-08T23:55:41Z","databaseId":37862103015,"status":"completed"},
+ {"conclusion":"failure","createdAt":"2026-10-08T23:30:44Z","databaseId":37859841658,"status":"completed"},
  {"conclusion":"failure","createdAt":"2026-10-08T22:12:16Z","databaseId":37851961397,"status":"completed"}]
 ```
 
-En 37859841658 (que estaba en curso al redactar esto y terminó `failure`) `lint`
-salió verde, `build` falló en el paso "Build the package" y `bundle`/`publish`
-quedaron `skipped`; el anterior, 37851961397, confirmó el fix del triplet y murió
-en `sysimage.mk:129` por los sonames versionados. No uses `gh run watch`: devolvió
-0 en runs fallidos (`PROGRESS.md` "Notas").
+Los tres murieron en el mismo mensaje (`could not load library "libgmp.so.10"`)
+por causas distintas y cada uno falsificó la hipótesis del anterior:
+37851961397 pidió los sonames versionados que no existían, 37859841658 los creó
+demasiado tarde (después de `make`, que es donde arranca la sysimage) y
+37862103015 los creó ocho, antes de `make`, pero en `usr/lib/julia` — el
+directorio que el loader no mira. El detalle con marcas de tiempo está en
+`PROGRESS.md`. No uses `gh run watch`: devolvió 0 en runs fallidos
+(`PROGRESS.md` "Notas").
 
 ### 4. Por qué nunca se compila Julia en el teléfono
 
@@ -166,8 +170,12 @@ codegen LLVM y, con `--runtests`, partes de la batería propia de Julia
   fuente de Julia pide nombres glibc-style como literales (`base/gmp.jl:32` →
   `"libgmp.so.10"`) y `dlopen` de Android empareja el nombre de fichero. Lo
   resuelve `packages/julia/soname-aliases.sh`, enlazado **antes** de `make`
-  (`termux_link_soname_aliases`, `packages/julia/build.sh:145-162`, llamado en
-  `build.sh:177` dentro de `termux_step_make`).
+  (`termux_link_soname_aliases`, `packages/julia/build.sh:157-174`, llamado en
+  `build.sh:192` dentro de `termux_step_make`). El **directorio** también se
+  deriva, no se escribe a mano: es el `$(build_shlibdir)` de make (donde vive
+  `libjulia-internal.so`, cuyo `RUNPATH` es solo `$ORIGIN`) en el árbol de build y
+  `$(private_libdir)` en el instalado — `scripts/runtime-library-dir.sh` se lo
+  pregunta a make y `rehearse-recipe.sh` confronta la respuesta con la receta.
 - Salida del teléfono: no hay `libgcc_s`/`libgfortran`/`libstdc++` (Termux usa
   clang + libc++), así que `JULIA_PRECOMPILE := 1` y el precompile paralelo son
   terreno todavía no medido en Android.
@@ -178,7 +186,8 @@ codegen LLVM y, con `--runtests`, partes de la batería propia de Julia
 ```
 packages/julia/          receta + 22 parches + patches/deps/ + soname-aliases.sh
 scripts/                 gates locales (lint-workflows.sh, rehearse-recipe.sh),
-                         derivaciones (symlinked-libraries.sh, embedded-triplet.sh),
+                         derivaciones (symlinked-libraries.sh, embedded-triplet.sh,
+                         runtime-library-dir.sh),
                          make-pacman-pkg.sh, device-smoke.sh, device-diag.sh
 .github/workflows/       build-package.yml (lint → build → bundle → publish)
 .github/actions/         termux-builder/ (materializa el prefijo en el runner)

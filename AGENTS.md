@@ -101,11 +101,15 @@ fallo" de `PROGRESS.md`).
   tarball real.
 - **Un gate nunca mantiene su propia copia de lo que el build hace.** Si necesita
   una lista (sonames que `base/Makefile` pedirá, el triplet que se empotra, los
-  nombres versionados que el fuente dlopen'ea), la **deriva** con `make`/`grep`
-  sobre el árbol parcheado: `scripts/symlinked-libraries.sh`,
-  `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`. Una lista a
+  nombres versionados que el fuente dlopen'ea, **el directorio que el loader
+  busca** para esos nombres), la **deriva** con `make`/`grep` sobre el árbol
+  parcheado: `scripts/symlinked-libraries.sh`,
+  `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`,
+  `scripts/runtime-library-dir.sh`. Una lista a
   mano ya costó un run de 44 min mirando `libopenblas.so` mientras el build moría
-  por `libblas.so` (run 37823556050).
+  por `libblas.so` (run 37823556050), y un directorio escrito a mano otro de 54 min
+  con los 8 alias creados en un sitio que `libjulia-internal.so` no lee (run
+  37862103015).
 - **Un parche arregla la capa que produce el valor, no la que lo consume.** El
   `base-binaryplatforms.jl.patch` viejo reescribía el mensaje de error de
   `contrib/normalize_triplet.py` una capa demasiado abajo; hoy lo canoniza
@@ -140,4 +144,4 @@ están **sin demostrar**. Donde `PROGRESS.md` dice "compila", no escribas
 | el DAG real (lint → build → bundle → publish) | `.github/workflows/build-package.yml` |
 | cómo se materializa el prefijo en el runner | `.github/actions/termux-builder/action.yml` |
 | el gate local completo | `scripts/rehearse-recipe.sh` |
-| derivación de sonames / triplet / alias versionados | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh` |
+| derivación de sonames / triplet / alias versionados / directorio buscado por el loader | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`, `scripts/runtime-library-dir.sh` |
