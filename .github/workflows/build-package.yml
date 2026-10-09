@@ -303,19 +303,25 @@ jobs:
         run: |
           set -uo pipefail
           # This step runs on failure too: the failure is the reason for the
-          # question.  It only reads what the sampler left behind.
+          # question.  It only reads what the sampler left behind, and a report is
+          # not allowed to cost the run - the runner starts the block with -e, so
+          # every read that can legitimately find nothing is answered here.  Run
+          # 37876520515: 'grep -h ^julia pid=' matched nothing because the sampler
+          # never saw a julia process, and that killed the step that was supposed
+          # to say so.
           watch="$RUNNER_TEMP/memwatch.log"
           if [ -s "$watch" ]; then
-            echo "samples: $(grep -c -- '---' "$watch")  (taken 20 s apart)"
-            echo "lowest MemAvailable observed (kB): $(awk '/MemAvailable/ {print $2}' "$watch" | sort -n | head -1)"
+            echo "samples: $(grep -c -- '---' "$watch" || true)  (taken 20 s apart)"
+            echo "lowest MemAvailable observed (kB): $(awk '/MemAvailable/ {print $2}' "$watch" | sort -n | head -1 || true)"
             echo "largest julia observed:"
-            grep -h '^julia pid=' "$watch" | sort -t= -k4 -n -r | head -3
+            grep -h '^julia pid=' "$watch" | sort -t= -k4 -n -r | head -3 ||
+              echo "  the sampler never saw a julia process run"
             echo "tail of the samples:"
             tail -12 "$watch"
           else
             echo "no memory samples were taken (cache hit, or the build step did not run)"
           fi
-          echo "vm.max_map_count = $(cat /proc/sys/vm/max_map_count)"
+          echo "vm.max_map_count = $(cat /proc/sys/vm/max_map_count 2>/dev/null || echo unreadable)"
           echo "ulimit -v        = $(ulimit -v)"
           echo "=== the kernel's account (empty output is itself a result) ==="
           sudo dmesg | tail -80 |
