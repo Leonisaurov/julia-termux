@@ -142,13 +142,25 @@ EOF
 # The helper reports one verdict per demanded name on stdout; only the "alias"
 # ones need a link here, because "native" already answers itself and "built" gets
 # its versioned file from deps/ or from julia's own make.
+#
+# Which directory gets the links is a fact about the loader, not a preference:
+# the dlopen of a bare name happens in src/dlload.c:376, inside
+# libjulia-internal.so, whose RUNPATH is exactly -rpath,'$ORIGIN' (RPATH_LIB,
+# Make.inc:1475+1472) and which src/Makefile:417 links into $(build_shlibdir).
+# So the search set is that one directory, and an alias anywhere else is a file
+# nothing reads: run 37862103015 created all eight aliases in usr/lib/julia and
+# died anyway at sysimage.mk:129 with 'dlopen failed: library "libgmp.so.10" not
+# found'.  scripts/runtime-library-dir.sh asks make for that directory
+# (build_shlibdir) and for the object's post-install home (private_libdir, whose
+# RUNPATH make install rewrites at Makefile:481), and the gate compares both with
+# the call sites below.
 termux_link_soname_aliases() {
 	local _dir="${1:?usage: termux_link_soname_aliases <directory>}"
 	local _verdict _want _target _out
 
-	# The aliases have to exist before make, and usr/lib/julia is created *by*
-	# make, so at this point the directory does not exist yet: run 37859841658
-	# died 4 minutes in with "ln: failed to create symbolic link
+	# The aliases have to exist before make, and the directory is created *by*
+	# make, so at this point it may not exist yet: run 37859841658 died 4 minutes
+	# in with "ln: failed to create symbolic link
 	# 'usr/lib/julia/libcurl.so.4': No such file or directory".
 	mkdir -p "${_dir}"
 	if ! _out=$(bash "${TERMUX_PKG_BUILDER_DIR}/soname-aliases.sh" \
@@ -173,8 +185,11 @@ termux_step_make() {
 	# is inside make: run 37851961397 died at sysimage.mk:129 with
 	#	LoadError("gmp.jl", 32, "could not load library \"libgmp.so.10\"")
 	# 49 minutes in, once the triplet was fixed - a link created after install
-	# cannot help a build that never reaches install.
-	termux_link_soname_aliases usr/lib/julia
+	# cannot help a build that never reaches install.  The run that added the
+	# links (37862103015) failed with the same message, because they went to
+	# usr/lib/julia: the object that asks is in usr/lib, so usr/lib - $(build_shlibdir
+	# by make's own answer) - is the only directory the loader looks in here.
+	termux_link_soname_aliases usr/lib
 
 	# Precompilation spawns one Julia process per task; keep it at the same
 	# width as the make parallelism so the runner's memory is not oversubscribed.
@@ -196,7 +211,11 @@ termux_step_post_make_install() {
 	# names the build tree got before make.  make install does not carry them: it
 	# copies $(JULIA_LIBS) by content, which would duplicate GMP into the package
 	# instead of pointing at it - so the derivation is re-run here, against the
-	# same source, and one list cannot disagree with the other.
+	# same source, and one list cannot disagree with the other.  The directory is
+	# deliberately not the one the build tree used: libjulia-internal moves from
+	# $(build_libdir) to $(private_libdir) on install and Makefile:481 gives it
+	# RUNPATH '$$ORIGIN:$$ORIGIN/../', so this is where the object that answers the
+	# dlopen lives from now on.
 	termux_link_soname_aliases "${TERMUX_PREFIX}/lib/julia"
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
