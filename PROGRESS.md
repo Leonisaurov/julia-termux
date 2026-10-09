@@ -303,15 +303,29 @@ pida `dlopen` del linker del runner.
   `Unable to autodetect symbol suffix of ""` y
   `No loaded BLAS libraries were built with LP64 support.`  No es el entorno de
   este shell: con `LD_LIBRARY_PATH=$PREFIX/lib` exportado el resultado es el mismo
-  (`rc=1`), y en Termux el `LD_PRELOAD` de `libtermux-exec` está activo.  Dos
-  consecuencias para el port, ninguna de ellas una causa nuestra: (a) **Fase 5 no
-  puede usar "el paquete de referencia funciona" como baseline** —`device-smoke.sh`
-  tiene que afirmarse contra `hello`/`LinearAlgebra` suyos, no contra una
-  comparación que hoy no existe en este dispositivo—; (b) la ruta
-  `libblastrampoline` → BLAS es un riesgo de runtime **medido**, no hipotético, y
-  cae justo en el tramo de precompile que este run todavía no alcanza.  Abrir causa
-  raíz aparte (es el paquete de Termux, no nuestra receta) antes de fiarse de cualquier
-  medición que necesite un `julia` que evalúe.
+  (`rc=1`), y en Termux el `LD_PRELOAD` de `libtermux-exec` está activo.  El
+  mecanismo está identificado y **es el que nuestros parches ya cubren**:
+  `libblastrampoline_jll.__init__` llama a `dlpath(handle)`, que va a
+  `jl_pathname_for_handle` (`src/sys.c:655`); en la rama Linux esa función hace
+  `dlinfo(handle, RTLD_DI_LINKMAP, &map)`, que en Bionic no resuelve, y devuelve
+  `NULL` → `unsafe_string(NULL)` → exactamente el `cannot convert NULL to string`
+  observado.  Upstream solo define `_OS_LINUX_` en Android
+  (`src/support/platform.h:89`, medido sobre el tarball pineado: ni `__ANDROID__`
+  en `sys.c` ni rama propia en `dlload.c`), y por eso la receta lleva
+  `src-support-platform.h.patch` (define `_OS_ANDROID_`), `src-sys.c.patch` (esa
+  rama pasa a `dl_iterate_phdr`, el mismo truco que `termux-libwhich-dlinfo-android.patch`)
+  y `stdlib-libblastrampoline_jll.jl.patch` + `stdlib-OpenBLAS_jll.jl.patch` (la
+  ruta se calcula desde `Sys.BINDIR` en `__init__`, no se pregunta al loader).  Lo
+  que no cuadra del paquete de Termux es que sus `.jl` en disco **ya** traen ese
+  fix (`libblastrampoline_jll.jl:35` dice "dlpath … returns NULL on Android/Bionic
+  — skip it") mientras el `sys.so` instalado corre el código anterior: los avisos
+  citan `:37` y `:53`, y en los ficheros de ahora ninguna de esas dos líneas es un
+  `@warn` (el de `OpenBLAS_jll` está en `:46`; el de LBT ni siquiera usa `@warn`,
+  imprime `LBT ACTUAL ERROR` en `:42`).  Consecuencias para el port: (a) **Fase 5 no puede usar "el paquete de referencia funciona" como baseline** —`device-smoke.sh` se afirma contra sus
+  propios `assert`s, no contra una comparación que hoy no existe en este
+  dispositivo—; (b) nada de esto es evidencia sobre nuestra receta: el `sys.so`
+  roto es el de `julia 1.12.6-1`, y si el artefacto nuestro muestra los mismos
+  avisos, entonces sí, el patch de `sys.c` no estuvo activo en ese build.
 
 - **El runtime GNU no existe en el prefijo; `CompilerSupportLibraries_jll` es el
   candidato nombrado para `sys-o.a`.** Medido en el teléfono (2026-10-08 ~18:00
