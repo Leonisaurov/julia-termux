@@ -463,10 +463,52 @@ fi
 # Two independent sources describe this build - make's call sites and the .jl
 # literals - so the gate crosses them: a versioned name nothing answers is only
 # harmless while make does not require that library either.
+#
+# Which files answer a name has to be asked of the sysroot *the build sees*, and
+# on the phone that is not `$PREFIX/lib`: the device already holds the published
+# package this recipe rebuilds, and the libraries that package installed are
+# precisely the names the sysimage asks for.  Run 37886407453 is the measurement:
+# `libopenlibm.so.4` read `native` here and `left absent` on the runner, because
+# /data/data/com.termux/files/usr/lib/libopenlibm.so.4 belongs to `julia 1.12.6-1`
+# (`pacman -Qo`) while this recipe sets `USE_SYSTEM_LIBM := 1` and installs no
+# openlibm at all.  So the verdicts are read against a copy of the prefix with the
+# built package's own files removed - what a runner building that package has.
+# Where no package manager can say what the package owns, nothing is removed and
+# the log says so, because a silent filter would be a verdict nobody can trace.
 echo
 echo "===== dlopen'ed versioned sonames ====="
 soname_fail=0
-if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" 2>"$WORK/sonames.txt"); then
+sysroot="$PREFIX/lib"
+if command -v pacman >/dev/null 2>&1; then
+	owner_query="pacman -Ql $PKG"
+elif command -v dpkg >/dev/null 2>&1; then
+	owner_query="dpkg -L $PKG"
+else
+	owner_query=""
+fi
+if [ -z "$owner_query" ]; then
+	printf '  note          no package manager here, so the verdicts describe this device'"'"'s prefix, not the runner'"'"'s\n'
+elif ! $owner_query 2>/dev/null > "$WORK/package-files.txt"; then
+	printf '  sysroot       %s (%s is not installed here, so $PREFIX/lib already is a runner-like sysroot)\n' \
+		"$sysroot" "$PKG"
+else
+	cp -as "$PREFIX/lib" "$WORK/sysroot"
+	awk -v p="$PREFIX/lib/" '{ f = $NF }
+		f ~ "^"p && substr(f, length(p) + 1) !~ "/" { print f }' "$WORK/package-files.txt" |
+		while read -r f; do
+			link="$WORK/sysroot/${f##*/}"
+			[ -e "$link" ] || [ -L "$link" ] || continue
+			rm -f "$link"
+			echo removed
+		done | grep -c . > "$WORK/removed.txt"
+	removed=$(cat "$WORK/removed.txt")
+	if [ "$removed" -gt 0 ]; then
+		sysroot="$WORK/sysroot"
+		printf '  sysroot       %s ($PREFIX/lib as symlinks, %s file(s) removed because package %s owns them)\n' \
+			"$sysroot" "$removed" "$PKG"
+	fi
+fi
+if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" "$sysroot" 2>"$WORK/sonames.txt"); then
 	sed 's/^/  /' "$WORK/sonames.txt"
 	aliased=$(printf '%s\n' "$verdicts" | awk '$1 == "alias" { print $2 }')
 	printf '  %s name(s) need an alias before make runs\n' "$(printf '%s\n' "$aliased" | grep -c .)"
