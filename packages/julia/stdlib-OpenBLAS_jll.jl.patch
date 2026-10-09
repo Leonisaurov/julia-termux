@@ -28,7 +28,7 @@
 +    for candidate in candidates
 +        # A miss here is just the next candidate, and `dlopen` throws by default.
 +        handle = dlopen(candidate; throw_error=false)
-+        handle === C_NULL && continue
++        handle === nothing && continue
 +        isfile(candidate) && return (handle, normpath(candidate))
 +        path = try
 +            dlpath(handle)

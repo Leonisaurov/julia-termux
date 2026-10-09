@@ -27,7 +27,7 @@
 +                  libblastrampoline)
 +    for candidate in candidates
 +        handle = dlopen(candidate; throw_error=false)
-+        handle === C_NULL && continue
++        handle === nothing && continue
 +        isfile(candidate) && return (handle, normpath(candidate))
 +        path = try
 +            dlpath(handle)

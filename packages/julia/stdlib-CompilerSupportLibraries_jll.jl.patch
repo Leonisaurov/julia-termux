@@ -1,0 +1,94 @@
+# Termux/Bionic port: stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl
+#
+# Upstream's dummy stub assumes the C compiler that built Julia shipped a GCC
+# runtime: it dereferences the host platform's libgfortran version and then
+# dlopens libgcc_s/libgfortran/libstdc++/libgomp by their glibc-era file names.
+# Termux builds Julia with clang against Android's libc++ and none of those names
+# exists in the prefix, so the stub aborted the stdlib precompile with
+#	FieldError: type Nothing has no field `major`
+# at pkgimage.mk:28 (run 37876520515).
+--- a/stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl
++++ b/stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl
+@@ -43,32 +43,72 @@
+     const libstdcxx = "@rpath/libstdc++.6.dylib"
+     const libgomp = "@rpath/libgomp.1.dylib"
+     const libssp = "@rpath/libssp.0.dylib"
+ else
+     const libgcc_s = "libgcc_s.so.1"
+-    const libgfortran = string("libgfortran.so.", libgfortran_version(HostPlatform()).major)
++    # `libgfortran_version()` is documented to answer nothing when the platform
++    # imposes no bound (base/binaryplatforms.jl:454) and clang-built Julia is
++    # exactly that platform, so `.major` on it was never safe.  An unavailable
++    # library is spelled "" here, which is how the real JLL wrappers say the
++    # same thing; the Windows and macOS branches keep their own names.
++    const libgfortran = let v = libgfortran_version(HostPlatform())
++        v === nothing ? "" : string("libgfortran.so.", v.major)
++    end
+     const libstdcxx = "libstdc++.so.6"
+     const libgomp = "libgomp.so.1"
+     if libc(HostPlatform()) != "musl"
+         const libssp = "libssp.so.0"
+     end
+ end
+ 
++# Each global is declared Ptr{Cvoid}, and dlopen() with throw_error = false
++# answers `nothing` - not C_NULL - when it fails (base/libdl.jl:119-125), so the
++# sentinel is converted once here instead of at every use.  A name that is "" is
++# not attempted at all.
++function load_runtime_library(name)
++    isempty(name) && return (C_NULL, "")
++    handle = dlopen(name; throw_error = false)
++    handle === nothing && return (C_NULL, "")
++    path = try
++        dlpath(handle)
++    catch err
++        Base.@warn "CompilerSupportLibraries_jll: dlpath() of $(name) failed" exception=(err, catch_backtrace())
++        ""
++    end
++    isempty(path) && return (C_NULL, "")
++    return (handle, path)
++end
++
+ function __init__()
+-    global libgcc_s_handle = dlopen(libgcc_s)
+-    global libgcc_s_path = dlpath(libgcc_s_handle)
+-    global libgfortran_handle = dlopen(libgfortran)
+-    global libgfortran_path = dlpath(libgfortran_handle)
+-    global libstdcxx_handle = dlopen(libstdcxx)
+-    global libstdcxx_path = dlpath(libstdcxx_handle)
+-    global libgomp_handle = dlopen(libgomp)
+-    global libgomp_path = dlpath(libgomp_handle)
++    loaded = load_runtime_library(libgcc_s)
++    global libgcc_s_handle = loaded[1]
++    global libgcc_s_path = loaded[2]
++    loaded = load_runtime_library(libgfortran)
++    global libgfortran_handle = loaded[1]
++    global libgfortran_path = loaded[2]
++    loaded = load_runtime_library(libstdcxx)
++    global libstdcxx_handle = loaded[1]
++    global libstdcxx_path = loaded[2]
++    loaded = load_runtime_library(libgomp)
++    global libgomp_handle = loaded[1]
++    global libgomp_path = loaded[2]
+     @static if libc(HostPlatform()) != "musl"
+         dlopen(libssp; throw_error = false)
+     end
+     global artifact_dir = dirname(Sys.BINDIR)
+-    LIBPATH[] = dirname(libgcc_s_path)
++    for path in (libgcc_s_path, libgfortran_path, libstdcxx_path, libgomp_path)
++        if !isempty(path)
++            LIBPATH[] = dirname(path)
++            break
++        end
++    end
++    if isempty(LIBPATH[])
++        # Nothing of the GCC runtime resolved, which is bionic's case.  LIBPATH
++        # answers "where are the runtime libraries?", and the directory holding
++        # this Julia's own libraries is that answer here too.
++        LIBPATH[] = joinpath(dirname(Sys.BINDIR), "lib")
++    end
+     push!(LIBPATH_list, LIBPATH[])
+ end
+ 
+ # JLLWrappers API compatibility shims.  Note that not all of these will really make sense.
+ # For instance, `find_artifact_dir()` won't actually be the artifact directory, because

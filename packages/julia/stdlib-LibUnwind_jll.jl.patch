@@ -1,0 +1,30 @@
+# Termux/Bionic port: stdlib/LibUnwind_jll/src/LibUnwind_jll.jl
+#
+# The stub loads libunwind unconditionally on linux, which is the platform Julia
+# reports on Termux.  This build sets DISABLE_LIBUNWIND := 1 (build.sh:126, aarch64
+# uses Julia's own assembly task switching), so deps/ installs no libunwind at all:
+# make -C deps answers
+#   DEPLIBS=JuliaSyntax blastrampoline libuv dsfmt llvm utf8proc terminfo libwhich
+# and unwind is not in it.  Nothing else in Julia needs it - no stdlib depends on
+# LibUnwind_jll (measured: only its own Project.toml mentions the name).
+--- a/stdlib/LibUnwind_jll/src/LibUnwind_jll.jl
++++ b/stdlib/LibUnwind_jll/src/LibUnwind_jll.jl
+@@ -22,7 +22,17 @@
+ function __init__()
+     # We only do something on Linux/FreeBSD
+     @static if Sys.islinux() || Sys.isfreebsd()
+-        global libunwind_handle = dlopen(libunwind)
++        # Termux builds Julia with `DISABLE_LIBUNWIND := 1`, because aarch64 uses
++        # Julia's own assembly task switching, so deps/ installs no libunwind and
++        # the file the loader is asked for does not exist here.  Upstream treats
++        # the load as certain; on this platform that raised
++        #   could not load library "libunwind.so.8"
++        # during the stdlib precompile that pkgimage.mk:28 runs inside make.
++        handle = dlopen(libunwind; throw_error = false)
++        if handle === nothing
++            return
++        end
++        global libunwind_handle = handle
+         global libunwind_path = dlpath(libunwind_handle)
+         global artifact_dir = dirname(Sys.BINDIR)
+         LIBPATH[] = dirname(libunwind_path)
