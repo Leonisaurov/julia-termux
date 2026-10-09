@@ -15,10 +15,15 @@ Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
 **Estado** (2026-10-08): la arquitectura de build está validada de punta a punta
-hasta el minuto 49; el compilador llega a `src/`, enlaza `julia-base` con los 19
+hasta el minuto ~50; el compilador llega a `src/`, enlaza `julia-base` con los 19
 symlinks, arranca `julia` y muere en el bootstrap de la imagen por los nombres
-versionados que el fuente pide al loader.  Quedan por demostrarse `sys-o.a` +
-precompile, empaquetado y la verificación en dispositivo.
+versionados que el fuente pide al loader.  Esa causa quedó cerrada con dos runs: el
+primero falsificó la hipótesis de *presencia* (37862103015 creó los 8 alias y el
+loader siguió respondiendo `not found`) y la causa real es de **directorio** —el
+`dlopen` sale de `libjulia-internal.so`, cuyo RUNPATH es solo `$ORIGIN`, y ese
+`$ORIGIN` (`usr/lib`) no era donde los poníamos—, reproducida y discriminada en el
+teléfono antes del siguiente run.  Quedan por demostrarse `sys-o.a` + precompile,
+empaquetado y la verificación en dispositivo.
 
 | Pieza | Estado |
 |---|---|
@@ -27,7 +32,7 @@ precompile, empaquetado y la verificación en dispositivo.
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
 | `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
-| Sysimage (`sysimg`/`base/`) | aborta en `sysimage.mk:129` (`sysbase-o.a`): el triplet quedó cerrado y **confirmado en CI** (37851961397); la causa nueva —sonames versionados— tiene fix y gate, sin medir todavía en CI |
+| Sysimage (`sysimg`/`base/`) | aborta en `sysimage.mk:129` (`sysbase-o.a`): el triplet quedó cerrado y **confirmado en CI** (37851961397); de los sonames versionados se falsificó la hipótesis de presencia (37862103015) y la causa real —el directorio del alias frente al `RUNPATH=$ORIGIN` de `libjulia-internal`— está medida en el teléfono, con el fix y su gate pendientes de CI |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -103,6 +108,12 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   `termux_link_soname_aliases` en la receta (antes de `make` y tras `install`) y la
   sección `dlopen'ed versioned sonames` del gate, que cruza los `absent` con la
   lista REQUIRED de `symlinked-libraries.sh`.
+- `scripts/runtime-library-dir.sh` — le pide a `make` el **directorio** donde el
+  loader va a buscar esos alias: `$(build_shlibdir)` (donde `src/Makefile` enlaza
+  `libjulia-internal.so`, el objeto que emite el `dlopen`) y `$(private_libdir)`
+  (donde `make install` lo mueve), y aborta si `$(RPATH_LIB)` deja de mencionar
+  `$ORIGIN`, porque esa es la premisa de todo el razonamiento.  El gate confronta
+  la respuesta con los destinos de cada `termux_link_soname_aliases` de la receta.
 - `.github/scripts/termux-closure-resolver.py` — cierre de dependencias del
   índice de Termux (roots = bootstrap recortado + Tier 1 de
   `scripts/setup-termux.sh` + `termux-elf-cleaner` + `TERMUX_PKG_*DEPENDS` de la
@@ -113,19 +124,38 @@ bootstrap pasa de `binaryplatforms.jl`: **confirmada**.  `Unmatchable` aparece 0
 veces en el log, `julia` arranca y `sysimage.mk` llega a invocar el bootstrap que
 produce `sysbase-o.a`.
 
-**Hipótesis del próximo run** — el bootstrap pasa de `gmp.jl` y `sysimage.mk:129`
-produce `sysbase-o.a`.  La cadena está medida en sus dos extremos: `base/gmp.jl:32`
-pide `"libgmp.so.10"` y `base/mpfr.jl:40` `"libmpfr.so.6"` como literales (son los
-únicos versionados de `base/*.jl`), ningún SONAME del prefijo lleva versión
-(`readelf -d`) y el `dlopen` de Android empareja nombres de fichero, así que el
-loader respondió `library "libgmp.so.10" not found` a pesar de que
-`$PREFIX/lib/libgmp.so` estaba instalado.  Los 8 alias que la derivación detecta se
-crean ahora en `usr/lib/julia` **antes** de `make`; que ese directorio esté en la
-búsqueda es medible en el paquete instalado: `readelf -d libjulia-internal.so` da
-`RUNPATH [$ORIGIN:$ORIGIN/..]` y `base/Makefile` ya enlaza ahí sus 19 nombres.  Lo
-que este run todavía no mide: `sys-o.a` (`sysimage.mk:109-125` ejecutando
-`contrib/generate_precompile.jl` con `--cpu-target=native` y precompile paralelo),
-`pkgimage.mk` y `make install`.
+**Hipótesis del run cerrado (37862103015, 2026-10-08 23:55 → 2026-10-09 00:49 UTC,
+~54 min)** — «los 8 alias existen antes de `make`, así que el bootstrap pasa de
+`gmp.jl`: **FALSIFICADA**.  El run creó los ocho (`build.log:350`, 23:59:48) y no
+tiene ni un `ln: failed` en 12 128 líneas; a las 00:49:48 murió en el mismo sitio
+con el mismo texto: `LoadError("gmp.jl", 0, ErrorException("could not load library
+\"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))` →
+`sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`.  Falló la premisa espacial, no
+la temporal: el objeto que emite el `dlopen` de un nombre sin barra es
+`src/dlload.c:376`, que vive dentro de `libjulia-internal.so`, y en el árbol de build
+esa librería se enlaza en `$(build_shlibdir)` = `usr/lib` con `RPATH_LIB` =
+`-rpath,'$ORIGIN'` (`Make.inc:1475,1472`; `src/Makefile:417`) — su conjunto de
+búsqueda es **su propio directorio**, y `usr/lib/julia` no está en él.  El `RUNPATH`
+del ejecutable (`$ORIGIN/../lib`, `$ORIGIN/../lib/julia`) no cubre ese `dlopen` porque
+`--enable-new-dtags` hace RUNPATH, no RPATH, y quien busca es la librería.  Medido en
+el teléfono dos veces: (a) con el paquete ya instalado, `readelf -d
+$PREFIX/lib/julia/libjulia-internal.so` → `RUNPATH [$ORIGIN:$ORIGIN/..]`, por eso el
+alias instalado en `lib/julia` **sí** es correcto (`make install` mueve el objeto a
+`$(private_libdir)` y `Makefile:481` le fija ese RUNPATH); (b) reproduciendo el layout
+del árbol de build (`$PREFIX/tmp/ororigin-probe`: librería en `usr/lib` con
+`RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`), alias en `usr/lib/julia` → el
+mensaje exacto de CI, alias en `usr/lib` → resuelto.
+
+**Hipótesis del próximo run** — con los alias en el directorio que el loader busca, el
+bootstrap pasa de `gmp.jl` y `sysimage.mk:129` produce `sysbase-o.a`.  La receta enlaza
+ahora en `usr/lib` antes de `make` (`build.sh:192`) y sigue enlazando en
+`$PREFIX/lib/julia` tras install (`build.sh:219`); el directorio ya no es un literal,
+lo deriva `scripts/runtime-library-dir.sh` preguntándole a `make` y el gate confronta
+esa respuesta con los destinos de la receta (rojo→verde: `FAIL nothing links the
+aliases into usr/lib (the build tree)` → `OK the aliases for the build tree go to
+usr/lib, the directory make names`).  Lo que este run todavía no mide: `sys-o.a`
+(`sysimage.mk:109-125` ejecutando `contrib/generate_precompile.jl` con
+`--cpu-target=native` y precompile paralelo), `pkgimage.mk` y `make install`.
 
 Riesgo residual declarado: después de `sysimage.mk:129` vienen `julia-sysimg-*`,
 el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que todavía no corrió en
@@ -161,6 +191,8 @@ convirtió en gate local cuando era reproducible fuera del runner.
 | 37851961397 | 22:12→23:05 | **hipótesis del triplet confirmada en el build real**: `Unmatchable` aparece 0 veces en el log y `julia-base` termina; ~49 min después el run aborta otra vez en `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, ahora con `LoadError("sysimg.jl", 0, LoadError("Base.jl", 0, LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))))` (líneas 15842-15847 del log, 23:05:03Z) | causa distinta, una capa más abajo: `base/gmp.jl:32` y `base/mpfr.jl:40` piden al loader nombres versionados estilo glibc como **literales** (upstream no lo nota porque compila su propio GMP, cuyo SONAME sí lleva la versión) y `dlopen` de Android empareja el **nombre de fichero**, así que `$PREFIX/lib/libgmp.so` no responde `libgmp.so.10` — medido con `readelf -d` sobre el prefijo: ningún SONAME de Termux lleva versión. El alias de `base/Makefile` (`symlink_system_library`, línea 162) no puede ayudar: crea el nombre **sin** versión en `usr/lib/julia` y `libwhich -p libgmp.so.10` no resuelve. Y la receta creaba los symlinks en `termux_step_post_make_install`, **después** de `make`: por eso `pacman -Qo` atribuye `libgmp.so.10`/`libmpfr.so.6` al paquete julia instalado mientras el build nunca los vio | `packages/julia/soname-aliases.sh` lee los nombres pedidos del fuente (`base/*.jl`, `stdlib/*/src/*.jl`) y veredicta cada uno `native`/`alias`/`built`/`absent` contra el prefijo; `termux_link_soname_aliases` en la receta los enlaza en `usr/lib/julia` **antes** de `make` y de nuevo en `$PREFIX/lib/julia` tras install, borrando la lista a mano de tres pares. Sección `dlopen'ed versioned sonames` en `rehearse-recipe.sh`: cruza los `absent` con la lista REQUIRED de `symlinked-libraries.sh` (un nombre letal para `julia-base` y sin respuesta = FAIL) y exige que `termux_step_make` invoque la derivación antes de su `make`. Rojo→verde: gate16 `sonames=1` (`FAIL build.sh never creates the aliases the source demands`, rc=5) → gate17 `sonames=0`, 8 alias (`libcurl.so.4`, `libgit2.so.1.9`, `libgmp.so.10`, `libgmpxx.so.4`, `libmpfr.so.6`, `libnghttp2.so.14`, `libpcre2-8.so.0`, `libssh2.so.1`), 21 `native`, `libblastrampoline.so.5` `built` y 8 `absent` inocuos |
 
 | 37859841658 | 23:30→23:35 | `GATE: PASS` en el runner (`sonames=0`) y **la hipótesis de `libgmp.so.10` no llegó a medirse**: el job build murió a los 4 min 21 s, antes de entrar a `make`, con `ln: failed to create symbolic link 'usr/lib/julia/libcurl.so.4': No such file or directory` (línea 1478 del log, 23:35:01Z) y `build rc=1`.  La tabla de veredictos sí se imprimió completa en el runner: los mismos 8 `aliased` que en el teléfono | el fix estaba roto, no la hipótesis: `termux_link_soname_aliases` enlazaba en `usr/lib/julia` **antes** de `make`, y ese directorio lo crea `make`; con `set -e` del harness el primer `ln` abortó el build.  El gate verde no lo veía porque su chequeo nuevo era estático (¿`termux_step_make` llega a la derivación antes de su `make`?) y no preguntaba si el destino existe.  Detalle honesto adicional: en el prefijo del runner `libopenlibm.so.4` sale `left absent` (en el teléfono es `native` porque el julia instalado lo dejó ahí) y no es un fallo — `USE_SYSTEM_OPENLIBM` no está en 1, así que `make` no pide ese nombre; el veredicto del helper describe el prefijo, no el árbol de build | `mkdir -p "${_dir}"` en la función, demostrado en el teléfono: la misma invocación contra un directorio inexistente ahora devuelve `rc=0` con 8 enlaces.  Gate: el chequeo de wiring pasó a exigir también que **quien enlaza antes de `make` cree el directorio de destino** (`FAIL  %s links into a directory it never creates`); discrimina — con la receta corregida `OK`, con la misma receta sin la línea de `mkdir` `FAIL` |
+
+| 37862103015 | 23:55→00:49 (~54 min) | **hipótesis de los sonames FALSIFICADA**: la tabla del helper se imprimió completa con los 8 `aliased` (línea 350, 23:59:48.5715505Z) y no hay ni un `ln: failed` entre las 12 128 líneas del log, así que los enlaces existieron durante todo el build; y aun así el bootstrap aborta idéntico — `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))` (línea 12121, 00:49:48.7302374Z) → `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, `build rc=2`. Marcadores: `could not load library`=1, `sysbase-o.a`=2, `sys-o.a`=0, `generate_precompile`=0, `Killed`=0 | el fichero no faltaba: **estaba donde el loader no mira**. El `dlopen` de un nombre sin barra lo emite `src/dlload.c:376`, dentro de `libjulia-internal.so`, y esa librería se enlaza en `$(build_shlibdir)` = `usr/lib` (`src/Makefile:417`; `Make.inc:729,328,320`) con `RPATH_LIB := RPATH_ORIGIN = -Wl,-rpath,'$ORIGIN'` (`Make.inc:1475,1472`): su conjunto de búsqueda es **su propio directorio** y nada más. `usr/lib/julia` —donde `julia-base` deja sus symlinks sin versión y donde la receta puso los alias— no figura en ese RUNPATH, y en todo el log no aparece un solo `LD_LIBRARY_PATH`, así que tampoco entró por la variable de entorno. Nota de capa: `base/gmp.jl:35` no usa `Libdl.dlopen`, usa `cglobal` a nivel top-level, que es exactamente la ruta de `jl_load_library` | Reproducido y discriminado en el teléfono con el mismo layout (`$PREFIX/tmp/ororigin-probe`: una librería en `usr/lib` con `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`): alias en `usr/lib/julia` → `dlopen failed: library "libgmp.so.10" not found`, el mismo mensaje que CI; el mismo alias en `usr/lib` → resuelto. Fix: el call site del árbol de build pasa a `usr/lib`. El instalado se queda en `$PREFIX/lib/julia` porque `make install` **mueve** `libjulia-internal` ahí y le reescribe el RUNPATH a `$ORIGIN:$ORIGIN/../` (`Makefile:468-481`) — el mismo dato confirma que la aserción `lib/julia/libblastrampoline.so.5` es correcta, porque `Makefile:223` la clasifica de librería privada con `USE_SYSTEM_LIBBLASTRAMPOLINE := 0`. Para que un directorio escrito a mano no vuelva a costar un run: `scripts/runtime-library-dir.sh` le pregunta a make `$(build_shlibdir)`, `$(private_libdir)`, `$(RPATH_LIB)` y `$(reverse_private_libdir_rel)` (rechaza el resultado si `RPATH_LIB` ya no menciona `$ORIGIN`) y la sección `dlopen'ed versioned sonames` del gate exige que los destinos de `termux_link_soname_aliases` sean exactamente esa respuesta |
 
 Ruido benigno conocido del runner: `linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
@@ -270,7 +302,11 @@ parsea, `julia` arranca y el bootstrap de `sysbase-o.a` muere en el nombre
 versionado `libgmp.so.10`, que la receta resolvía después de `make`) → `4.4 min`
 **de regresión** (37859841658: el fix de sonames enlazaba en un `usr/lib/julia`
 que todavía no existe; `make` no llegó a arrancar, así que la hipótesis sigue sin
-medir).
+medir) → `~50 min` (37862103015: el `mkdir -p` devolvió la cadena a su punto más
+lejo, los 8 alias se crearon y aun así `sysbase-o.a` muere con el mismo
+`not found`; la hipótesis de presencia queda **falsificada** y la causa real es de
+directorio —`usr/lib`, el `$ORIGIN` de `libjulia-internal.so` —, medida en el
+teléfono).
 
 ---
 
