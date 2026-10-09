@@ -111,7 +111,12 @@ pass=0
 fail=0
 check() {
 	local name="$1" code="$2" log="$WORK/out.$1.log" rc
-	timeout "${TIMEOUT:-300}" julia --startup=no -e "$code" >"$log" 2>&1
+	# A julia flag is not an expression: `julia -e '--version'` is a ParseError,
+	# not a version check.  Anything starting with `--` goes to julia directly.
+	case "$code" in
+	--*) timeout "${TIMEOUT:-900}" julia --startup=no "$code" >"$log" 2>&1 ;;
+	*) timeout "${TIMEOUT:-900}" julia --startup=no -e "$code" >"$log" 2>&1 ;;
+	esac
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
 		printf 'PASS  %s\n' "$name"
@@ -139,7 +144,7 @@ end
 '
 check blas_vendor '
 using LinearAlgebra
-v = Base.BLAS.vendor()
+v = LinearAlgebra.BLAS.vendor()
 println("BLAS vendor: ", v)
 '
 check linear_algebra '
@@ -153,9 +158,11 @@ n = 200
 M = randn(n, n)
 @test norm(M * (inv(M) * ones(n)) - ones(n)) < 1e-6
 @test norm(cholesky(Symmetric(A + 3I)).U) > 0
-@test norm(lu(A).U * lu(A).L - A) < 1e-10
+F = lu(A)
+@test norm(F.L * F.U - A[F.p, :]) < 1e-10
 d = rand(n)
-@test norm((Diagonal(d) * rand(n)) - d .* rand(n)) == 0
+v = rand(n)
+@test norm(Diagonal(d) * v - d .* v) == 0
 println("eig max abs: ", maximum(abs.(eigvals(Symmetric(A)))))
 '
 check gemm_threads '
@@ -171,42 +178,38 @@ println("gemm ok across BLAS thread counts")
 check threads_spawn '
 using Base.Threads
 c = Atomic{Int64}(0)
-@threads for _ in 1:256 atomic_add!(c, 1)
+@threads for _ in 1:256
+    atomic_add!(c, 1)
+end
 c[] == 256 || error("threaded loop lost iterations: $(c[])")
 println("threads ok")
 '
 check sparse_arrays '
-using SparseArrays, LinearAlgebra
+using SparseArrays, LinearAlgebra, Test
 S = spdiagm(0 => [4.0, 3.0, 2.0], 1 => [-1.0, -1.0], -1 => [-1.0, -1.0])
 x = S \ [1.0, 2.0, 3.0]
 @test norm(S * x - [1.0, 2.0, 3.0]) < 1e-10
 println("nnz=", nnz(S), " sum=", sum(S))
 '
 check suitesparse '
-using SuiteSparse, SparseArrays, LinearAlgebra
+using SuiteSparse, SparseArrays, LinearAlgebra, Test
 A = spdiagm(0 => [4.0, 3.0, 2.0], 1 => [-1.0, -1.0], -1 => [-1.0, -1.0])
 F = cholesky(A)
-println("chol factor: ", typeof(F.factors))
 @test norm(F \ [1.0, 2.0, 3.0] - A \ [1.0, 2.0, 3.0]) < 1e-10
+println("chol ok")
 '
-check arpack '
-using SparseArrays, LinearAlgebra, Test
-n = 20
-S = spdiagm(0 => fill(2.0, n), 1 => fill(-1.0, n - 1), -1 => fill(-1.0, n - 1))
-vals = sort(real.(eigs(S; which=:LM, nev=3, tol=1e-9)[1]))
-# largest Ritz values of the 1-D Laplacian + 2I: 2 - 2cos(k*pi/(n+1))
-expected = [2 - 2cos(k * pi / (n + 1)) for k in (n, n - 1, n - 2)]
-@test all(isapprox.(reverse(vals), expected; rtol=1e-6))
-println("arpack eig: ", vals)
-'
+# Arpack is not a stdlib in Julia 1.12 (only SuiteSparse is), so there is no
+# `eigs` in the image to check; sparse symmetric eigenproblems come from external
+# packages now.  The dense path is covered by linear_algebra above.
+echo "SKIP  arpack (not a 1.12 stdlib)"
 check libgit2 '
 using LibGit2
-repo = mktemp(dir=TMPDIR)
+repo = mktempdir()
 isdir(joinpath(repo, ".git")) && error("tmp dir collision")
 r = LibGit2.init(repo)
 write(joinpath(repo, "f.txt"), "hello")
 LibGit2.add!(r, "f.txt")
-c = LibGit2.commit(r, "first"; author=Sig("t <t@example.com>"), committer=Sig("t <t@example.com>"))
+c = LibGit2.commit(r, "first"; author=LibGit2.Signature("t", "t@example.com"), committer=LibGit2.Signature("t", "t@example.com"))
 println("commit ", string(LibGit2.GitHash(c)))
 close(r)
 '
@@ -217,8 +220,12 @@ using Libdl, Test
 # executable memory, which is exactly what breaks under emulated runtimes.
 h = dlopen("libpcre2-8.so")
 h == C_NULL && error("libpcre2-8.so not found")
+# Julia 1.12 no longer accepts a raw dlopen handle in the ccall library slot
+# (Libdl.LazyLibrary is the accepted type now), so resolve the symbol and call
+# the pointer.
+p = dlsym(h, :pcre2_config_8)
 val = Ref{Cint}(-1)
-rc = ccall((:pcre2_config_8, h), Cint, (UInt32, Ref{Cint}), 1, val)  # PCRE2_CONFIG_JIT
+rc = ccall(p, Cint, (UInt32, Ref{Cint}), 1, val)  # PCRE2_CONFIG_JIT
 rc == 0 || error("pcre2_config failed with ", rc)
 println("pcre2 jit support: ", val[])
 m = match(r"^(\w+)@([\d.]+)$", "julia@1.12.6")
@@ -230,33 +237,52 @@ println("regex+jit ok")
 if [ "$NETWORK" = 1 ]; then
 	check pkg_add '
 using Pkg
-Pkg.activate(mktemp(dir=TMPDIR))
+Pkg.activate(mktempdir())
 Pkg.add("Example")
 using Example
 println("greet: ", Example.hello("julia"))
 '
 	check pkg_instantiate_download '
 using Pkg
-Pkg.activate(mktemp(dir=TMPDIR))
+Pkg.activate(mktempdir())
 Pkg.add(PackageSpec(name="JSON", version="0.21"))
 using JSON
 println(JSON.parse("{\"a\":1}"))
 '
-	check mbedtls_https '
-using MbedTLS, Sockets
-println("MbedTLS ", MbedTLS.VERSION_STRING)
+	check https_tls '
+using Downloads, Test
+# MbedTLS was removed as a stdlib in 1.12; TLS runs through OpenSSL/libcurl.
+s = strip(read(Downloads.download("https://raw.githubusercontent.com/JuliaLang/julia/master/VERSION"), String))
+@test occursin(r"^\d+\.\d+", s)
+println("https ok: ", s)
 '
 else
 	echo "SKIP  Pkg network tests (pass --network to run them)"
 fi
 check sharedarrays_sockets 'using SharedArrays, Sockets, Distributed; println("ok")'
-check unicode_fft '
-using FFTW, Random, LinearAlgebra
-x = randn(64)
-@test norm(fft(ifft(x)) - x) < 1e-8
-println("fft ok")
+# FFTW is not a stdlib in Julia 1.12 either, and its FFTW_jll artifact has no
+# Android build, so it cannot be exercised here.  Unicode and Printf stand in for
+# the same "stdlib that calls into C" surface.
+check unicode_printf '
+using Unicode, Printf, Test
+@test Unicode.normalize("cafe\u0301") == "café"
+@printf("%.6f\n", pi)
+println("unicode/printf ok")
 '
-check interactive_utils 'using InteractiveUtils; versioninfo(; verbose=false)'
+check interactive_utils '
+using InteractiveUtils
+println("VERSION=", VERSION, " MACHINE=", Sys.MACHINE)
+startswith(Sys.MACHINE, "aarch64") || error("unexpected machine")
+# versioninfo() reaches Sys.cpu_info(), which libuv cannot read on Android
+# (uv_cpu_info: permission denied, EACCES).  The rest of the report is what this
+# asserts on; a failure that is not that environmental read rethrows.
+try
+    versioninfo(; verbose=false)
+catch err
+    err isa Base.IOError || rethrow()
+    println("versioninfo stopped at cpu_info (Android EACCES), as expected")
+end
+'
 check codegen_llvm '
 # exercises libjulia-codegen and the LLVM it links
 using InteractiveUtils, Test

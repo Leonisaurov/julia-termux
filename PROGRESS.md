@@ -605,6 +605,21 @@ sobre https falla; con él devuelve el fichero.  Aparte y cosmético:
 `uv_cpu_info: permission denied (EACCES)` — es una restricción de Android al leer la
 topología de CPU, no del port.
 
+La corrida del smoke oficial (`scripts/device-smoke.sh`) contra el árbol instalado
+destapó que el smoke, **no el port**, estaba escrito para las stdlibs de 1.9/1.10.  Se
+corrigieron: `julia -e '--version'` (ParseError; ahora todo lo que empieza con `--` va
+directo a julia), un `@test` con dos `rand(n)` distintos, `@threads for` sin `end`,
+`@test` sin `using Test`, acceso a `F.factors` de un LLt disperso, `eigs` sin `Arpack`
+(en 1.12 **no** es stdlib: ahora SKIP), `mktemp(dir=TMPDIR)` y `TMPDIR` dentro de Julia,
+`LibGit2.Sig` (es `LibGit2.Signature`), y `ccall((:f, handle))` — en 1.12 el slot de
+librería del `ccall` ya **no** acepta el `Ptr` de `dlopen`, espera
+`String`/`Symbol`/`LazyLibrary` (`base/libdl.jl`), así que se resuelve con
+`dlsym` + `ccall(ptr)`.  `MbedTLS` y `FFTW` tampoco son stdlibs en 1.12; TLS se prueba
+con `Downloads` sobre https y Unicode/Printf ocupan su lugar.  Resultado en el
+dispositivo: **`SMOKE: PASS`, 19 pass / 0 fail** (arpack SKIP), incluidos `Pkg.add` e
+`Pkg.instantiate` por red, `codegen_llvm`, BLAS/LAPACK, SuiteSparse, threads y
+`interactive_utils` (que captura el `uv_cpu_info: EACCES` de Android).
+
 ### Caché de CI: la clave no debe depender de lo que deriva solo
 
 La clave era `julia-deb-v1-aarch64-<HEAD de termux-packages>-<hash del índice
