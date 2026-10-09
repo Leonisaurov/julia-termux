@@ -127,6 +127,63 @@ for patch in $(find "$REPO_ROOT/packages/$PKG" -mindepth 1 -maxdepth 1 \
 done
 echo "-- $applied_count patch file(s) applied against $(basename "$SRCDIR") --"
 
+# ---- what the recipe asks make to build, and what that asks for ----
+# Run 37891178350 compiled everything, precompiled every stdlib, and then died
+# one target later: the recipe's `make install` pulls Julia's HTML docs, whose
+# rule recurses to `docs` and instantiates an environment of its own from the
+# General registry (doc/Makefile's html target runs doc/make.jl, which needs
+# network and pins nothing this recipe controls).  An hour of build bought a
+# download.  So the gate asks two things and copies neither answer: which goals
+# the recipe hands to make, and - in the *patched* Makefile - what those goals
+# depend on.  A goal that depends on documentation is a goal that depends on the
+# network, and the copy of documentation install makes must then tolerate its
+# absence.
+echo
+echo "===== goals and their prerequisites ====="
+goal_fail=0
+goals=$(sed -nE 's/^[[:space:]]*make[[:space:]]+/ /p' "$RECIPE" | \
+	tr ' \t' '\n\n' | grep -vE '^-|[A-Za-z0-9_]+=' | grep -E '^[a-z][a-z-]*$' | sort -u)
+printf 'goals      %s\n' "${goals:-none}"
+for goal in $goals; do
+	# Prerequisites: the goal's rule, joined across backslash continuations.
+	prereqs=$(awk -v g="$goal" '
+		$0 ~ "^"g":" { line = $0; sub("^"g":[[:space:]]*", "", line)
+			while (line ~ /\\$/) { if ((getline nextline) <= 0) break
+				line = substr(line, 1, length(line) - 1) " " nextline }
+			print line; exit }' "$SRCDIR/Makefile")
+	for prereq in $prereqs; do
+		[ -n "$prereq" ] || continue
+		# The rule this prerequisite runs, if the patched Makefile has one.
+		rule=$(awk -v p="$prereq" '
+			index($0, p":") == 1 { found = 1; next }
+			found && /^\t/ { print }
+			found && !/^\t/ { exit }' "$SRCDIR/Makefile")
+		if printf '%s\n' "$rule" | grep -q '$(MAKE) docs'; then
+			printf 'FAIL  %s is built by `make docs`, so %s would need the network\n' \
+				"$prereq" "$goal"
+			goal_fail=$((goal_fail + 1))
+		else
+			printf 'OK    %s (prerequisite of %s) is not built by the docs rule\n' \
+				"$prereq" "$goal"
+		fi
+	done
+done
+# Whatever install copies out of the docs tree has to survive it not being there.
+tab=$(printf '\t')
+while IFS= read -r hit; do
+	[ -n "$hit" ] || continue
+	num="${hit%%:*}"
+	body="${hit#*:}"
+	if [ "${body#"$tab-"}" != "$body" ]; then
+		printf 'OK    Makefile:%s copies the docs tree tolerantly\n' "$num"
+	else
+		printf 'FAIL  Makefile:%s copies the docs tree without tolerating its absence: %s\n' \
+			"$num" "${body#"$tab"}"
+		goal_fail=$((goal_fail + 1))
+	fi
+done < <(grep -nE "^$tab-?cp .*doc/_build" "$SRCDIR/Makefile" || true)
+[ "$goal_fail" -eq 0 ] || echo "FAIL  a goal of the recipe would need network or absent documentation"
+
 # ---- the endianness decision the patched tree actually makes ----
 # flisp's `#if BYTE_ORDER == BIG_ENDIAN` guards a branch upstream never
 # compiles and that does not even parse (src/flisp/flisp.c:990 is a #define
@@ -658,14 +715,14 @@ done
 
 echo
 echo "===== summary ====="
-printf 'patches_applied=%s patch_failures=%s endian=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s sonames=%s repo_failures=%s\n' \
-	"$applied_count" "$patch_fail" "$endian_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$soname_fail" "$repo_fail"
-if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
+printf 'patches_applied=%s patch_failures=%s endian=%s goals=%s pre_rc=%s conf_rc=%s make_user=%s make_inc_parse=%s dep_failures=%s deps_patch_misses=%s dep_patch_failures=%s resolution=%s triplet=%s sonames=%s repo_failures=%s\n' \
+	"$applied_count" "$patch_fail" "$endian_fail" "$goal_fail" "$PRE_RC" "$CONF_RC" "$make_user_fail" "$inc_fail" "$dep_fail" "$ext_fail" "$dep_patch_fail" "$lib_fail" "$triplet_fail" "$soname_fail" "$repo_fail"
+if [ "$patch_fail" -gt 0 ] || [ "$endian_fail" -gt 0 ] || [ "$goal_fail" -gt 0 ] || [ "$PRE_RC" != 0 ] || [ "$CONF_RC" != 0 ] \
 	|| [ "$make_user_fail" -gt 0 ] || [ "$inc_fail" -gt 0 ] || [ "$dep_fail" -gt 0 ] \
 	|| [ "$ext_fail" -gt 0 ] || [ "$dep_patch_fail" -gt 0 ] || [ "$lib_fail" -gt 0 ] \
 	|| [ "$triplet_fail" -gt 0 ] || [ "$soname_fail" -gt 0 ] || [ "$repo_fail" -gt 0 ]; then
 	echo "GATE: FAIL — fix the recipe before launching any build"
 	exit 5
 fi
-echo "GATE: PASS (every patch applies, endianness settles little-endian, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, the triplet the sysimage embeds parses, and every versioned soname the sysimage dlopens has an answer)"
+echo "GATE: PASS (every patch applies, endianness settles little-endian, the goals the recipe hands to make ask for nothing the network provides, configure produces a Make.user Make.inc accepts, every system dep is real and the loader resolves it, the triplet the sysimage embeds parses, and every versioned soname the sysimage dlopens has an answer)"
 exit 0
