@@ -320,20 +320,22 @@ con su motivo:
 
 | Sección | Qué responde | Coste si se descubre en CI |
 |---|---|---|
-| `patch stage report` (`:101-128`) | los 25 parches aplican al árbol real, dry-run **y** aplicación real | árbol medio parcheado, fallo tardío |
-| `endianness macros` (`:130-153`) | si el árbol parcheado settlea `BYTE_ORDER`; preprocesar un header, no compilar flisp | run 37803324627 |
-| `recipe hooks` (`:155-196`) | rc de los hooks de la receta | — |
-| `Make.user` (`:198-219`) | el generado **no resucita vocabulario de cross**: veta `XC_HOST`, `HOSTCC`, `HOST_CMAKEFLAGS`, `BUILDOFFLINE`, `flang`, `F77=`, `USE_SYSTEM_LLVM:=1`, `JULIA_PRECOMPILE:=0`, `usr-staging`, `@TERMUX_` | silenciar la ruta muerta por convención no basta; se comprueba |
-| `Make.inc parse` (`:221-257`) | `Make.inc` acepta el `Make.user` **y** `FC_VERSION` no es vacío | run 37795904301, ~1 h |
-| `system dependency reality check` (`:259-313`) | cada `USE_SYSTEM_* := 1` respaldado por un fichero o binario real del prefijo | ~70 min |
-| `bundled-dep patches` (`:315-397`) | los ficheros que referencian `deps/*.mk` existen, y cada `patches/deps/termux-*.patch` aplica **al commit que `deps/*.mk` descarga** (SHA de `deps/*.version`) | fallo en `make -C deps` |
-| `library resolution` (`:399-432`) | ver §3.4/§3.5 | run 37811196090, ~47 min |
-| `embedded platform triplet` (`:434-455`) | ver §3.6 | run 37841320064, ~47 min |
-| `dlopen'ed versioned sonames` (`:457-639`) | ver §3.7 | run 37851961397, ~49 min |
-| `declared packages` (`:524-540`) | todo `TERMUX_PKG_*DEPENDS` existe en el repo de Termux | closure incompleta en el runner |
+| `patch stage report` (`:80-128`) | los 26 parches aplican al árbol real, dry-run **y** aplicación real | árbol medio parcheado, fallo tardío |
+| `goals and their prerequisites` (`:130-185`) | qué objetivos pasa la receta a `make` y —en el Makefile **ya parcheado**— de qué dependen: un objetivo que depende de los docs HTML depende de la red, y la copia de esos docs tiene que tolerar que no existan | run 37891178350, ~63 min |
+| `endianness macros` (`:187-246`) | si el árbol parcheado settlea `BYTE_ORDER`; preprocesar un header, no compilar flisp | run 37803324627 |
+| `recipe hooks` (`:247-253`) | rc de los hooks de la receta | — |
+| `Make.user` (`:255-276`) | el generado **no resucita vocabulario de cross**: veta `XC_HOST`, `HOSTCC`, `HOST_CMAKEFLAGS`, `BUILDOFFLINE`, `flang`, `F77=`, `USE_SYSTEM_LLVM:=1`, `JULIA_PRECOMPILE:=0`, `usr-staging`, `@TERMUX_` | silenciar la ruta muerta por convención no basta; se comprueba |
+| `Make.inc parse` (`:278-316`) | `Make.inc` acepta el `Make.user` **y** `FC_VERSION` no es vacío | run 37795904301, ~1 h |
+| `system dependency reality check` (`:318-371`) | cada `USE_SYSTEM_* := 1` respaldado por un fichero o binario real del prefijo | ~70 min |
+| `bundled-dep patches` (`:372-405`) | los ficheros que referencian `deps/*.mk` existen | fallo en `make -C deps` |
+| `bundled-dep patch application` (`:406-454`) | cada `patches/deps/termux-*.patch` aplica **al commit que `deps/*.mk` descarga** (SHA de `deps/*.version`) | idem |
+| `library resolution` (`:456-497`) | ver §3.4/§3.5 | run 37811196090, ~47 min |
+| `embedded platform triplet` (`:499-534`) | ver §3.6 | run 37841320064, ~47 min |
+| `dlopen'ed versioned sonames` (`:536-696`) | ver §3.7 | run 37851961397, ~49 min |
+| `declared packages` (`:698-715`) | todo `TERMUX_PKG_*DEPENDS` existe en el repo de Termux | closure incompleta en el runner |
 
 El veredicto es una línea machine-readable con todas las banderas
-(`:544-545`) y `GATE: FAIL` con `exit 5` (`:546-552`). La línea de summary es
+(`:717-723`) y `GATE: FAIL` con `exit 5` (`:724-726`). La línea de summary es
 intencionadamente un registro: los gates rojo→verde citados en la tabla de arriba
 se leen de ahí.
 
@@ -483,7 +485,7 @@ mientras el sysimage se bootstrapa **dentro** de `make`. Por eso
 (`build.sh:176-192`) y se repite en `$PREFIX/lib/julia` tras install
 (`build.sh:207-219`). El gate exige esa evidencia, no la asume: localiza el cuerpo
 de `termux_step_make`, encuentra la línea de su `make` y reclama que la derivación
-aparezca **antes** (`rehearse-recipe.sh:567-584`).
+aparezca **antes** (`rehearse-recipe.sh:620-641`).
 
 La tercera parte fue **una cuestión de capa espacial**, y costó un run entero:
 37862103015 creó los 8 alias donde se los pedía y el bootstrap murió igual, con
@@ -507,11 +509,11 @@ deriva: `scripts/runtime-library-dir.sh` le pregunta a `make` por
 `$(reverse_private_libdir_rel)`, y **rechaza** el resultado si `RPATH_LIB` deja de
 mencionar `$ORIGIN` (la premisa entera se cae con eso). La sección
 `dlopen'ed versioned sonames` del gate compara esa respuesta con los destinos de
-cada `termux_link_soname_aliases` de la receta (`rehearse-recipe.sh:585-633`):
+cada `termux_link_soname_aliases` de la receta (`rehearse-recipe.sh:642-672`):
 `OK the aliases for the build tree go to usr/lib, the directory make names`, y
 `FAIL nothing links the aliases into usr/lib (the build tree)` si alguien vuelve a
 escribir otro. También cruza los `absent` con la lista REQUIRED de §3.4: un nombre
-letal para `julia-base` y sin respuesta es `FAIL` (`:473-486`).
+letal para `julia-base` y sin respuesta es `FAIL` (`:572-585`).
 
 La cuarta parte fue **el `absent` que el gate llamaba nota**. Run 37876520515:
 `stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl` hace
@@ -524,7 +526,7 @@ anotaba como inocuo porque solo preguntaba "¿lo exige `julia-base`?".  Desde
 `dlopen`/`dlopen_e` en los **mismos** ficheros que lee `soname-aliases.sh`
 (`base/*.jl`, `stdlib/*/src/*.jl`), sigue los dos saltos del patrón
 (`dlopen(ident)` y `helper(ident)`, con el helper juzgado por sus propios `dlopen`)
-y veredicta `guarded`/`unguarded` por sitio.  `rehearse-recipe.sh:529-566` vuelve
+y veredicta `guarded`/`unguarded` por sitio.  `rehearse-recipe.sh:586-613` vuelve
 `FAIL` cualquier `unguarded`
 (`FAIL  %s is loaded without a guard at %s`), y el cruce demostró servir tres veces:
 nombró las líneas 57/61/63 del stub CSL y, con la derivación filtrada por
@@ -547,7 +549,7 @@ runner y `GATE: PASS` en el teléfono, y la diferencia no era la receta ni
 `soname-aliases.sh`**.  En el teléfono `libopenlibm.so.4` es un fichero del
 `julia 1.12.6-1` publicado (`pacman -Qo`), o sea del paquete que este build
 reconstruye: un `native` dado por el propio objeto de la reconstrucción no es
-evidencia de que el build lo produzca.  `rehearse-recipe.sh` (`:467-510`) pregunta
+evidencia de que el build lo produzca.  `rehearse-recipe.sh` (`:524-567`) pregunta
 ahora a una copia de `$PREFIX/lib` **sin los ficheros que posee el paquete que se
 construye**: la lista sale de `pacman -Ql $PKG` (o `dpkg -L $PKG`), la copia de
 `cp -as` se filtra con ella, y si el paquete no está instalado o no hay gestor de
@@ -636,7 +638,7 @@ motivo medido:
 | `USE_SYSTEM_LLVM := 0` | Julia 1.12 pinea LLVM 18.1.7 + symver `JL_LLVM_18.1`; Termux solo da LLVM 21. Compilarlo es posible **porque host == target** (§1.4) |
 | `USE_SYSTEM_LLD := 1`, `USE_SYSTEM_PATCHELF := 1`, `USE_SYSTEM_P7ZIP := 1` | binarios que Termux shippea y Julia solo necesita encontrar en PATH |
 | `USE_SYSTEM_{ZLIB,PCRE,GMP,MPFR,OPENSSL,LIBSSH2,NGHTTP2,CURL,LIBGIT2,LIBSUITESPARSE,BLAS,LAPACK} := 1` | cada uno respaldado por un fichero real del prefijo; el gate lo comprueba uno a uno (§3.3) |
-| `USE_SYSTEM_LIBM := 1` | libm es de bionic, no del prefijo: el gate **no** busca un fichero (`rehearse-recipe.sh:298`).  Consecuencia medida en 37886407453: con esta flag `deps/Makefile:89-91` no construye openlibm y `OpenLibm_jll.jl:28` lo pedía igual -> `stdlib-OpenLibm_jll.jl.patch` |
+| `USE_SYSTEM_LIBM := 1` | libm es de bionic, no del prefijo: el gate **no** busca un fichero (`rehearse-recipe.sh:355`).  Consecuencia medida en 37886407453: con esta flag `deps/Makefile:89-91` no construye openlibm y `OpenLibm_jll.jl:28` lo pedía igual -> `stdlib-OpenLibm_jll.jl.patch` |
 | `USE_SYSTEM_CSL := 1` | no hay `libgcc_s`/`libstdc++`/`libgfortran` que bundlear en bionic; también inercializa `deps/csl.mk`, el otro consumidor de `$(FC)` en parse-time (`build.sh:62-64`) |
 | `USE_SYSTEM_{LIBUV,UTF8PROC,DSFMT,LIBWHICH} := 0` | Julia pinea sus propios forks/commits; las versiones de Termux son otras release y el código de Julia asume las suyas. `libwhich` **además** se parchea aquí (§3.1) |
 | `FC := $PREFIX/bin/clang` | `Make.inc:541` fija `FC := $(CROSS_COMPILE)gfortran` y `Make.inc:1375` deriva `FC_VERSION` de `$(FC) -dM -E`; el guarda de `Make.inc:1432-1434` aborta si `FC_VERSION` es vacío y OpenBLAS/SuiteSparse no vienen de BinaryBuilder. Termux no trae `gfortran`; flang arrastraría una segunda toolchain LLVM (mlir, libllvm, libandroid-complex-math-static) para satisfacer un sondeo. El override **debe** vivir en `Make.user`: `Make.inc` lo incluye una segunda vez en `:754`, después de la línea 541 |
@@ -650,7 +652,7 @@ motivo medido:
 No hay `CC` ni `CXX` a propósito: `Make.inc` detecta clang desde `cc --version` y
 elige `USECLANG` solo, y el clang de Termux ya apunta al API level del dispositivo.
 
-### 5.2 Las 22 + 2 parches, por capa
+### 5.2 Las 26 + 2 parches, por capa
 
 Convención de `termux-packages` (`termux_step_patch_package.sh:5-34`): los
 `*.patch` se aplican con `patch -p1` en orden alfabético, con los tokens
@@ -660,11 +662,32 @@ documentación de la ruta tocada (`/` → `-`), no un mecanismo.
 
 | Capa | Ficheros | Motivo común |
 |---|---|---|
-| Build system | `Make.inc.patch` (quita `libgcc_s` de las listas de deplibs del loader), `base-Makefile.patch` (`ALLOW_FAILURE` en `libm`, `libgcc_s`, `libstdc++`: el mismo trato que Julia ya da a `libssp`/`libatomic`/`libgomp`), `cli-Makefile.patch` (Android rechaza `DT_TEXTREL`; compiler-rt en el loader), `src-Makefile.patch` (compiler-rt en runtime y codegen), `deps-llvm.mk.patch` (cmira al zlib de Termux, no al `deps/usr` vacío), `deps-libuv.mk.patch` y `deps-libwhich.mk.patch` (insertan un target `source-patched` en la cadena de rules de los deps) | la capa que **produce** valores de build |
+| Build system | `Make.inc.patch` (quita `libgcc_s` de las listas de deplibs del loader), `Makefile.patch` (`install` deja de pedir los docs HTML; ver la nota bajo la tabla), `base-Makefile.patch` (`ALLOW_FAILURE` en `libm`, `libgcc_s`, `libstdc++`: el mismo trato que Julia ya da a `libssp`/`libatomic`/`libgomp`), `cli-Makefile.patch` (Android rechaza `DT_TEXTREL`; compiler-rt en el loader), `src-Makefile.patch` (compiler-rt en runtime y codegen), `deps-llvm.mk.patch` (cmira al zlib de Termux, no al `deps/usr` vacío), `deps-libuv.mk.patch` y `deps-libwhich.mk.patch` (insertan un target `source-patched` en la cadena de rules de los deps) | la capa que **produce** valores de build |
 | Runtime C/C++ | `src-support-platform.h.patch` (define `_OS_ANDROID_`; es el guard maestro de todo lo demás), `src-support-dtypes.h.patch` (ciclo de endianness + `uint_t` de bionic), `src-sys.c.patch` (`jl_pathname_for_handle` por `dl_iterate_phdr`: no hay `dlinfo`), `src-cgmemmgr.cpp.patch` (sin `shm_open` → fallback `tmpfile`), `src-debuginfo.cpp.patch` (sin `__register_frame` sin libgcc_s), `src-gc-debug.c.patch` (sin `malloc_stats`), `src-init.c.patch` (sin `pthread_get_stackaddr_np`), `src-jlapi.c.patch` y `src-scheduler.c.patch` (rr no existe; su syscall de probe 1008 lo bloquea seccomp), `src-runtime_ccall.cpp.patch` (sin `getdomainname`), `src-signals-unix.c.patch` (`signal_bt_*` referenciados fuera del guard de libunwind), `cli-loader_lib.c.patch` (saltar la sonda de `libstdc++`: hay libc++ y no hay ldconfig) | bionic ≠ glibc, y Julia solo conocía `_OS_LINUX_` |
 | Configuración | `contrib-normalize_triplet.py.patch` (§4) | la capa que produce el triplet |
 | Stdlib JLL | `stdlib-OpenBLAS_jll.jl.patch`, `stdlib-libblastrampoline_jll.jl.patch` | **no congelar rutas en la sysimage**: un `const` a nivel de módulo de un stdlib entra en `sys.so` con el prefijo de la máquina de build; todo se calcula dentro de `__init__()`. Y `dlpath()` no basta: en bionic respondía `NULL` para un handle cargado, dejando la ruta en `""` y matando a todo proceso en la init de BLAS |
+| Stdlib JLL (carga tolerante) | `stdlib-CompilerSupportLibraries_jll.jl.patch`, `stdlib-LibUnwind_jll.jl.patch`, `stdlib-OpenLibm_jll.jl.patch` | el stub *dummy* de upstream hace `dlopen` **sin guarda** de librerías que este prefijo no tiene (`libgcc_s`/`libstdc++`/`libgomp`, `libunwind.so.8`, `libopenlibm.so.4`) y desreferencia un `VNorNothing` que responde `nothing`.  Los tres quedan opcionales: `return` si la carga responde `nothing`, con la centinela `nothing` (no `C_NULL`: `base/libdl.jl:119-125` contra `:160`).  Cada uno es un muro medido —`pkgimage.mk:28` abortaba el precompile— y el gate los nombra (`scripts/unguarded-dlopen.sh`, §3.3) |
 | Contenido de deps | `patches/deps/termux-libuv-process-android.patch` (no hay `pthread_cancel`/`pthread_setcancelstate`), `patches/deps/termux-libwhich-dlinfo-android.patch` (rama `dlinfo` solo fuera de Android; `RTLD_NOLOAD` y saltar entradas sin `/` inicial, §3.1) | se instalans en `$SRCDIR/deps/patches/` desde `termux_step_pre_configure` (`build.sh:37-42`) porque `deps/Makefile` redefine `SRCDIR` a `deps/` |
+
+`Makefile.patch` toca la regla `install:` de dos formas que hay que leer juntas:
+quita `$(BUILDROOT)/doc/_build/html/en/index.html` de sus prerequisitos y pasa el
+`cp -R -L $(BUILDROOT)/doc/_build/html $(DESTDIR)$(docdir)/` a `-cp`, tolerando
+que el árbol no exista.  **Divergencia declarada respecto del paquete publicado
+`julia 1.12.6-1`, que sí trae `share/doc/julia/html/`**: el `.deb` de este port no
+lleva docs HTML.  El motivo no es estética del payload sino reproducibilidad —
+`doc/Makefile:47 html:` ejecuta `doc/make.jl`, que instancia su entorno contra el
+registro `General` (`Pkg` sin versiones fijadas) y por lo tanto necesita red en
+**tiempo de instalación**, y `doc/Makefile:28-34 deps` baja `UnicodeData.txt` con
+`$(JLDOWNLOAD)`.  Medido en 37891178350: dentro de bionic en este runner los hosts
+que publican `AAAA` responden `Could not resolve host` (`pkg.julialang.org`,
+`github.com`) y `make install` moría ahí, mientras el `curl` del mismo paso bajaba
+UnicodeData.txt sin problema — el precedente del quirk ya está documentado en
+`probe-ondevice-builder.yml:104` con `Acquire::ForceIPv4`.  Se descartó construir
+los docs con IPv4 forzado (meter una dependencia de red y de versiones no fijadas
+en el tramo que produce el artefacto) y se descartó `touch` del fichero stamp
+(`install` también depende de ficheros recién construidos de `base/`, así que el
+stamp falso volvía a correr la regla, y además empaquetaba un `index.html` vacío).
+`make docs` sigue intacto para quien lo quiera correr a mano.
 
 ---
 
@@ -709,7 +732,7 @@ Los tres componentes son las tres cosas que cambian el binario resultante:
 2. `repo_stamp`: los primeros 16 hex del SHA-256 del índice `Packages` descargado
    por el action (`build-package.yml:163-166`). Cualquier librería movida en el
    repo de Termux cambia lo que se produce.
-3. `hashFiles('packages/julia/**')`: la receta **y cada uno de sus 25 parches**.
+3. `hashFiles('packages/julia/**')`: la receta **y cada uno de sus 26 parches**.
 
 Y el árbol de trabajo **deliberadamente no se cachea** (`build-package.yml:168-176`):
 termux-packages borra `$TERMUX_PKG_SRCDIR` al empezar toda build
@@ -831,32 +854,44 @@ porque no existe artefacto que instalar (§9).
 ---
 
 <a name="9"></a>
-## 9. Límites conocidos y estado honesto (2026-10-08)
+## 9. Límites conocidos y estado honesto (2026-10-09)
 
 Copiado de `PROGRESS.md`, sin relajar:
 
-- La cadena está medida hasta el **minuto ~49**. Compilan y están validados en CI:
-  la receta y sus 25 parches, el `configure` con un `Make.user` que `Make.inc`
+- La cadena está medida hasta el **minuto ~63**. Compilan y están validados en CI:
+  la receta y sus 26 parches, el `configure` con un `Make.user` que `Make.inc`
   acepta, los gates, el entorno del runner, LLVM 18.1.7-4 bundled, `src/`, flisp,
-  `julia-base` con sus 19 symlinks derivados, el arranque de `julia` y el
-  bootstrap de la sysimage **arrancando** (triplet cerrado y confirmado en el run
-  37851961397).
+  `julia-base` con sus 19 symlinks derivados, el arranque de `julia`, el bootstrap
+  de la sysimage entero (`sysbase-o.a` y `sys-o.a` se emiten, 37876520515) y el
+  precompile de las stdlibs de `pkgimage.mk:28` (`stdlib/release.image` con
+  `✓ Pkg`, sin `Failed to precompile` ni `FieldError` ni `dlpath(::Nothing)`,
+  37891178350).
 - **No hay ningún `.deb` o `.pkg.tar.xz` producido.** Consecuencia: `bundle` y
   `publish` quedan `skipped` mientras no exista artefacto, y la Fase 5
   (verificación en dispositivo) está pendiente.
-- Sin demostrar: `sys-o.a` + precompile (`sysimage.mk:110-123`), `pkgimage.mk`,
-  `make install`, y todo lo que el instalador de paquetes haga después.
-- El fallo actual (sonames versionados) **tiene fix y gate, pero el fix todavía no
-  está medido en CI**: la hipótesis del próximo run es que el bootstrap pasa de
-  `gmp.jl` y `sysimage.mk:129` produce `sysbase-o.a`.
-- Riesgo residual declarado: después de `sysimage.mk:129` vienen
-  `julia-sysimg-*`, el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que nunca
-  corrió en Android. Si el run cae ahí, la nueva línea de `make` y el `LoadError`
-  dicen desde dónde ampliar el gate. Como `packages/**` y `scripts/**` cambian, la
-  clave de caché no hita y el run vuelve a pagar la compilación completa.
+- Sin demostrar: el tramo que ningún run ha recorrido —los `stringreplace` que
+  reescriben las cadenas de dependencias del loader (`Makefile:468-481`), las
+  copias de `base`/`test`/`stdlib`, la creación del `.deb` y el paso
+  `Inspect the artifact`—.
+- Divergencia aceptada: el `.deb` no trae docs HTML, a diferencia del paquete
+  publicado, porque `install` no debe depender de la red (§5.2).
+- Riesgo residual declarado: el muro siguiente puede estar en el propio
+  empaquetado (los hooks `termux_step_post_make_install`/`pre_massage`) y no en
+  Julia. Como `packages/**` y `scripts/**` cambian, la clave de caché no hita y el
+  run vuelve a pagar la compilación completa.
 
 Candidatos del tramo siguiente, ya medidos y descartados/afirmados
 (`PROGRESS.md` "Tramo siguiente"):
+
+> Los dos candidatos que hablaban de `sys-o.a` ya no son predicción: con
+> `37876520515` la imagen se emite y con `37891178350` el precompile de las
+> stdlibs pasa.  `CompilerSupportLibraries_jll` **sí** abortaba el tramo (el
+> `FieldError` de `libgfortran_version(...).major` sobre `nothing`) y se arregló
+> en la capa productora; el `--cpu-target=native` interno de
+> `generate_precompile.jl:360` no produjo ni `SIGILL` ni `Illegal instruction` en
+> el runner.  Quedan aquí como están escritos porque son la evidencia de *por qué*
+> cada uno se cerró así, y el segundo sigue siendo riesgo real **para el
+> dispositivo**: los `.ji` llevan machine code de la CPU del runner.
 
 - **`RTLD_DEEPBIND` no rompe nada.** `contrib/generate_precompile.jl:231` hace
   `dlopen("libjulia", RTLD_LAZY | RTLD_DEEPBIND)` y `base/libdl.jl:30` define
@@ -946,7 +981,7 @@ que es exactamente lo que prohíbe `AGENTS.md` (el teléfono baixa, instala y pr
 
 El vocabulario prohibido —`XC_HOST`, `HOSTCC`, `BUILDING_HOST_TOOLS`, `--host`,
 `host-flisp`— no solo está desaconsejado: el gate lo **rechaza** si aparece en el
-`Make.user` generado (`rehearse-recipe.sh:209-215`).
+`Make.user` generado (`rehearse-recipe.sh:266-272`).
 
 ---
 

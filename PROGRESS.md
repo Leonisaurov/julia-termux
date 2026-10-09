@@ -14,28 +14,35 @@
 Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
-**Estado** (2026-10-09 ~04:20 UTC): la arquitectura de build está validada de punta
-a punta hasta la **emisión de la sysimage**, y el tramo que mataba el build en
-`37870492832` —la memoria— quedó **falsificada con medición**: `37876520515` tomó
-186 muestras cada 20 s y el `MemAvailable` **mínimo** fue 8 458 692 kB, y con el
+**Estado** (2026-10-09 ~07:30 UTC): la arquitectura de build está validada de punta
+a punta hasta **el precompile completo de las stdlibs**, y el tramo que mataba el
+build en `37870492832` —la memoria— quedó **falsificada con medición**: `37876520515`
+tomó 186 muestras cada 20 s y el `MemAvailable` **mínimo** fue 8 458 692 kB, y con el
 `vm.max_map_count` del runner elevado de 262 144 a 1 048 576 el build **emitió**
 `usr/lib/julia/sysbase-o.a` (03:46:37Z) y `usr/lib/julia/sys-o.a` (03:50:51Z) sin
 un solo `std::bad_alloc`.  Los 68 avisos `scudo: Can't populate more pages` siguen
 en el log pero ya no matan nada: son **crónicos** (34 en el run que murió por otra
 causa) y hay que leerlos como ruido.
 
-El muro real está ahora más allá, en el **precompile de las stdlibs**
-(`pkgimage.mk:28 stdlib/release.image`, `build rc=2`): el stub *dummy* de upstream
-`stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl` da por
-existente un **runtime GCC** que Termux no tiene, y lo hace en las dos formas que
-duelen —desreferencia `libgfortran_version(HostPlatform()).major`, documentada como
-nullable (`base/binaryplatforms.jl:454`), y hace `dlopen` **sin guarda** de
-`libgcc_s.so.1`/`libstdc++.so.6`/`libgomp.so.1` (líneas 57/61/63).  Síntomas en el
-log: `FieldError: type Nothing has no field major` y 330 líneas de
-`MethodError: no method matching dlpath(::Nothing)` (estas últimas de **mis**
-parches `_jll`, que usaban la centinela equivocada: `dlopen(…; throw_error = false)`
-devuelve `nothing`, no `C_NULL` —`base/libdl.jl:119-125`—).  Quedan por demostrarse
-el resto del precompile, empaquetado y la verificación en dispositivo.
+El muro del precompile **quedó cerrado por `37891178350`**: tras `JULIA
+stdlib/release.image` (06:59:13Z) las stdlibs se precompilaron con sus dos
+configuraciones —`✓ OpenLibm_jll`, `✓ CompilerSupportLibraries_jll`, `✓ Pkg`,
+`✓ Test`— con `Failed to precompile`, `FieldError` y `dlpath(::Nothing)` a **cero**.
+Esas tres firmas eran exactamente las del stub *dummy* de upstream
+`stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl`, que da
+por existente un **runtime GCC** que Termux no tiene: desreferenciaba
+`libgfortran_version(HostPlatform()).major`, documentada como nullable
+(`base/binaryplatforms.jl:454`), y hacía `dlopen` **sin guarda** de
+`libgcc_s.so.1`/`libstdc++.so.6`/`libgomp.so.1` (líneas 57/61/63); las 330 líneas de
+`MethodError: no method matching dlpath(::Nothing)` eran de **mis** parches `_jll`,
+que usaban la centinela equivocada (`dlopen(…; throw_error = false)` devuelve
+`nothing`, no `C_NULL` —`base/libdl.jl:119-125`—).
+
+El fallo de ese run ya no es del port: `make install` se cayó en la **documentación
+HTML**, que el propio Makefile de Julia pone como prerequisito de `install` y que se
+construye instanciando un entorno contra el registro General —red, y no la que este
+runner resuelve dentro de bionic para hosts con AAAA—.  Quedan por demostrarse
+`make install`, el empaquetado y la verificación en dispositivo.
 
 El mismo cruce (`scripts/unguarded-dlopen.sh`) encontró después **otros dos stubs
 con la misma forma de muro**, uno por día: `LibUnwind_jll` (`libunwind.so.8`, que
@@ -50,8 +57,8 @@ responden a la misma pregunta.
 
 | Pieza | Estado |
 |---|---|
-| Receta declarativa `packages/julia/build.sh` | OK (25 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
-| Gates estáticos locales | OK y en el DAG de CI; desde 2026-10-09 el veredicto de los sonames se pregunta al sysroot del build (prefijo sin los ficheros del paquete que se construye), no al prefijo del teléfono |
+| Receta declarativa `packages/julia/build.sh` | OK (26 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
+| Gates estáticos locales | OK y en el DAG de CI; desde 2026-10-09 el veredicto de los sonames se pregunta al sysroot del build (prefijo sin los ficheros del paquete que se construye), no al prefijo del teléfono, y desde el mismo día la sección `goals and their prerequisites` exige que ningún objetivo que la recipe entrega a make dependa de `make docs` |
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
 | `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
@@ -266,6 +273,8 @@ convirtió en gate local cuando era reproducible fuera del runner.
 
 | 37886407453 | 04:59→05:01 (2 min 24 s, **sin tocar `make`**) | el gate pasó 24 parches y **falló en el runner**: `left absent libopenlibm.so.4` (1744), `unguarded libopenlibm.so.4 stdlib/OpenLibm_jll/src/OpenLibm_jll.jl:28` (1967), `FAIL … is loaded without a guard` (2106), `patches_applied=24 … sonames=1`, `GATE: FAIL` (2420-2421) → `build` y `bundle`/`publish` `skipped`.  En el teléfono el mismo gate estaba `GATE: PASS` con `native libopenlibm.so.4` | dos cosas a la vez, y la segunda es la que costó el run.  (a) El muro es real: la receta fija `USE_SYSTEM_LIBM := 1` y `deps/Makefile:89-91` sólo construye openlibm si **ambas** `USE_SYSTEM_OPENLIBM` y `USE_SYSTEM_LIBM` valen 0, así que `DEPLIBS` no lo incluye (medido idéntico en los dos árboles) y `Make.inc:1321-1324` enlaza contra `-lm`; el stub *dummy* de upstream pide `libopenlibm.so.4` (`OpenLibm_jll.jl:24`) y lo `dlopen`ea sin guarda en `__init__` (`:28`), y el módulo está en `INDEPENDENT_STDLIBS` (`stdlib/stdlib.mk:12`) → habría abortado el precompile de `pkgimage.mk:28`, igual que `LibUnwind_jll`.  (b) El **gate local no podía verlo**: `native`/`absent` se pregunta al prefijo del host que ejecuta `soname-aliases.sh`, y en el teléfono `libopenlibm.so.4` es un fichero dejado por el `julia 1.12.6-1` publicado (`pacman -Qo`), o sea por el paquete que este build reconstruye.  La nota de 37859841658 había llamado inocua esa divergencia con un razonamiento equivocado (`USE_SYSTEM_OPENLIBM` no es la flag que manda) | (a) `packages/julia/stdlib-OpenLibm_jll.jl.patch`: guarda `throw_error = false` + `return` si responde `nothing`, misma forma que `stdlib-LibUnwind_jll.jl.patch`; descartado `USE_SYSTEM_LIBM := 0` (compilar openlibm para bionic por un módulo que nadie usa) y descartado enlazar el nombre a `$PREFIX/lib/libm.so` (otra librería respondiendo por un nombre ajeno).  (b) `rehearse-recipe.sh` pregunta ahora a una copia de `$PREFIX/lib` **sin los ficheros que posee el paquete que se construye** (`pacman -Ql`/`dpkg -L` + `cp -as`; si el paquete no está instalado o no hay gestor, no quita nada y lo dice).  Rojo→verde medido aquí con el prefijo modelado: sin el parche `absent` + `unguarded …:28`; con él `guarded …:33`, `patches_applied=25`, `sonames=0`, `GATE: PASS` (`rehearse-openlibm2.log`).  Único `native` local de dueño `julia`: ver el bullet de `Tramo siguiente` |
 
+| 37891178350 | 05:59→07:02 (~1 h 3 min de build: 06:01→07:02:14Z) | **el precompile de stdlibs sale entero y el muro se mueve a `make install`**: `JULIA stdlib/release.image` (13049, 06:59:13Z) y tras él las stdlibs con sus dos configuraciones —`✓ OpenLibm_jll`, `✓ CompilerSupportLibraries_jll`, `✓ Pkg` en 117 537 ms, `✓ Test`— sin un solo `Failed to precompile`; `FieldError` 0 veces, `dlpath(::Nothing)` 0 veces.  El abort es `make[2]: *** [Makefile:47: html] Error 1` ← `make[1]: *** [Makefile:125: docs] Error 2` ← `make: *** [Makefile:66: …/doc/_build/html/en/index.html] Error 2` (14282-14285) con `RequestError: Could not resolve host: pkg.julialang.org` (14272) y `GitError(… failed to resolve address for github.com)` (14278), `build rc=2` | la hipótesis declarada —los tres stubs que cargan librerías inexistentes— **se confirmó y se cerró**: esto ya no es la recipe fallando en el port sino en lo que la recipe le pide a make.  `install:` (línea 312 del `Makefile` de Julia) tiene por prerequisito `$(BUILDROOT)/doc/_build/html/en/index.html`, y la regla de ese fichero (línea 65, *"Build the HTML docs (skipped if already exists, notably in tarballs)"*) recursiona a `docs` → `doc/Makefile:47 html` → `doc/make.jl`, que instancia un entorno suyo contra el registro General: red y versiones que esta recipe no fija.  Y no es "el runner no tiene red": **dos minutos antes** ese mismo paso bajó 2 124 kB con `curl` (UnicodeData.txt, el `deps` de `doc/Makefile`, 14258-14265).  Lo que falla es la resolución de nombres dentro de bionic para hosts que publican AAAA, el síntoma exacto que `probe-ondevice-builder.yml:104` ya documentó para `apt` ("No address associated with hostname") y que allí se cerró con `Acquire::ForceIPv4` | Parche nuevo `packages/julia/Makefile.patch`: `install` deja de pedir los docs y su `cp -R -L $(BUILDROOT)/doc/_build/html` pasa a ser tolerante (`-`), que es la forma en que el propio Makefile ya soporta "docs no construidos" y deja `make docs` intacto para quien sí los quiera.  **Gate nuevo, discrimina**: la sección `goals and their prerequisites` lee de la recipe los objetivos que entrega a make (derivado: `goals      install`), pregunta al Makefile **ya parcheado** qué prerequisitos tienen y qué regla los construye, y vuelve FAIL si alguno sale de `$(MAKE) docs`; exige además que toda copia de `doc/_build` dentro de una receta esté tolerada.  Rojo→verde medido aquí: sin el parche `FAIL  $(BUILDROOT)/doc/_build/html/en/index.html is built by \`make docs\`, so install would need the network`, `goals=1`, `GATE: FAIL` rc=5 (`rehearse-docs-red.log`); con él `OK    Makefile:413 copies the docs tree tolerantly`, `patches_applied=26`, `goals=0`, `GATE: PASS` (`rehearse-docs-green2.log`).  Gate entero sobre el árbol ya commiteado, 2026-10-09 ~08:20 UTC: `patches_applied=26 patch_failures=0 goals=0 … sonames=0`, `GATE: PASS` (`$PREFIX/tmp/rehearse-final-20261009.log`).  Consecuencia declarada: **el `.deb` no traerá HTML docs**, a diferencia del `julia 1.12.6-1` publicado (`pacman -Ql julia` → `share/doc/julia/html/en/…`) |
+
 Hallazgo estático que no costó un run (medido antes de pushear, 2026-10-09
 ~03:10 UTC): el parche `_jll` de libblastrampoline pedía la librería **solo** en
 `$PREFIX/lib/julia` con `error()` duro, y en el árbol de build esa ruta no existe.
@@ -289,6 +298,7 @@ eso es falso en el árbol de build y se corrigió para que el helper no vuelva a
 inducir a error a nadie.
 
 
+Ruido conocido, presente en todo log de este runner: `WARNING: linker: Warning: failed to find generated
 linker configuration from "/linkerconfig/ld.config.txt"`,
 `__bionic_open_tzdata: …`, `bionic-icu: couldn't open libicu.so`,
 `expr: syntax error: unexpected argument 'Warning:'` (el anterior se cuela en
@@ -298,6 +308,15 @@ itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
 ### Tramo siguiente (`sys-o.a` + precompile): riesgos ya medidos
+
+> **Cerrado el 2026-10-09.**  `sysbase-o.a` y `sys-o.a` se emiten (37876520515,
+> líneas 16389 y 16608) y el precompile de `pkgimage.mk:28` pasa de las tres
+> stdlibs que cargaban librerías inexistentes (37891178350: `stdlib/release.image`
+> + `✓ Pkg`, sin `Failed to precompile`, `FieldError` ni `dlpath(::Nothing)`).  El
+> frontier se movió a `make install` y el empaquetado; el muro medido allí fue la
+> construcción de los docs HTML (fila 37891178350 arriba) y lo levanta
+> `packages/julia/Makefile.patch`.  Los bullets siguientes se quedan como están
+> porque son la evidencia de riesgos ya resueltos, no una predicción.
 
 - **`RTLD_DEEPBIND` no rompe nada.** `contrib/generate_precompile.jl:231` hace
   `dlopen("libjulia", RTLD_LAZY | RTLD_DEEPBIND)` y `base/libdl.jl:30` define
@@ -510,26 +529,33 @@ es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`) → `~62 m
 salen** —`sysbase-o.a` 03:46:37Z, `sys-o.a` 03:50:51Z— y el muro se movió al
 precompile de stdlibs: `pkgimage.mk:28` aborta en
 `FieldError: type Nothing has no field major`, o sea el runtime GCC que Termux no
-tiene; la memoria queda **falsificada** como causa).  El tramo `make install` +
-empaquetado sigue sin medir.
+tiene; la memoria queda **falsificada** como causa) → `~63 min`
+(37891178350: **el precompile sale entero** —`Failed to precompile`, `FieldError` y
+`dlpath(::Nothing)` a cero, con `✓ Pkg` en 117 s tras `stdlib/release.image`— y el
+fallo se mueve un tramo más allá, a `make install`, cuyo prerequisito de docs HTML
+necesita red dentro de bionic; el instalador y el empaquetado siguen sin medir).
 
 ---
 
 ## Pendientes
 
-1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  El run
-   `37870492832` cerró la hipótesis del directorio, `37876520515` falsificó la de
-   memoria (`sysbase-o.a` y `sys-o.a` se emiten; el muro quedó en el precompile de
-   stdlibs) y `37886407453` **no llegó a `make`**: el gate lo paró en el runner por
-   el stub `OpenLibm_jll`.  El próximo run mide **una** hipótesis: que con los tres
-   stubs que cargan librerías inexistentes declarados opcionales
-   (`stdlib-CompilerSupportLibraries_jll.jl.patch`,
-   `stdlib-LibUnwind_jll.jl.patch`, `stdlib-OpenLibm_jll.jl.patch`) el precompile de
-   `pkgimage.mk` pasa de `CompilerSupportLibraries_jll`, `LibUnwind_jll` y
-   `OpenLibm_jll` y llega más lejos en `INDEPENDENT_STDLIBS`.  Secundaria y ya
-   medida este mismo día: el gate local pregunta ahora al sysroot **del build**, no
-   al prefijo del teléfono, así que un `GATE: PASS` local vale lo que vale en el
-   runner.  Mientras no exista artefacto, `bundle` y `publish` siguen `skipped`.
+1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  Cadena de
+   cierres: `37870492832` cerró la hipótesis del directorio, `37876520515` falsificó
+   la de memoria (`sysbase-o.a` y `sys-o.a` se emiten), `37886407453` **no llegó a
+   `make`** (el gate lo paró en el runner por el stub `OpenLibm_jll`) y
+   `37891178350` **cerró el precompile** —las stdlibs salen con las dos
+   configuraciones y cero `Failed to precompile`— para morir después, en el
+   prerequisito de docs HTML de `make install`.  El próximo run mide **una**
+   hipótesis: que `packages/julia/Makefile.patch`, al quitar ese prerequisito y
+   tolerar su copia, deja a `make -j1 install` terminar el tramo que ningún run ha
+   recorrido todavía —los `stringreplace` que reescriben las cadenas de dependencias
+   del loader (`Makefile:468-481`), las copias de `base`/`test`/`stdlib` y la
+   creación del `.deb`— y que `Inspect the artifact` encuentra el payload que
+   declara (`bin/julia`, `lib/julia/sys.so`, `libblastrampoline.so*`, RUNPATH sin
+   `TEXTREL`).  Secundaria y ya medida este mismo día: la sección nueva del gate
+   (`goals and their prerequisites`) no vuelve a dejar pasar un objetivo que dependa
+   de `make docs`.  Mientras no exista artefacto, `bundle` y `publish` siguen
+   `skipped`.
 2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
    correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
    Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
