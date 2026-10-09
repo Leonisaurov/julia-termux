@@ -1,0 +1,32 @@
+# Termux/Bionic port: stdlib/OpenLibm_jll/src/OpenLibm_jll.jl
+#
+# The stub loads its library unconditionally, on every platform, from the name
+# the linux branch spells at line 24.  This build sets USE_SYSTEM_LIBM := 1
+# (build.sh:102, Termux's libm is bionic's) and deps/Makefile:89-91 adds
+# openlibm to DEP_LIBS only when *both* USE_SYSTEM_OPENLIBM and USE_SYSTEM_LIBM
+# are 0, so make -C deps answers
+#   DEPLIBS=JuliaSyntax blastrampoline libuv dsfmt llvm utf8proc terminfo libwhich
+# without openlibm: nothing here installs libopenlibm.so.4, and Make.inc:1321
+# links Julia against -lm instead.  Nothing needs the module either - no stdlib
+# depends on OpenLibm_jll (measured: only its own Project.toml and stdlib.mk's
+# install list mention the name).
+--- a/stdlib/OpenLibm_jll/src/OpenLibm_jll.jl
++++ b/stdlib/OpenLibm_jll/src/OpenLibm_jll.jl
+@@ -25,7 +25,16 @@
+ end
+ 
+ function __init__()
+-    global libopenlibm_handle = dlopen(libopenlibm)
++    # This build links bionic's libm (`USE_SYSTEM_LIBM := 1`), which also switches
++    # deps/'s openlibm off, so the name spelled at line 24 is a file nothing here
++    # installs.  Upstream treats the load as certain; on Termux it raised
++    #   could not load library "libopenlibm.so.4"
++    # during the stdlib precompile that pkgimage.mk:28 runs inside make.
++    handle = dlopen(libopenlibm; throw_error = false)
++    if handle === nothing
++        return
++    end
++    global libopenlibm_handle = handle
+     global libopenlibm_path = dlpath(libopenlibm_handle)
+     global artifact_dir = dirname(Sys.BINDIR)
+     LIBPATH[] = dirname(libopenlibm_path)
