@@ -210,6 +210,26 @@ pida `dlopen` del linker del runner.
   pagar ~49 min por un veredicto que hoy no cambia ningún enlace sería comprar
   ruido con runs.  Queda como primer cambio a plegar en el próximo fix real.
 
+- **`libunwind.so.8` sí es ausencia real, y hoy no la pide nadie.** Mismo nombre
+  `left absent` en la tabla del helper, clase distinta: `deps/Makefile:61` solo
+  añade `unwind` a `DEPS_LIBS` si `DISABLE_LIBUNWIND` es `0`, y la receta lo fija
+  en `1` (`packages/julia/build.sh:126`, "aarch64 uses Julia's own assembly task
+  switching"), así que el `.so` **no se produce tampoco en el árbol** (a diferencia
+  de `libdSFMT.so`, que `deps/dsfmt.mk:45` sí instala en `usr/lib`).  El demandante
+  es `stdlib/LibUnwind_jll/src/LibUnwind_jll.jl:20` (el literal) y su `dlopen` con
+  throw en `__init__` (`:21-25`), guardado por
+  `@static if Sys.islinux() || Sys.isfreebsd()`: se compila **dentro** si
+  `Sys.islinux()` es cierto en Android, que es lo esperable porque `Sys.KERNEL`
+  sale de `uname` y Android reporta `Linux` — medido todavía no.  Buscado en todo el árbol
+  (`*.toml`, `*.jl`, `Makefile`, `*.mk`),
+  ningún otro stdlib ni `base/` depende de ese módulo — solo aparece en
+  `stdlib/Project.toml:25` y `stdlib/stdlib.mk:10`, que lo **instalan** pero no lo
+  cargan.  `__init__` corre al cargar, y evaluar/precompilar un módulo no lo
+  ejecuta, así que tampoco es bloqueo demostrado.  Condición para que lo sea: un
+  `LoadError("…libunwind.so.8…")` en el log.  El fix entonces es `DISABLE_LIBUNWIND := 0`
+  (dejar que `deps/unwind.mk` lo compile, cuyo SONAME de GNU ya lleva el `.8`),
+  **no** un alias hacia nada: en bionic no existe un `libunwind.so` al que apuntar.
+
 - **Los 8 `alias` se crean ahora antes de `make`.** El tramo que sigue a
   `sysbase-o.a` tampoco está medido en Android: `sysimage.mk:109-125` produce
   `sys-o.a` ejecutando `contrib/generate_precompile.jl`, que spawnea
