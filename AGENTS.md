@@ -146,4 +146,4 @@ están **sin demostrar**. Donde `PROGRESS.md` dice "compila", no escribas
 | el DAG real (lint → build → bundle → publish) | `.github/workflows/build-package.yml` |
 | cómo se materializa el prefijo en el runner | `.github/actions/termux-builder/action.yml` |
 | el gate local completo | `scripts/rehearse-recipe.sh` |
-| derivación de sonames / triplet / alias versionados / directorio buscado por el loader | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`, `scripts/runtime-library-dir.sh` |
+| derivación de sonames / triplet / alias versionados / directorio buscado por el loader / guardas de `dlopen` | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`, `scripts/unguarded-dlopen.sh`, `scripts/runtime-library-dir.sh` |

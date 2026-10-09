@@ -14,31 +14,38 @@
 Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
-**Estado** (2026-10-09 ~02:35 UTC): la arquitectura de build está validada de punta
-a punta hasta el **arranque de la sysimage**, y el tramo que mataba el build desde
-`37841320064` —los nombres versionados que el fuente pide al loader— quedó
-**cerrado en CI**: el run `37870492832` no produjo ni un `could not load library`
-en 13 394 líneas de log y el bootstrap **cargó Base y las stdlibs** (su propia
-tabla: `Stdlibs ─ 14,48 s / Total ─ 54,34 s`, 338 M de allocations, GC 68).  La
-causa era de **directorio**, no de presencia: el `dlopen` sale de
-`libjulia-internal.so`, cuyo RUNPATH es solo `$ORIGIN`, y los alias se ponían en
-`usr/lib/julia` en vez de `usr/lib`.  El build muere ahora un paso más allá, en la
-**emisión** de `sysbase-o.a` (`sysimage.mk:129`) con `scudo: Can't populate more
-pages` → `std::bad_alloc` → `SIGABRT`: el proceso pidió memoria y el asignador no
-pudo conseguirla.  **No es todavía un diagnóstico** —en reposo el runner tenía
-14 621 MB disponibles y 3 071 MB de swap sin usar, y el OOM-killer no intervino
-(cero `Killed` de proceso)—, así que el próximo run lleva instrumento para
-separar RAM real, límite de mappings y overcommit en vez de suponerlo.  Quedan por
-demostrarse `sys-o.a` + precompile, empaquetado y la verificación en dispositivo.
+**Estado** (2026-10-09 ~04:20 UTC): la arquitectura de build está validada de punta
+a punta hasta la **emisión de la sysimage**, y el tramo que mataba el build en
+`37870492832` —la memoria— quedó **falsificada con medición**: `37876520515` tomó
+186 muestras cada 20 s y el `MemAvailable` **mínimo** fue 8 458 692 kB, y con el
+`vm.max_map_count` del runner elevado de 262 144 a 1 048 576 el build **emitió**
+`usr/lib/julia/sysbase-o.a` (03:46:37Z) y `usr/lib/julia/sys-o.a` (03:50:51Z) sin
+un solo `std::bad_alloc`.  Los 68 avisos `scudo: Can't populate more pages` siguen
+en el log pero ya no matan nada: son **crónicos** (34 en el run que murió por otra
+causa) y hay que leerlos como ruido.
+
+El muro real está ahora más allá, en el **precompile de las stdlibs**
+(`pkgimage.mk:28 stdlib/release.image`, `build rc=2`): el stub *dummy* de upstream
+`stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl` da por
+existente un **runtime GCC** que Termux no tiene, y lo hace en las dos formas que
+duelen —desreferencia `libgfortran_version(HostPlatform()).major`, documentada como
+nullable (`base/binaryplatforms.jl:454`), y hace `dlopen` **sin guarda** de
+`libgcc_s.so.1`/`libstdc++.so.6`/`libgomp.so.1` (líneas 57/61/63).  Síntomas en el
+log: `FieldError: type Nothing has no field major` y 330 líneas de
+`MethodError: no method matching dlpath(::Nothing)` (estas últimas de **mis**
+parches `_jll`, que usaban la centinela equivocada: `dlopen(…; throw_error = false)`
+devuelve `nothing`, no `C_NULL` —`base/libdl.jl:119-125`—).  Quedan por demostrarse
+el resto del precompile, empaquetado y la verificación en dispositivo.
 
 | Pieza | Estado |
 |---|---|
-| Receta declarativa `packages/julia/build.sh` | OK (22 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
+| Receta declarativa `packages/julia/build.sh` | OK (24 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
 | Gates estáticos locales | OK y en el DAG de CI |
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
 | `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
-| Sysimage (`sysimg`/`base/`) | **cargada en CI**: `37870492832` pasó los sonames versionados (0 `could not load library`) y Base + stdlibs se cargaron; aborta al **emitir** `sysbase-o.a` por `std::bad_alloc` dentro de scudo — causa nueva, aún sin clasificar (RAM / mappings / overcommit) |
+| Sysimage (`sysimg`/`base/`) | **emitida en CI**: `37876520515` produce `sysbase-o.a` **y** `sys-o.a`; la memoria quedó descartada como causa |
+| Precompile de stdlibs (`pkgimage.mk:28`) | **muro actual**: `CompilerSupportLibraries_jll` asume runtime GCC; parche + centinela corregidos y validados en el gate local, sin correr en CI todavía |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -110,10 +117,19 @@ Ningún run de CI empieza sin pasar los gates locales, y cada run declara
   que la produce.
 - `packages/julia/soname-aliases.sh` — lee los literales de librería que el propio
   fuente pide al loader (`base/*.jl`, `stdlib/*/src/*.jl`) y veredicta cada nombre
-  contra el prefijo como `native`/`alias`/`built`/`absent`.  Lo consume
-  `termux_link_soname_aliases` en la receta (antes de `make` y tras `install`) y la
-  sección `dlopen'ed versioned sonames` del gate, que cruza los `absent` con la
-  lista REQUIRED de `symlinked-libraries.sh`.
+  contra el prefijo como `native`/`alias`/`built`/`absent`.  El `built` ya no sale
+  de una lista: filtra `deps/*.mk` con la respuesta de
+  `make -C deps --eval='print-deplibs: ; @echo "DEPLIBS=$(DEP_LIBS)"' print-deplibs`
+  sobre el árbol **configurado** (exige `Make.user` y aborta si make no responde),
+  así que un dep apagado por `USE_SYSTEM_*`/`DISABLE_LIBUNWIND` no puede acreditar
+  un nombre.  Lo consume `termux_link_soname_aliases` en la receta (antes de `make`
+  y tras `install`) y la sección `dlopen'ed versioned sonames` del gate, que cruza
+  los `absent` con la lista REQUIRED de `symlinked-libraries.sh`.
+- `scripts/unguarded-dlopen.sh` — para cada nombre que nada responde, busca sus
+  sitios de `dlopen` en los mismos ficheros que lee el helper anterior y veredicta
+  `guarded`/`unguarded`.  Es la pieza que faltaba: un `absent` cargado sin
+  `throw_error = false` aborta el precompile dentro de `make`
+  (`pkgimage.mk:28`, run 37876520515) y el gate lo llamaba `note`.
 - `scripts/runtime-library-dir.sh` — le pide a `make` el **directorio** donde el
   loader va a buscar esos alias: `$(build_shlibdir)` (donde `src/Makefile` enlaza
   `libjulia-internal.so`, el objeto que emite el `dlopen`) y `$(private_libdir)`
@@ -163,21 +179,42 @@ respuesta con los destinos de la receta (rojo→verde: `FAIL nothing links the
 aliases into usr/lib (the build tree)` → `OK the aliases for the build tree go to
 usr/lib, the directory make names`).
 
-**Hipótesis del próximo run** — el abort de `sysbase-o.a` es un muro de memoria del
-runner, y la red propuesta es a la vez el medidor: swap comprimido
-(`.github/actions/zram`) + `vm.max_map_count=1048576` + el watchdog de 20 s.  Las
-tres candidatas (pico de RSS, agotamiento de VMAs, overcommit) se discriminan con
-ese log, no con suposición: si `SwapTotal` crece y `MemAvailable` cae a ~0, era
-RAM; si `vmas` del `julia` se acerca a 65 536 mientras queda memoria, eran los
-mappings; si `Committed_AS` pasa de `CommitLimit`, es la política de overcommit.
-Si el run sobrevive, lo que queda por medir sigue siendo el mismo tramo: `sys-o.a`
-(`sysimage.mk:109-125` ejecutando `contrib/generate_precompile.jl` con
-`--cpu-target=native` y precompile paralelo), `pkgimage.mk` y `make install`.
-Como `packages/**` y `.github/**` cambian, la clave de caché no hit y el run vuelve
-a pagar la compilación completa (~45-50 min).
+**Hipótesis del run cerrado (37876520515, 2026-10-09 02:52 → 03:56 UTC, ~62 min)**
+— «el abort de `sysbase-o.a` es un muro de memoria del runner»: **FALSIFICADA**, y
+por el instrumento que se añadió para medirla.  Con `vm.max_map_count` en 1 048 576 y
+186 muestras del watchdog, el peor `MemAvailable` del run fue **8 458 692 kB** (≈8 GB
+libres de los 15 947 del runner), no hubo `St9bad_alloc` ni `signal 6`, y el build
+llegó a emitir **`sysbase-o.a` y `sys-o.a`**.  Las tres candidatas (pico de RSS, VMAs,
+overcommit) quedan descartadas como *causa del abort*: los 68 avisos `scudo` siguen
+ahí, pero cruzados con el run anterior (34 avisos muriendo por otra causa) son ruido
+crónico de LLVM, no el fallo.  El zram, además, **no** aportó swap: `modprobe zram`
+respondió `Exec format error` y el job siguió con el `/swapfile` de 3 G.  Lo que sí
+mató el run es el siguiente tramo, y no era memoria: `pkgimage.mk:28 stdlib/release.image`
+con `FieldError: type Nothing has no field major` dentro del precompile de
+`CompilerSupportLibraries_jll`.
 
-Riesgo residual declarado: después de `sysimage.mk:129` vienen `julia-sysimg-*`,
-el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que todavía no corrió en
+**Hipótesis del próximo run** — el muro es que **el stub de `CompilerSupportLibraries_jll`
+da por existente un runtime GCC**: con el parche que lo hace opcional (`libgfortran`
+queda `""` si `libgfortran_version()` responde `nothing`, y los cuatro `dlopen` se
+vuelven tolerantes vía `load_runtime_library`) y con la centinela `nothing` corregida
+en los otros dos `_jll`, `pkgimage.mk` precompila esa stdlib y el precompile de las
+stdlibs avanza.  Es **una** hipótesis y medible en dos sentidos: si el run llega más
+lejos, el tramo nuevo queda abierto; si vuelve a caer en `pkgimage.mk:28`, el `LoadError`
+dirá qué stdlib sigue pidiendo algo que Android no tiene.  Riesgo declarado: los
+nombres que el stub arma por interpolación (`libgfortran.so.<major>`) no los ve
+ningún gate porque no son literales —los descarta el mismo parche—, y `dSFMT_jll`
+carga sin guarda pero su nombre sí lo produce `deps` en `$(build_shlibdir)`
+(`deps/dsfmt.mk:32,45,51`, y `dsfmt` está en el `$(DEP_LIBS)` que contesta make), así
+que no es el muro.  `LibUnwind_jll` **sí** lo era: la derivación filtrada por
+`$(DEP_LIBS)` lo deja `absent` y `scripts/unguarded-dlopen.sh` lo marcó
+`unguarded …LibUnwind_jll.jl:25`, así que el parche de guarda entró en el mismo run
+(una hipótesis, dos sitios de la misma clase: `dlopen` sin guarda de un nombre que
+nada responde).  Como `packages/**` y
+`.github/**` cambian, la clave de caché no hit y el run vuelve a pagar la compilación
+completa (~45-50 min hasta LLVM, ~62 min hasta el tramo nuevo).
+
+Riesgo residual declarado: después de `pkgimage.mk:28` vienen el resto de
+`julia-sysimg-*`, `make install` y el empaquetado, territorio que todavía no corrió en
 Android; si el run cae ahí, la nueva línea de `make` y el `LoadError` dicen desde
 dónde ampliar el gate.
 
@@ -213,6 +250,8 @@ convirtió en gate local cuando era reproducible fuera del runner.
 | 37862103015 | 23:55→00:49 (~54 min) | **hipótesis de los sonames FALSIFICADA**: la tabla del helper se imprimió completa con los 8 `aliased` (línea 350, 23:59:48.5715505Z) y no hay ni un `ln: failed` entre las 12 128 líneas del log, así que los enlaces existieron durante todo el build; y aun así el bootstrap aborta idéntico — `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))` (línea 12121, 00:49:48.7302374Z) → `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, `build rc=2`. Marcadores: `could not load library`=1, `sysbase-o.a`=2, `sys-o.a`=0, `generate_precompile`=0, `Killed`=0 | el fichero no faltaba: **estaba donde el loader no mira**. El `dlopen` de un nombre sin barra lo emite `src/dlload.c:376`, dentro de `libjulia-internal.so`, y esa librería se enlaza en `$(build_shlibdir)` = `usr/lib` (`src/Makefile:417`; `Make.inc:729,328,320`) con `RPATH_LIB := RPATH_ORIGIN = -Wl,-rpath,'$ORIGIN'` (`Make.inc:1475,1472`): su conjunto de búsqueda es **su propio directorio** y nada más. `usr/lib/julia` —donde `julia-base` deja sus symlinks sin versión y donde la receta puso los alias— no figura en ese RUNPATH, y en todo el log no aparece un solo `LD_LIBRARY_PATH`, así que tampoco entró por la variable de entorno. Nota de capa: `base/gmp.jl:35` no usa `Libdl.dlopen`, usa `cglobal` a nivel top-level, que es exactamente la ruta de `jl_load_library` | Reproducido y discriminado en el teléfono con el mismo layout (`$PREFIX/tmp/ororigin-probe`: una librería en `usr/lib` con `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`): alias en `usr/lib/julia` → `dlopen failed: library "libgmp.so.10" not found`, el mismo mensaje que CI; el mismo alias en `usr/lib` → resuelto. Fix: el call site del árbol de build pasa a `usr/lib`. El instalado se queda en `$PREFIX/lib/julia` porque `make install` **mueve** `libjulia-internal` ahí y le reescribe el RUNPATH a `$ORIGIN:$ORIGIN/../` (`Makefile:468-481`) — el mismo dato confirma que la aserción `lib/julia/libblastrampoline.so.5` es correcta, porque `Makefile:223` la clasifica de librería privada con `USE_SYSTEM_LIBBLASTRAMPOLINE := 0`. Para que un directorio escrito a mano no vuelva a costar un run: `scripts/runtime-library-dir.sh` le pregunta a make `$(build_shlibdir)`, `$(private_libdir)`, `$(RPATH_LIB)` y `$(reverse_private_libdir_rel)` (rechaza el resultado si `RPATH_LIB` ya no menciona `$ORIGIN`) y la sección `dlopen'ed versioned sonames` del gate exige que los destinos de `termux_link_soname_aliases` sean exactamente esa respuesta |
 
 | 37870492832 | 01:35→02:34 (~59 min) | **hipótesis del directorio CONFIRMADA**: `could not load library` aparece **0 veces** en 13 394 líneas, el bootstrap llega hasta el final de la carga —`Stdlibs total ─ 14.479918 seconds`, `Total ─ 54.337887 seconds` (líneas 13267-13271, 02:33:40Z), `Allocations: 338327679 (Pool: 338324218; Big: 3461); GC: 68`— y aborta un paso más allá, al **emitir** el fichero: 49× `scudo: Can't populate more pages for size class N` (primera línea 3163 a 01:45:11Z, última 13300 a 02:33:40Z), 2× `libc++abi: terminating due to uncaught exception of type St9bad_alloc: std::bad_alloc` (13302-13303), `[23944] signal 6 (-1): Aborted` (13305) → `sysimage.mk:129: …/usr/lib/julia/sysbase-o.a Error 1`, `Makefile:114: julia-sysimg-release Error 2`, `build rc=2`. El OOM-killer **no** intervino: el único `Killed` del log (13333) es el patrón `grep` que el paso *Where the time went* se imprime a sí mismo | causa abierta, y no es "falta de RAM en reposo": a 01:39:32Z el action reportó `Mem: 15947 total / 12528 free / 14621 available` y `Swap: 3071 0 3071` (líneas 706-707). Tampoco es un síntoma del tramo final: los avisos scudo son **crónicos** —34 en 37862103015, que murió por otra causa— y aquí se agrupan en 01:45-01:46 (33 avisos, LLVM compilando con `-j4`) y 02:33 (16, el abort). Tres candidatas sin discriminar: pico real de RSS (4 × `cc1plus`/`as` + el `julia` del precompile sobre 15,9 GB), agotamiento de VMAs (scudo fragmenta su arena en muchos mappings y el límite del runner aún no está medido —`/proc/sys/vm/max_map_count` no es legible en el teléfono, así que lo imprime el propio run—), o `overcommit_memory=2`/heurística que rechaza el `mmap` grande haciendo que `malloc` devuelva NULL → `operator new` lance → `abort()`. El log no permite elegirlas porque **no contiene ninguna medición durante el build** | Este run no cierra una causa: **instrumenta**. El job build recibe red y medidor a la vez — `.github/actions/zram` (swap comprimido) y `sudo sysctl -w vm.max_map_count=1048576`, ambos con `continue-on-error` porque son mejora, no requisito; un watchdog que cada 20 s anota `MemAvailable/Committed_AS/CommitLimit/SwapTotal/Writeback`, los 3 procesos de mayor RSS y los `vmas`+`VmRSS` de cada `julia`; y un paso `if: always()` que reporta nº de muestras, mínimo de `MemAvailable`, el `vm.max_map_count` y `ulimit -v` vigentes y el `dmesg` filtrado por `oom|mmap|vmalloc`. La hipótesis declarada del próximo run es la memoria, y su salida debe **clasificarla**, no solo sobrevivir a ella |
+
+| 37876520515 | 02:52→03:56 (~62 min de build: 02:54:51→03:56:49Z) | **la hipótesis de la memoria queda FALSIFICADA por el propio instrumento**: el watchdog tomó 186 muestras y el `MemAvailable` **mínimo** fue 8 458 692 kB (líneas 22129-22130), `vm.max_map_count` pasó de 262 144 a 1 048 576 (3816-3818) y aun así el build **emitió** los dos objetos —`JULIA usr/lib/julia/sysbase-o.a` (16389, 03:46:37Z) y `JULIA usr/lib/julia/sys-o.a` (16608, 03:50:51Z)—.  Los `scudo: Can't populate more pages` siguen (68) pero con **cero** `St9bad_alloc` y cero `signal 6`.  El run muere un tramo más allá: `Failed to precompile CompilerSupportLibraries_jll [e66e0078-…]` (21999, 22047) con `ERROR: LoadError: FieldError: type Nothing has no field major` (22042, 22090) → `pkgimage.mk:28: stdlib/release.image Error 1` (22093), `Makefile:120: stdlibs-cache-release Error 2`, `build rc=2` (22095) | el stub *dummy* de upstream `stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl` **da por existente un runtime GCC que Termux no tiene**: `libgfortran_version(HostPlatform()).major` (`base/binaryplatforms.jl:454` es `VNorNothing(tags(p), …)` y está documentada como nullable) desreferencia `nothing` porque el triple ya no lleva la etiqueta, y `__init__` hace `dlopen` **sin guarda** de `libgcc_s.so.1` (57), `libstdc++.so.6` (61) y `libgomp.so.1` (63).  Medido en el teléfono: `$PREFIX/lib` no tiene `libgfortran*`, `libgcc_s*`, `libstdc++*`, `libgomp*`, `libssp*` y `pacman -Qo` responde `No package owns`.  La capa que *debería* producirlos es `deps/csl.mk:49-101`, que las copia de `$(FC) -print-search-dirs` con `[ -n "$SRC_LIB" ] && cp`: con `clang` como `FC` esa copia es un no-op **silencioso**.  Segundo defecto, este propio: 330 líneas de `MethodError: no method matching dlpath(::Nothing)` vienen de **mis** parches `_jll`, que comprobaron `handle === C_NULL` cuando `dlopen(…; throw_error = false)` devuelve `nothing` (`base/libdl.jl:119-125`; `C_NULL` es `dlopen_e`, línea 160) | Parche nuevo `packages/julia/stdlib-CompilerSupportLibraries_jll.jl.patch`: el nombre queda `""` si la versión es `nothing`, un helper `load_runtime_library` convierte la centinela `nothing` → `C_NULL`, envuelve `dlpath` en `try` y deja `LIBPATH` en `dirname(Sys.BINDIR)/lib` si nada cargó.  Centinela corregida a `nothing` en `stdlib-libblastrampoline_jll.jl.patch` y `stdlib-OpenBLAS_jll.jl.patch`.  **Brecha de gate cerrada** (es lo que permitió que esto costara un run): `scripts/unguarded-dlopen.sh` lee los *call sites* de cada nombre `absent` —dos saltos: `dlopen(ident)` y `helper(ident)`, y al helper lo juzgan sus propios `dlopen`— y `rehearse-recipe.sh` vuelve **FAIL** todo `absent` cargado sin guarda, lo exija `julia-base` o no; `soname-aliases.sh` ya no mantiene la lista a mano de `built` sino que la deriva de `deps/*.mk` (`libX.$(SHLIB_EXT)` y el paquete `$(SRCCACHE)/libX-*`), así que `libdSFMT.so`/`libunwind.so.8` pasan a `built` y no son falsos positivos.  **(Corrección del mismo día: la derivación sin más era generosa —acreditaba todo lo que un `deps/*.mk` menciona, incluidas las deps apagadas— y con ella `libunwind.so.8` pasaba a `built`, tapando un muro real.  Filtrada por `$(DEP_LIBS)` de make, `libdSFMT.so` sigue `built` y `libunwind.so.8` vuelve a `absent`, donde el cruce con `unguarded-dlopen.sh` lo nombra; ver el bullet de `Tramo siguiente`.)**  Rojo→verde en el teléfono: sin el parche `GATE: FAIL` rc=5 con tres FAIL nombrando las líneas 57/61/63; con él rc=0, los cuatro `guarded` (dos `via load_runtime_library()`) y `patches_applied=23`.  Dos notas honestas: el zram **no** tuvo efecto (`modprobe zram` → `Exec format error`, 3798, rc=1 tolerado; el swap siguió siendo el `/swapfile` de 3 G del runner) y el paso `Report what stopped the build` se cayó a sí mismo (rc=1: `grep -h '^julia pid='` sin coincidencias bajo el `-e` del runner —el medidor nunca vio un proceso `julia`—), ya corregido con `|| true` y respuesta explícita |
 
 Hallazgo estático que no costó un run (medido antes de pushear, 2026-10-09
 ~03:10 UTC): el parche `_jll` de libblastrampoline pedía la librería **solo** en
@@ -268,41 +307,45 @@ pida `dlopen` del linker del runner.
   terminó con éxito: el límite de tasa anónimo de `api.github.com` no es un
   bloqueo observado.
 
-- **`left absent  libdSFMT.so` en la tabla del helper no es un riesgo: es su
-  límite.** `soname-aliases.sh` decide `built` con una lista a mano
-  (`built_by_us="libblastrampoline libLLVM"`), así que todo lo que el build
-  produce pero **sin versión en el nombre** cae en `absent` aunque vaya a existir
-  en el árbol.  Medido sobre el tarball pineado: `deps/dsfmt.mk:45` copia
-  `libdSFMT.$(SHLIB_EXT)` a `$(build_shlibdir)` y `Make.inc:45` fija
-  `USE_SYSTEM_DSFMT:=0` (no es un flag de la receta), o sea `usr/lib/libdSFMT.so`
-  existe durante el precompile y `stdlib/dSFMT_jll/src/dSFMT_jll.jl:29` lo
-  `dlopen` (con throw por defecto), encontrándolo por el `RUNPATH`
-  `$ORIGIN:$ORIGIN/..` de `libjulia-internal.so`.  La derivación que reemplaza la lista son las líneas
-  `$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT) $(build_shlibdir)/…` de `deps/*.mk`,
-  verificadas contra el `USE_SYSTEM_*` efectivo.  **No se toca ahora**: es
-  comentario sobre el artefacto de caché (`hashFiles('packages/julia/**')`) y
-  pagar ~49 min por un veredicto que hoy no cambia ningún enlace sería comprar
-  ruido con runs.  Queda como primer cambio a plegar en el próximo fix real.
+- **La derivación de `built` pregunta a make desde 2026-10-08 ~22:40 UTC.**  La
+  lista a mano que decidía `built` (`built_by_us="libblastrampoline libLLVM"`) ya no
+  existe: `soname-aliases.sh` lee dos grafías de `deps/*.mk`
+  (`libNAME.$(SHLIB_EXT)` en una regla, `$(SRCCACHE)/NAME-$(VER)` para un dep cuyo
+  install es el `make install` de upstream) y descarta el fichero entero cuando su
+  `stem` es un dep que `$(DEP_LIBS)` no incluye.  Medido sobre el árbol configurado:
+  `DEPLIBS=JuliaSyntax blastrampoline libuv dsfmt llvm utf8proc terminfo libwhich`,
+  y la tabla del gate lista 22 `dep off` (entre ellos `csl` y `unwind`) y
+  `built names = libblastrampoline libdsfmt libuv`.  Efecto sobre los veredictos:
+  `libdSFMT.so` pasó de `absent` a `built here` — confirmando lo que esa nota
+  describía como límite del helper — y `libunwind.so.8` pasó de `built here` a
+  `absent`, que es el punto del bullet siguiente.  Boundary que queda: un nombre que
+  un dep recibe de un tarball con paquete de nombre distinto sigue cayendo en
+  `absent`; lo decide el cruce con `scripts/unguarded-dlopen.sh`.
 
-- **`libunwind.so.8` sí es ausencia real, y hoy no la pide nadie.** Mismo nombre
-  `left absent` en la tabla del helper, clase distinta: `deps/Makefile:61` solo
-  añade `unwind` a `DEPS_LIBS` si `DISABLE_LIBUNWIND` es `0`, y la receta lo fija
-  en `1` (`packages/julia/build.sh:126`, "aarch64 uses Julia's own assembly task
-  switching"), así que el `.so` **no se produce tampoco en el árbol** (a diferencia
-  de `libdSFMT.so`, que `deps/dsfmt.mk:45` sí instala en `usr/lib`).  El demandante
-  es `stdlib/LibUnwind_jll/src/LibUnwind_jll.jl:20` (el literal) y su `dlopen` con
-  throw en `__init__` (`:21-25`), guardado por
-  `@static if Sys.islinux() || Sys.isfreebsd()`: se compila **dentro** si
-  `Sys.islinux()` es cierto en Android, que es lo esperable porque `Sys.KERNEL`
-  sale de `uname` y Android reporta `Linux` — medido todavía no.  Buscado en todo el árbol
-  (`*.toml`, `*.jl`, `Makefile`, `*.mk`),
-  ningún otro stdlib ni `base/` depende de ese módulo — solo aparece en
-  `stdlib/Project.toml:25` y `stdlib/stdlib.mk:10`, que lo **instalan** pero no lo
-  cargan.  `__init__` corre al cargar, y evaluar/precompilar un módulo no lo
-  ejecuta, así que tampoco es bloqueo demostrado.  Condición para que lo sea: un
-  `LoadError("…libunwind.so.8…")` en el log.  El fix entonces es `DISABLE_LIBUNWIND := 0`
-  (dejar que `deps/unwind.mk` lo compile, cuyo SONAME de GNU ya lleva el `.8`),
-  **no** un alias hacia nada: en bionic no existe un `libunwind.so` al que apuntar.
+- **`libunwind.so.8` era un muro que el gate tapaba; ahora lo nombra y está
+  guardado.**  Con la derivación corregida el nombre cae en `absent` y el cruce marca
+  `unguarded libunwind.so.8 stdlib/LibUnwind_jll/src/LibUnwind_jll.jl:25` — el
+  `dlopen(libunwind)` sin `throw_error`, dentro de
+  `@static if Sys.islinux() || Sys.isfreebsd()`, rama que se compila aquí porque el
+  triplet que empotramos es `aarch64-linux-gnu…`.  El fix es la guarda en la capa
+  productora: `packages/julia/stdlib-LibUnwind_jll.jl.patch`
+  (`dlopen(…; throw_error = false)` + `return` si responde `nothing`, dejando
+  `libunwind_handle`/`libunwind_path` en los defaults que el propio stub declara).
+  Descartado el `DISABLE_LIBUNWIND := 0` que proponía la nota anterior: compilar
+  libunwind para bionic es un cambio de alcance mayor, la receta lo apaga a
+  propósito porque aarch64 usa el cambio de pila propio de Julia
+  (`build.sh:124-126`), y nada depende del módulo — medido: `LibUnwind` solo aparece
+  en su propio `Project.toml`, en `stdlib/Project.toml:25` y `stdlib/stdlib.mk:10`,
+  que lo instalan pero no lo cargan.  Corrección a lo afirmado sobre
+  `LLVMLibUnwind_jll`: su `dlopen` está bajo `@static if Sys.isapple()` (`:24`), así
+  que en Linux nunca corre y **no** es muro; su literal `"libunwind"` además no
+  lleva extensión y cae fuera de la derivación (boundary declarado en
+  `soname-aliases.sh:15-19`).  Rojo→verde demostrado en el gate: sin el parche
+  `patches_applied=23 … sonames=1` con
+  `FAIL  libunwind.so.8 is loaded without a guard at stdlib/LibUnwind_jll/src/LibUnwind_jll.jl:25`
+  y `GATE: FAIL` (`rehearse-unwind-red.log`); con él `patches_applied=24`,
+  `sonames=0`, `guarded libunwind.so.8 …:31` y `GATE: PASS`
+  (`rehearse-unwind.log`, 2026-10-08 ~22:55 UTC).
 
 - **Los 8 `alias` se crean ahora antes de `make`, y en el directorio que lee el
   loader.** El tramo que sigue a `sysbase-o.a` tampoco está medido en Android:
@@ -399,19 +442,27 @@ lejo, los 8 alias se crearon y aun así `sysbase-o.a` muere con el mismo
 directorio —`usr/lib`, el `$ORIGIN` de `libjulia-internal.so` —, medida en el
 teléfono) → `~59 min` (37870492832: el directorio correcto cierra la cadena —0
 `could not load library`, Base + stdlibs cargadas— y por primera vez el fallo **no
-es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`).  El tramo
-`sys-o.a` + precompile + `make install` + empaquetado sigue sin medir.
+es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`) → `~62 min`
+(37876520515: con `max_map_count` alzado y el watchdog midiendo, **los dos objetos
+salen** —`sysbase-o.a` 03:46:37Z, `sys-o.a` 03:50:51Z— y el muro se movió al
+precompile de stdlibs: `pkgimage.mk:28` aborta en
+`FieldError: type Nothing has no field major`, o sea el runtime GCC que Termux no
+tiene; la memoria queda **falsificada** como causa).  El tramo `make install` +
+empaquetado sigue sin medir.
 
 ---
 
 ## Pendientes
 
 1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  El run
-   `37870492832` (`c5a575e`, 2026-10-09 01:35 UTC) cerró la hipótesis del
-   directorio; el siguiente mide la de memoria con `zram` + `vm.max_map_count` +
-   watchdog, cuyo resultado debe **clasificar** la causa (RAM / mappings /
-   overcommit), no solo sobrevivir a ella.  Mientras no exista artefacto, `bundle`
-   y `publish` siguen `skipped`.
+   `37870492832` cerró la hipótesis del directorio y `37876520515` falsificó la de
+   memoria: `sysbase-o.a` y `sys-o.a` se emiten y el muro quedó en el precompile de
+   stdlibs.  El próximo run mide **una** hipótesis: que con los dos stubs que
+   cargan librerías inexistentes declarados opcionales
+   (`stdlib-CompilerSupportLibraries_jll.jl.patch`,
+   `stdlib-LibUnwind_jll.jl.patch`), `pkgimage.mk` pasa de
+   `CompilerSupportLibraries_jll` y el precompile avanza.  Mientras no exista
+   artefacto, `bundle` y `publish` siguen `skipped`.
 2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
    correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
    Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
@@ -420,13 +471,15 @@ es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`).  El tramo
    afirma contra sus propios `assert`s, no contra "el otro julia sí anda".
    Antes de fiarse de una comparación, abrir la causa raíz de ese arranque roto
    (es el paquete de Termux, no esta receta).
-3. **Plegar la derivación de `built`**: `packages/julia/soname-aliases.sh` decide
-   `built` con la lista a mano `built_by_us="libblastrampoline libLLVM"`.  La
-   derivación que la reemplaza está nombrada arriba (`$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT)
-   $(build_shlibdir)/…` en `deps/*.mk`, cruzado con el `USE_SYSTEM_*` efectivo).
-   **No se toca mientras haya un run en curso**: vive en `packages/**`, así que
-   invalida la clave de caché y costaría ~50 min por un veredicto que hoy no
-   cambia ningún enlace.
+3. **Foldar el resto de la derivación de `built`**: la lista a mano
+   `built_by_us="libblastrampoline libLLVM"` ya no existe (plegada 2026-10-08, ver
+   el bullet de `Tramo siguiente`).  Lo que queda es la boundary declarada: un dep
+   cuyo `.so` llega de un tarball con nombre de paquete distinto al soname
+   (`$(SRCCACHE)/otra-cosa-$(VER)` instalando `libX.so.N`) sigue cayendo en `absent`.
+   Hoy eso es inocuo porque el gate no pregunta "existe?" sino "alguien lo carga sin
+   guarda?", y esa pregunta la responde `scripts/unguarded-dlopen.sh` sobre los
+   mismos ficheros.  Si un `absent` real bloquea un run, la derivación se aprieta
+   contra `$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT) $(build_shlibdir)/…`.
 4. **Fase 2 (opcional)**: `packages/llvm-julia` solo si el LLVM bundled resulta
    no cacheable.
 5. **Limpieza**: restos de sesiones en `$PREFIX/tmp` (`gate*.txt`,
@@ -437,13 +490,19 @@ es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`).  El tramo
    `gate-red.7807` (~230 MB).  Quedan a propósito: `julia-rehearse-cache` (17 MB,
    es la caché del gate), `julia-run-u4kkcj` (el log con el que se compara este
    run) y `ororigin-probe` (la reproducción citada en `ARCHITECTURE.md` §3.7).
-   Los `jpre.*`/`jdiag.*` de las mediciones de esta tarde se borran al cerrar
-   Fase 5.
+   Añadido 2026-10-08 ~23:00 UTC, todo esto se borra al cerrar Fase 5:
+   `jwork` (52 MB, árbol pristino del que se generan los parches), `green-csl`,
+   `csl-check2`, `lu-patch-*`, `lu-apply-*`, `julia-rehearse.1xLPzx`,
+   `julia-rehearse.H2UWEw` y los logs `rehearse-{green,red,unwind,unwind-red}.log`,
+   `verdicts-*.txt`, `absent-new.txt`, `parse-out.txt`, `lu-workdir.txt`.
 6. **Restos de la ruta Docker** (`scripts/Dockerfile`, `run-docker.sh`,
    `build-deps-docker.sh`, `setup-ccache-docker.sh`, `build-local.sh`,
-   `ndk-patches/`, `trace-dl/`, `tasks/`, `.github/actions/zram/`): están
+   `ndk-patches/`, `trace-dl/`, `tasks/`, `.hermes/`, `build.log` suelto): están
    declarados como ruta muerta en `README.md`, pero borrarlos es destructivo y
-   necesita OK explícito del usuario.
+   necesita OK explícito del usuario.  `.github/actions/zram/` **no** belonge a
+   esta lista: está conectado al job `build` con `continue-on-error`, y aunque en
+   37876520515 no tuvo efecto (`modprobe zram` → `Exec format error`), deja la
+   medición de swap en el log.
 
 ---
 
