@@ -1,1188 +1,884 @@
-# ARCHITECTURE.md — Diseño Técnico Detallado
+# ARCHITECTURE.md — por qué el build de Julia para Termux es así
 
-> **ADVERTENCIA (2026-10-08)**: el "sistema de cross-compilación" que este
-> documento describe (Paso 5 *Host flisp Bootstrap*, Paso 6
-> *Cross-Compilación Principal*, `XC_HOST`, NDK) fue **abandonado**: compilaba
-> LLVM 60–76 minutos para morir en `llvm-min-tblgen: Exec format error`. El
-> build vigente es **modo on-device de termux-packages sobre un runner arm64**
-> (host == target, clang de Termux, LLVM bundled). La secuencia de pasos, el
-> papel de Make.inc/Make.user y el flujo `USE_SYSTEM_*` siguen siendo la mejor
-> referencia del árbol; el estado real, con evidencia, está en `PROGRESS.md`.
-
-> **Propósito**: Documentar la arquitectura completa del build system de Julia para Termux, incluyendo el pipeline de compilación, el sistema de cross-compilación, la gestión de dependencias, y las decisiones de diseño detrás de cada componente.
-
----
-
-## Tabla de Contenidos
-
-- [Visión General del Sistema](#visin-general-del-sistema)
-  - [¿Qué es termux-packages?](#qu-es-termux-packages)
-  - [Cómo encaja julia-termux](#cmo-encaja-julia-termux)
-- [Pipeline de Build (10 Pasos)](#pipeline-de-build-10-pasos)
-  - [Paso 1: Setup del Entorno](#paso-1-setup-del-entorno)
-  - [Paso 2: Instalación de Dependencias](#paso-2-instalacin-de-dependencias)
-  - [Paso 3: Preconfiguración y Parches](#paso-3-preconfiguracin-y-parches)
-  - [Paso 4: Generación de Make.user](#paso-4-generacin-de-makeuser)
-  - [Paso 5: Host flisp Bootstrap](#paso-5-host-flisp-bootstrap)
-  - [Paso 6: Cross-Compilación Principal](#paso-6-cross-compilacin-principal)
-  - [Paso 7: Instalación](#paso-7-instalacin)
-  - [Paso 8: Empaquetado](#paso-8-empaquetado)
-  - [Paso 9: Publicación en Release](#paso-9-publicacin-en-release)
-  - [Paso 10: Verificación](#paso-10-verificacin)
-- [Cross-Compilación con XC_HOST](#cross-compilacin-con-xc_host)
-  - [¿Qué es XC_HOST?](#qu-es-xc_host)
-  - [El NDK de Android y el Target Triple](#el-ndk-de-android-y-el-target-triple)
-  - [Flujo de Cross-Compilación en Julia](#flujo-de-cross-compilacin-en-julia)
-  - [Herramientas Cross vs Host](#herramientas-cross-vs-host)
-- [Estrategia de Bootstrapping](#estrategia-de-bootstrapping)
-  - [Fases del Bootstrapping de Julia](#fases-del-bootstrapping-de-julia)
-  - [Por qué no usar BinaryBuilder](#por-qu-no-usar-binarybuilder)
-- [Make.user: Guía de Referencia Completa](#makeuser-gua-de-referencia-completa)
-  - [Flags de Cross-Compilación](#flags-de-cross-compilacin)
-  - [Flags USE_SYSTEM_*](#flags-use_system_)
-  - [Flags de Optimización](#flags-de-optimizacin)
-  - [Flags de Instalación](#flags-de-instalacin)
-  - [Flags de Debug](#flags-de-debug)
-- [Gestión de Dependencias](#gestin-de-dependencias)
-  - [Árbol de Dependencias](#rbol-de-dependencias)
-  - [Resolución de Dependencias en Tiempo de Compilación](#resolucin-de-dependencias-en-tiempo-de-compilacin)
-  - [Resolución de Dependencias en Tiempo de Ejecución](#resolucin-de-dependencias-en-tiempo-de-ejecucin)
-- [Sistema de Parches](#sistema-de-parches)
-  - [Arquitectura de los Parches](#arquitectura-de-los-parches)
-  - [Catálogo Completo de Parches](#catlogo-completo-de-parches)
-  - [Matriz de Compatibilidad bionic](#matriz-de-compatibilidad-bionic)
-- [CI/CD Pipeline](#cicd-pipeline)
-  - [Workflow build-package.yml](#workflow-build-packageyml)
-  - [Zram Action](#zram-action)
-- [Troubleshooting Avanzado](#troubleshooting-avanzado)
-  - [Anatomía de un Fallo de Build](#anatoma-de-un-fallo-de-build)
-  - [Cómo Depurar el Build Localmente](#cmo-depurar-el-build-localmente)
-  - [Cómo Depurar en CI/CD](#cmo-depurar-en-cicd)
-- [Decisiones de Diseño (ADRs)](#decisiones-de-diseo-adrs)
-
----
-
-## Visión General del Sistema
-
-### ¿Qué es termux-packages?
-
-[termux-packages](https://github.com/termux/termux-packages) es el sistema de empaquetado oficial de Termux. Proporciona:
-
-- Un **build system** basado en Bash con hooks estandarizados (`termux_step_*`)
-- **Cross-compilación** via Android NDK para aarch64, arm, i686, x86_64
-- **Empaquetado** en formato `.deb` (dpkg) y `.pkg.tar.*` (pacman)
-- Un **entorno Docker** (`ghcr.io/termux/package-builder`) con NDK, SDK, y toolchain
-
-**Hooks principales** (se ejecutan en orden):
-
-| Hook | Propósito |
-|------|-----------|
-| `termux_step_pre_configure()` | Parches, configuración, generación de Makefiles |
-| `termux_step_configure()` | `./configure` o `cmake` |
-| `termux_step_make()` | Compilación principal |
-| `termux_step_make_install()` | Instalación en `$TERMUX_PREFIX` |
-| `termux_step_post_make_install()` | Post-procesamiento |
-
-### Cómo encaja julia-termux
-
-julia-termux NO es un fork de termux-packages. Es un **paquete independiente** que sigue las convenciones de termux-packages:
-
-```
-julia-termux/
-└── packages/
-    └── julia/
-        └── build.sh    ← Sigue la API de termux-packages
-```
-
-Esto significa que:
-- Se puede construir con `./build-package.sh julia` (el script estándar de termux-packages)
-- Usa los hooks `termux_step_*` que termux-packages invoca
-- Se beneficia del NDK, toolchain y entorno Docker de termux-packages
-- PERO se ejecuta fuera del repositorio oficial de termux-packages (fork independiente)
-
----
-
-## Pipeline de Build (10 Pasos)
-
-### Paso 1: Setup del Entorno
-
-**Archivo**: `.github/workflows/build-package.yml` (líneas 25-56)
-
-```yaml
-- uses: actions/checkout@v4
-- name: Enable zram (16GB)
-  uses: ./.github/actions/zram
-- name: Restore build cache
-  uses: actions/cache@v4
-```
-
-**¿Qué ocurre?**:
-1. Se clona el repositorio en el runner
-2. Se activa zram (swap comprimido en RAM) para evitar OOM
-3. Se restaura la caché de `~/.termux-build` del CI (contiene dependencias ya descargadas y compiladas parcialmente)
-4. Se configura `ldconfig` para incluir el prefijo de Termux
-
-**Variables de entorno**:
-- `TERMUX_DOCKER_RUN_EXTRA_ARGS=--volume /home/runner/.termux-build:/home/builder/.termux-build`
-  - Monta la caché del runner dentro del contenedor Docker
-  - Permite que builds consecutivos reutilicen dependencias ya compiladas
-
----
-
-### Paso 2: Instalación de Dependencias
-
-**Archivos**: `.github/workflows/build-package.yml` (líneas 63-66) + `scripts/install-deps.sh`
-
-```bash
-# En CI/CD:
-./scripts/run-docker.sh bash ./scripts/install-deps.sh
-```
-
-`install-deps.sh` hace lo siguiente:
-
-1. Descarga el keyring de Termux (`termux-main.deb`)
-2. Para cada dependencia en `DEPS[]`:
-   - Busca en el pool de paquetes de Termux (`packages-cf.termux.dev`)
-   - Prueba variantes de arquitectura: `aarch64`, `arm64`, `all`, `any`
-   - Extrae el `.deb` en `$TERMUX_PREFIX` (`/data/data/com.termux/files/usr`)
-
-**Dependencias instaladas**:
-
-| Categoría | Paquetes |
-|-----------|----------|
-| LLVM | `libllvm`, `libllvm-static` |
-| BLAS | `libopenblas`, `blas-openblas` |
-| Matemáticas | `suitesparse`, `arpack-ng`, `libgmp`, `libmpfr` |
-| Red | `libssh2`, `libgit2`, `curl`, `libnghttp2` |
-| Compresión | `zlib`, `p7zip` |
-| Cripto | `openssl` |
-| Regex | `pcre2`, `utf8proc` |
-| Utilidades | `patchelf`, `lld`, `libuv` |
-| Android | `libandroid-support` |
-
-> **⚠️ Nota**: `libuv` se instala como dependencia del sistema pero Julia lo ignora (`USE_SYSTEM_LIBUV=0`) porque usa su propio fork. La instalación es para satisfacer dependencias de otros paquetes.
-
----
-
-### Paso 3: Preconfiguración y Parches
-
-**Archivo**: `packages/julia/build.sh` (líneas 16-176)
-
-Este es el paso más complejo. `termux_step_pre_configure()` ejecuta ~30 operaciones `sed` para adaptar Julia a Android/bionic.
-
-**Orden de ejecución**:
-
-```
-1. LMDB:  remove MDB_USE_ROBUST          (línea 18)
-2. libuv: add --host/--build             (línea 21)
-3. libuv: pthread_setcancelstate patch  (línea 24)
-4. F1:    remove -lpthread               (líneas 27-29)
-5. F2:    remove -lrt                    (línea 32)
-6. F3:    remove -latomic                (línea 35)
-7. F4:    remove -static-libstdc++       (línea 38)
-8. F6:    disable ifunc                  (línea 41)
-9. F5:    remove libc_nonshared.a        (líneas 44-45)
-10. F7:   LLVM→Julia symver             (línea 48)
-11. F8:   fix CROSS_COMPILE override     (líneas 51-52)
-12. F9:   BUILDING_HOST_TOOLS guard      (líneas 53-57)
-13. F10:  libm ALLOW_FAILURE             (línea 60)
-14. H0:   libunwind guard                (línea 64)
-15. H00:  sys/sysinfo exclusion          (línea 67)
-16. H01:  __register_frame guard         (línea 70)
-17. H02:  pthread_getstackaddr_np       (línea 73)
-18. H03:  libstdcxxprobe stub           (línea 76)
-19. H04:  _OS_ANDROID_ define           (línea 79)
-20. H05:  link.h include                (línea 82)
-21. H06:  endian.h compat               (líneas 85-87)
-22. H07:  dl_iterate_phdr fallback      (línea 90)
-23. TCP_QUICKACK guard                   (línea 93)
-24. mallinfo/malloc_stats guard          (línea 96)
-25. Symlinks (7z, LLVM, libpcre2)        (líneas 98-122)
-26. ldconfig                             (líneas 116-117)
-27. Make.host.user                       (líneas 124-128)
-28. Make.user                            (líneas 130-176)
-```
-
-> **Detalle crítico**: Los pasos 14-24 (H0-H07 y guards) usan `2>/dev/null || true` porque los patrones pueden no existir entre versiones de Julia. Los pasos 1-13 usan `|| echo "Warning: ..." >&2` para visibilidad.
-
----
-
-### Paso 4: Generación de Make.user
-
-**Archivo**: `build.sh` (líneas 131-176)
-
-Se generan dos archivos de configuración:
-
-**Make.host.user** — Configuración para compilación de herramientas HOST:
-```makefile
-CC = gcc
-CXX = g++
-```
-
-**Make.user** — Configuración para compilación TARGET (cross):
-```makefile
-# Cross-compilación
-XC_HOST = aarch64-linux-android
-OS = Linux
-AR = llvm-ar
-RANLIB = llvm-ranlib
-
-# System dependencies (18 USE_SYSTEM_* flags)
-USE_SYSTEM_LLVM=1
-USE_SYSTEM_PCRE=1
-USE_SYSTEM_LIBM=1
-USE_SYSTEM_OPENBLAS=1
-USE_SYSTEM_BLAS=1
-USE_SYSTEM_LAPACK=1
-USE_SYSTEM_GMP=1
-USE_SYSTEM_MPFR=1
-USE_SYSTEM_ARPACK=1
-USE_SYSTEM_LIBSUITESPARSE=1
-USE_SYSTEM_LIBSSH2=1
-USE_SYSTEM_CURL=1
-USE_SYSTEM_LIBGIT2=1
-USE_SYSTEM_PATCHELF=1
-USE_SYSTEM_ZLIB=1
-USE_SYSTEM_OPENSSL=1
-USE_SYSTEM_NGHTTP2=1
-USE_SYSTEM_LIBWHICH=1
-USE_SYSTEM_P7ZIP=1
-USE_SYSTEM_LLD=1
-
-# Source-built dependencies
-USE_SYSTEM_CSL=0
-USE_SYSTEM_OPENLIBM=0
-USE_SYSTEM_DSFMT=0
-USE_SYSTEM_UTF8PROC=0
-USE_SYSTEM_LIBUV=0
-USE_SYSTEM_LIBUNWIND=0
-USE_SYSTEM_LIBBLASTRAMPOLINE=0
-USE_SYSTEM_MBEDTLS=0
-
-# Runtime options
-USE_BINARYBUILDER=0
-DISABLE_LIBUNWIND=1
-JULIA_THREADS=4
-prefix=$TERMUX_PREFIX
-LOCALBASE=$TERMUX_PREFIX
-USE_CROSS_FLISP=1
-
-# Silence deprecated warnings
-override CXXFLAGS += -Wno-deprecated-declarations
-override CFLAGS += -Wno-deprecated-declarations
-```
-
----
-
-### Paso 5: Host flisp Bootstrap
-
-**Archivo**: `build.sh` (líneas 182-192)
-
-```bash
-mkdir -p src/flisp/host
-make -C src/flisp/host -f "$PWD/src/flisp/Makefile" \
-    SRCDIR="$PWD/src/flisp" \
-    BUILDDIR="$PWD/src/flisp/host" \
-    BUILDING_HOST_TOOLS=1 \
-    XC_HOST="" \
-    CROSS_COMPILE="" \
-    CC="gcc" CXX="g++" \
-    AR="ar" RANLIB="ranlib" \
-    -j1 flisp
-```
-
-**¿Por qué es necesario?**:
-
-Julia usa un proceso de bootstrapping de 2 etapas:
-1. **flisp** (Lisp intérprete) → compila el compilador Julia etapa 1
-2. **Julia etapa 1** → compila el compilador Julia completo (etapa 2)
-
-flisp debe ejecutarse en la máquina HOST (x86_64), pero el build system de Julia intenta compilarlo para TARGET (aarch64). Este paso manual fuerza la compilación para HOST.
-
-**Detalles técnicos**:
-- `-j1`: Un solo job porque flisp es secuencial
-- `BUILDING_HOST_TOOLS=1`: Activa el guard que resetea CROSS_COMPILE y XC_HOST
-- `SRCDIR` y `BUILDDIR`: Separan source y build para evitar contaminación
-- El flag `-f` apunta al Makefile de flisp, no al Makefile principal
-
-**Si este paso falla**:
-```
-Warning: host flisp manual build failed
-```
-El build principal fallará con errores de flisp. Para depurar:
-```bash
-cd src/flisp/host
-make -f "$PWD/src/flisp/Makefile" SRCDIR="$PWD/src/flisp" \
-    BUILDING_HOST_TOOLS=1 XC_HOST="" CROSS_COMPILE="" \
-    CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
-    V=1 flisp 2>&1
-```
-
----
-
-### Paso 6: Cross-Compilación Principal
-
-**Archivo**: `build.sh` (líneas 194-202)
-
-```bash
-make -j${TERMUX_PKG_MAKE_PROCESSES} \
-    HOSTCC="gcc" \
-    HOSTCXX="g++" \
-    HOST_LDFLAGS="" \
-    PREFIX="$TERMUX_PREFIX" \
-    LOCALBASE="$TERMUX_PREFIX" \
-    FC_VERSION=dummy \
-    release
-```
-
-**¿Qué hace `make release`?**
-
-El target `release` en el Makefile de Julia:
-1. Compila **todas las dependencias fuente** (libuv, openlibm, utf8proc, DSFMT, libblastrampoline, mbedtls)
-2. Compila **libjulia** (el compilador y runtime de Julia)
-3. Compila **el CLI** (`julia` executable)
-4. Compila **la sysimg** (system image — Julia precompilada)
-5. Genera las **bibliotecas estándar** (Base, LinearAlgebra, etc.)
-
-**Variables clave**:
-- `HOSTCC="gcc"`: Compilador para herramientas HOST (importante: se pasa explícitamente porque CROSS_COMPILE confunde la detección automática)
-- `HOSTCXX="g++"`: Ídem para C++
-- `HOST_LDFLAGS=""`: Evita que las LDFLAGS del target se usen para herramientas host
-- `FC_VERSION=dummy`: Evita que Julia busque un compilador Fortran (no necesario porque usamos OpenBLAS/LAPACK del sistema)
-- `PREFIX=$TERMUX_PREFIX`: Prefijo de instalación final
-
----
-
-### Paso 7: Instalación
-
-**Archivo**: `build.sh` (líneas 205-209)
-
-```bash
-make install \
-    PREFIX="$TERMUX_PREFIX" \
-    LOCALBASE="$TERMUX_PREFIX"
-```
-
-**¿Qué instala?**:
-- `$PREFIX/bin/julia` — Ejecutable
-- `$PREFIX/lib/julia/` — Librerías compartidas (libjulia.so, libjulia-internal.so)
-- `$PREFIX/lib/julia/sys.so` — System image
-- `$PREFIX/share/julia/` — Archivos de soporte (documentación, ejemplos)
-- `$PREFIX/include/julia/` — Headers de C (para interoperabilidad)
-
----
-
-### Paso 8: Empaquetado
-
-**Realizado por**: `build-package.sh` (no en nuestro código, es parte de termux-packages)
-
-```bash
-./build-package.sh -a aarch64 --format pacman julia
-```
-
-**Output**:
-```
-output/julia-1.12.6-aarch64.pkg.tar.xz
-```
-
-Este paquete contiene:
-- Todos los archivos instalados en `$TERMUX_PREFIX`
-- Metadatos (versión, dependencias, maintainer)
-- Scripts de pre/post instalación
-
----
-
-### Paso 9: Publicación en Release
-
-**Archivo**: `.github/workflows/build-package.yml` (líneas 94-102)
-
-```yaml
-gh release delete julia-latest --yes --cleanup-tag 2>/dev/null || true
-gh release create julia-latest "$FILE" \
-    --repo "${{ github.repository }}" \
-    --title "julia-latest" \
-    --latest \
-    --notes "Julia for Termux aarch64 - Build from ${{ github.sha }}"
-```
-
-**Estrategia**:
-- Se usa una release **mutable** llamada `julia-latest`
-- Cada build exitoso elimina y recrea la release
-- Esto permite que los usuarios siempre descarguen la versión más reciente con la misma URL
-- Adicionalmente, se guarda un artifact con el SHA del commit como respaldo
-
----
-
-### Paso 10: Verificación
-
-**Archivo**: `.github/workflows/build-package.yml` (líneas 73-81, solo en failure)
-
-En caso de fallo, el pipeline ejecuta un paso de debug que:
-1. Lista el directorio de build
-2. Busca logs de error
-3. Muestra `config.log` si existe
-4. Muestra las últimas 100 líneas de cualquier log
-
-No hay verificación automática post-build (como `julia --version` o ejecución de tests) porque el paquete se compila para ARM64 y el runner es x86_64. La verificación es manual en el dispositivo Termux.
-
----
-
-## Cross-Compilación con XC_HOST
-
-### ¿Qué es XC_HOST?
-
-`XC_HOST` es la variable que Julia usa para especificar el **target triple** de cross-compilación:
-
-```
-XC_HOST = aarch64-linux-android
-```
-
-Esto le dice al build system:
-- El target es **Linux** (`linux`)
-- La arquitectura es **ARM 64-bit** (`aarch64`)
-- La libc es **bionic** (`android`) — no glibc
-
-A partir de `XC_HOST`, Julia deduce:
-- `CROSS_COMPILE = aarch64-linux-android-` (prefijo para herramientas cross)
-- Busca `aarch64-linux-android-gcc`, `aarch64-linux-android-ar`, etc.
-
-### El NDK de Android y el Target Triple
-
-El Android NDK (r29 en nuestro caso) proporciona toolchains con target triple:
-
-```
-${TARGET_ARCH}-linux-android-${TOOL}
-                        ↑
-                   ¡Esto es bionic, no glibc!
-```
-
-**IMPORTANTE**: En Android, el target triple usa `linux-android` en vez de `linux-gnu`. Esto es crítico porque:
-- `linux-gnu` → busca herramientas glibc
-- `linux-android` → busca herramientas bionic
-
-Julia, al ver `XC_HOST=aarch64-linux-android`, busca:
-```
-aarch64-linux-android-gcc      → Compilador C
-aarch64-linux-android-g++      → Compilador C++
-aarch64-linux-android-ar       → Archiver
-aarch64-linux-android-ranlib   → Ranlib
-aarch64-linux-android-ld       → Linker
-```
-
-### Flujo de Cross-Compilación en Julia
-
-```
-┌─────────────────────────────────────────────┐
-│           Make.user                          │
-│  XC_HOST = aarch64-linux-android              │
-└──────────────────────┬──────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────┐
-│           Make.inc                           │
-│  CROSS_COMPILE := $(XC_HOST)-                │
-│  CC := $(CROSS_COMPILE)gcc                    │
-│  CXX := $(CROSS_COMPILE)g++                   │
-│  AR := $(CROSS_COMPILE)ar                     │
-│  RANLIB := $(CROSS_COMPILE)ranlib             │
-│  LD := $(CROSS_COMPILE)ld → LLD              │
-└──────────────────────┬──────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────┐
-│         Compilación                           │
-│  aarch64-linux-android-gcc -o target.o src.c  │
-│  → genera código ARM64                        │
-│  → linkea con libs bionic                     │
-└──────────────────────┬──────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────┐
-│         binario ARM64                        │
-│  ELF 64-bit LSB shared object, ARM aarch64    │
-│  ➡ Ejecutable en Termux/Android              │
-└─────────────────────────────────────────────┘
-```
-
-### Herramientas Cross vs Host
-
-| Herramienta | Host (x86_64) | Target (aarch64) |
-|-------------|---------------|-------------------|
-| Compilador C | `gcc` | `aarch64-linux-android-gcc` |
-| Compilador C++ | `g++` | `aarch64-linux-android-g++` |
-| Archiver | `ar` | `llvm-ar` |
-| Ranlib | `ranlib` | `llvm-ranlib` |
-| Linker | `ld` | `lld` |
-| Objetos | `.o` (x86_64) | `.o` (aarch64) |
-| Ejecutables | corren en runner | corren en Android |
-
----
-
-## Estrategia de Bootstrapping
-
-### Fases del Bootstrapping de Julia
-
-Julia tiene un proceso de bootstrapping inusual para un lenguaje compilado:
-
-```
-Fase 0: flisp (Lisp intérprete)
-  ├── Compilado para HOST (x86_64)
-  ├── Build manual en termux_step_make()
-  └── Entrada: código Lisp del compilador Julia etapa 1
-
-Fase 1: Julia etapa 1 (compilador mínimo)
-  ├── Generado por flisp ejecutándose en HOST
-  ├── Compila código Julia a código C/LLVM
-  └── Entrada: src/julia-parser.scm, src/julia-syntax.scm
-
-Fase 2: Julia etapa 2 (compilador completo)
-  ├── Compilado por Julia etapa 1
-  ├── Compila la sysimg (system image)
-  └── Entrada: base/*.jl (la biblioteca estándar)
-
-Fase 3: sysimg.so
-  ├── La salida final del bootstrapping
-  ├── Contiene: Base, Core, y módulos estándar precompilados
-  └── Se carga al iniciar julia
-```
-
-```
-Línea de tiempo del bootstrapping:
-
-flisp (HOST) ──→ Julia etapa 1 (HOST) ──→ Julia etapa 2 (TARGET) ──→ sysimg.so
-    ↑                    ↑                         ↑
-  gcc (HOST)       flisp (HOST)            Julia etapa 1 (ejecutado
-                                              via QEMU o cross?)
-                                               ¡NO! En nuestro caso,
-                                              Julia etapa 1 se
-                                              genera para TARGET
-                                              y NO se ejecuta en
-                                              el host.
-
-┌──────────────────────────────────────────────────────────────────┐
-│ ¿Cómo funciona entonces?                                         │
-│                                                                  │
-│ Julia etapa 1 se compila CRUZADA para aarch64, pero para        │
-│ generar sysimg.so se NECESITA ejecutar Julia etapa 1...         │
-│                                                                  │
-│ ¡Pero el runner es x86_64! No puede ejecutar ARM64.             │
-│                                                                  │
-│ Solución: USE_CROSS_FLISP=1 + flisp host manual                 │
-│   → flisp host genera el código de la sysimg SIMBÓLICAMENTE     │
-│   → El resultado se ensambla para aarch64                        │
-│   → La sysimg.so final es para aarch64                           │
-│   → En Android, Julia carga la sysimg y la JIT compila a native │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### Por qué no usar BinaryBuilder
-
-Julia tiene un sistema llamado [BinaryBuilder](https://github.com/JuliaPackaging/BinaryBuilder.jl) que automatiza la compilación de dependencias para múltiples plataformas. Sin embargo:
-
-| BinaryBuilder | Nuestra aproximación |
-|---------------|---------------------|
-| Usa contenedores rootfs | Usa paquetes Termux nativos |
-| Genera tarballs genéricos | Genera paquetes `.pkg.tar.xz` |
-| No optimizado para Android | Optimizado para Termux/bionic |
-| Soporta múltiples arquitecturas | Solo aarch64 (por ahora) |
-| Requiere X86_64 para correr | Corre directamente en Android |
-
-`USE_BINARYBUILDER=0` desactiva BinaryBuilder porque:
-1. BinaryBuilder no tiene soporte completo para Android/bionic
-2. Las dependencias de Termux ya están optimizadas para aarch64
-3. BinaryBuilder añadiría complejidad innecesaria
-
----
-
-## Make.user: Guía de Referencia Completa
-
-### Flags de Cross-Compilación
-
-| Flag | Valor | Efecto |
-|------|-------|--------|
-| `XC_HOST` | `aarch64-linux-android` | Target triple para cross-compilación |
-| `OS` | `Linux` | Sistema operativo target |
-| `AR` | `llvm-ar` | Archiver (LLVM, no el de GNU) |
-| `RANLIB` | `llvm-ranlib` | Ranlib (LLVM, no el de GNU) |
-| `USE_CROSS_FLISP` | `1` | Habilitar cross-compilación de flisp |
-| `BUILDING_HOST_TOOLS` | (usado en make) | Flag para compilar herramientas host |
-
-### Flags USE_SYSTEM_*
-
-Cada flag `USE_SYSTEM_<LIB>=1` le dice a Julia: "no compiles `<LIB>` desde el source incluido en el tarball; usa la versión instalada en el sistema".
-
-| Flag | Dependencia | ¿Por qué =1? | Riesgo si =0 |
-|------|-------------|-------------|--------------|
-| `USE_SYSTEM_LLVM=1` | LLVM 19+ | ~2hr de compilación ahorrada | Build toma 4+ horas |
-| `USE_SYSTEM_PCRE=1` | PCRE2 | Ya instalado en Termux | Compila desde source sin optimizaciones |
-| `USE_SYSTEM_LIBM=1` | libm (math) | bionic ya tiene libm | Conflicto con bionic |
-| `USE_SYSTEM_OPENBLAS=1` | OpenBLAS | Optimizado para ARM64 | Compila genérico (más lento) |
-| `USE_SYSTEM_BLAS=1` | BLAS | OpenBLAS lo incluye | Duplicación |
-| `USE_SYSTEM_LAPACK=1` | LAPACK | OpenBLAS lo incluye | Duplicación |
-| `USE_SYSTEM_GMP=1` | GMP | Ya instalado | Compila sin optimizaciones ARM |
-| `USE_SYSTEM_MPFR=1` | MPFR | Depende de GMP | Compila sin optimizaciones |
-| `USE_SYSTEM_ARPACK=1` | ARPACK-ng | Ya instalado | Compila desde source |
-| `USE_SYSTEM_LIBSUITESPARSE=1` | SuiteSparse | Compilación compleja | Build lento y frágil |
-| `USE_SYSTEM_LIBSSH2=1` | libssh2 | Ya instalado | Compila desde source |
-| `USE_SYSTEM_CURL=1` | curl | Ya instalado | Compila desde source |
-| `USE_SYSTEM_LIBGIT2=1` | libgit2 | Ya instalado | Compila desde source |
-| `USE_SYSTEM_PATCHELF=1` | patchelf | Necesario para runtime | No disponible en source |
-| `USE_SYSTEM_ZLIB=1` | zlib | Ya instalado | Compila desde source |
-| `USE_SYSTEM_OPENSSL=1` | OpenSSL | Ya instalado | Compila desde source |
-| `USE_SYSTEM_NGHTTP2=1` | nghttp2 | Ya instalado | Compila desde source |
-| `USE_SYSTEM_LIBWHICH=1` | libwhich | Ya instalado | Compila desde source |
-| `USE_SYSTEM_P7ZIP=1` | p7zip | Necesario para descargas | No disponible en source |
-| `USE_SYSTEM_LLD=1` | LLD | Linker LLVM | Usa LD de GNU (no funciona) |
-
-| Flag | Dependencia | ¿Por qué =0? |
-|------|-------------|--------------|
-| `USE_SYSTEM_LIBUV=0` | libuv | Fork julia-uv2 con parches específicos |
-| `USE_SYSTEM_OPENLIBM=0` | openlibm | No existe como paquete Termux |
-| `USE_SYSTEM_UTF8PROC=0` | utf8proc | Incluye config para Julia |
-| `USE_SYSTEM_DSFMT=0` | DSFMT | No existe como paquete Termux |
-| `USE_SYSTEM_LIBBLASTRAMPOLINE=0` | libblastrampoline | No existe como paquete Termux |
-| `USE_SYSTEM_MBEDTLS=0` | mbedtls | Fallback TLS, versión específica |
-| `USE_SYSTEM_CSL=0` | CSL (sysimg) | Siempre debe compilarse |
-| `USE_SYSTEM_LIBUNWIND=0` | libunwind | No compatible con Android |
-
-### Flags de Optimización
-
-| Flag | Valor | Efecto |
-|------|-------|--------|
-| `JULIA_THREADS=4` | 4 | Número de threads para Julia runtime |
-| `DISABLE_LIBUNWIND=1` | 1 | Deshabilita stack unwinding con libunwind |
-| `USE_BINARYBUILDER=0` | 0 | No usar BinaryBuilder |
-| `override CFLAGS += -Wno-deprecated-declarations` | — | Silencia warnings de deprecated |
-| `override CXXFLAGS += -Wno-deprecated-declarations` | — | Silencia warnings de deprecated |
-
-### Flags de Instalación
-
-| Flag | Valor | Efecto |
-|------|-------|--------|
-| `prefix` | `$TERMUX_PREFIX` | Directorio raíz de instalación |
-| `LOCALBASE` | `$TERMUX_PREFIX` | Base para librerías locales |
-
-### Flags de Debug
-
-| Flag | Valor | Efecto |
-|------|-------|--------|
-| `VERBOSE=1` | (no usado) | Make imprime comandos completos |
-| `DEBUG=1` | (no usado) | Build en modo debug (sin optimizaciones) |
-| `FORCE=1` | (no usado) | Recompila todo ignorando caché |
-| `V=1` | (no usado) | Make verbose (similar a VERBOSE) |
-
----
-
-## Gestión de Dependencias
-
-### Árbol de Dependencias
-
-```
-julia
-├── Sistema (USE_SYSTEM_*=1)
-│   ├── LLVM 19+ ─── zlib ─── libedit
-│   ├── OpenBLAS ─── BLAS ─── LAPACK
-│   ├── GMP ─── MPFR
-│   ├── SuiteSparse ─── BLAS ─── LAPACK
-│   ├── ARPACK-ng ─── BLAS ─── LAPACK ─── libgfortran
-│   ├── libssh2 ─── OpenSSL ─── zlib
-│   ├── curl ─── libnghttp2 ─── OpenSSL ─── zlib
-│   ├── libgit2 ─── libssh2 ─── OpenSSL ─── zlib
-│   ├── PCRE2
-│   ├── libwhich
-│   ├── p7zip
-│   ├── patchelf
-│   ├── lld ─── LLVM
-│   └── libandroid-support
-│
-├── Fuente (USE_SYSTEM_*=0)
-│   ├── libuv (fork julia-uv2)
-│   ├── openlibm
-│   ├── utf8proc
-│   ├── DSFMT
-│   ├── libblastrampoline ─── BLAS
-│   ├── mbedtls
-│   └── libunwind (DISABLED=1)
-│
-└── Runtime
-    ├── sys.so (system image)
-    ├── libjulia.so
-    ├── libjulia-internal.so
-    └── libstdc++ (via libc++ de Android)
-```
-
-### Resolución de Dependencias en Tiempo de Compilación
-
-Cuando Julia encuentra `USE_SYSTEM_LLVM=1`, ejecuta:
-
-```bash
-# Detectar LLVM del sistema
-LLVM_CONFIG=$(command -v llvm-config)
-if [ -x "$LLVM_CONFIG" ]; then
-    LLVM_CFLAGS=$($LLVM_CONFIG --cflags)
-    LLVM_LIBDIR=$($LLVM_CONFIG --libdir)
-    LLVM_LDFLAGS=$($LLVM_CONFIG --ldflags)
-    # Usar estos valores en lugar de compilar LLVM
-fi
-```
-
-**Problema conocido**: `llvm-config` debe estar en PATH y apuntar al LLVM de Termux, no al del sistema (Ubuntu). Por eso en `build.sh` se crean symlinks:
-
-```bash
-LLVM_CONFIG=$(command -v llvm-config || echo "$TERMUX_PREFIX/bin/llvm-config")
-if [ -x "$LLVM_CONFIG" ]; then
-    LLVM_LIBDIR=$($LLVM_CONFIG --libdir)
-    if [ "$LLVM_LIBDIR" != "$TERMUX_PREFIX/lib" ]; then
-        mkdir -p "$LLVM_LIBDIR"
-        for lib in "$TERMUX_PREFIX/lib"/libLLVM*; do
-            [ -f "$lib" ] && ln -sf "$lib" "$LLVM_LIBDIR/"
-        done
-    fi
-fi
-```
-
-### Resolución de Dependencias en Tiempo de Ejecución
-
-Cuando `julia` se ejecuta en Termux, necesita encontrar:
-
-1. **`libjulia.so`** — En `$PREFIX/lib/julia/`
-2. **`sys.so`** — En `$PREFIX/lib/julia/`
-3. **Librerías del sistema** — OpenBLAS, LLVM, etc. en `$PREFIX/lib/`
-4. **`7z`** — Para descargar paquetes, en `$PREFIX/libexec/julia/7z`
-
-**ldconfig**: El build.sh configura `ldconfig` para incluir el prefijo Termux:
-```bash
-echo "/data/data/com.termux/files/usr/lib" | sudo tee /etc/ld.so.conf.d/termux-prefix.conf
-sudo ldconfig
-```
-
-**Symlinks en runtime**:
-```bash
-# 7z symlink (necesario para Pkg)
-ln -sf "${TERMUX_PREFIX}/bin/7z" usr/libexec/julia/7z
-
-# libpcre2-8.so (necesario para regex)
-if [ -f "${TERMUX_PREFIX}/lib/libpcre2-8.so" ]; then
-    ln -sf "${TERMUX_PREFIX}/lib/libpcre2-8.so" \
-        "${TERMUX_PKG_SRCDIR}/usr/lib/julia/libpcre2-8.so"
-fi
-```
-
----
-
-## Sistema de Parches
-
-### Arquitectura de los Parches
-
-Los parches se dividen en 4 categorías según su mecanismo y propósito:
-
-```
-Parches en build.sh
-├── A-N: Dependencias y configuración (seds con || echo "Warning")
-│   ├── A: LMDB (MDB_USE_ROBUST)
-│   ├── B-C: libuv (cross-compile + pthread)
-│   ├── D-F: Linker flags (-lpthread, -lrt, -latomic)
-│   ├── G: -static-libstdc++
-│   ├── H: ifunc disable
-│   ├── I: libc_nonshared.a
-│   ├── J: julia.expmap.in (LLVM→Julia symver)
-│   ├── K: CROSS_COMPILE fix
-│   ├── L: libm ALLOW_FAILURE
-│   ├── M: Source code fixes (H0-H07)
-│   ├── N: Symlinks
-│   └── O-P: Makefile generation
-│
-├── F1-F6: Linker flags (seds con || echo "Warning")
-├── F7-F9: Cross-compilación (seds con || echo "Warning")
-├── F10-F13: Dependencias (seds con || echo "Warning")
-└── H0-H07: Source code fixes (seds con 2>/dev/null || true)
-```
-
-### Catálogo Completo de Parches
-
-Ver la [tabla de parches en README.md](./README.md#parches-para-androidbionic) para el listado completo.
-
-### Matriz de Compatibilidad bionic
-
-| Función/Característica | glibc | bionic | Parche |
-|------------------------|-------|--------|--------|
-| `pthread` en libc separada | `-lpthread` | En libc | F1: remove -lpthread |
-| `librt` (clock, timer) | `-lrt` | En libc | F2: remove -lrt |
-| `libatomic` | Separada | En libc (ARM64) | F3: remove -latomic |
-| `libstdc++` estática | Disponible | Usar libc++ | F4: remove -static-libstdc++ |
-| `libc_nonshared.a` | Existe | No existe | F5: remove references |
-| `ifunc` (indirect functions) | Soportado | No soportado | F6: disable ifunc |
-| `__register_frame` | libgcc_s | No disponible | H01: guard |
-| `pthread_getattr_np` | Disponible | No existe | H02: use get_stackaddr_np |
-| `dl_iterate_phdr` | glibc version | limited bionic | H07: fallback |
-| `mallinfo()`, `malloc_stats()` | Disponible | No existe | F13: guard |
-| `TCP_QUICKACK` | Linux | No en Android | F12: guard |
-| `MDB_USE_ROBUST` (LMDB) | Soportado | No soportado | A: remove |
-| `sysinfo()` | Disponible | No existe | H00: guard |
-| `libunwind` | Compatible | No compatible | H0: disable |
-| `stdc++probe` | libstdc++ | libc++ | H03: stub |
-| LLVM symbol versioning | ld | lld | F7: symver fix |
-
----
-
-## CI/CD Pipeline
-
-### Workflow build-package.yml
-
-**Archivo**: `.github/workflows/build-package.yml`
-
-**Trigger**:
-```yaml
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'packages/julia/**'
-      - 'packages/termux-keyring/**'
-      - 'scripts/**'
-      - '.github/workflows/**'
-      - '.github/actions/**'
-  workflow_dispatch:
-```
-
-**Diagrama de secuencia**:
-
-```
-Push a main
-    │
-    ▼
-Checkout repo
-    │
-    ▼
-Enable zram (16GB zstd)
-    │
-    ▼
-Restore cache (~/.termux-build)
-    │
-    ▼
-Install system deps (docker, containerd)
-    │
-    ▼
-Install Termux deps (via Docker)
-    │
-    ▼
-Build Julia (via Docker)
-    │
-    ▼
-┌─── Éxito? ───┐
-│              │
-▼              ▼
-Release       Debug
-(julia-latest) (logs + artifacts)
-│              │
-▼              ▼
-Store         Store
-artifacts     artifacts
-```
-
-**Concurrencia**:
-```yaml
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-```
-Si se hace push mientras un build corre, el build anterior se cancela. Esto ahorra recursos y evita releases duplicados.
-
-### Imagen Docker del build
-
-La imagen Docker es una dependencia directa del build y se construye en el
-mismo job, antes de iniciar los contenedores de dependencias o Julia. El paso
-`Build CI package-builder image` usa `scripts/Dockerfile`, conserva la caché
-de BuildKit y carga la etiqueta local `julia-termux/package-builder:ci`.
-Los pasos posteriores pasan esa etiqueta mediante `TERMUX_BUILDER_IMAGE_NAME`
-a `scripts/run-docker.sh`; así no existe una imagen paralela que el build
-pueda ignorar ni una publicación GHCR necesaria para la corrección.
-
-### Zram Action
-
-**Archivo**: `.github/actions/zram/action.yml`
-
-Acción composite que habilita zram (swap comprimido en RAM) en el runner de GitHub Actions.
-
-**¿Por qué es necesaria?**: El build de Julia puede consumir >12GB de RAM. Los runners de GitHub tienen 7GB de RAM. Sin zram, el OOM killer mata el proceso.
-
-**Configuración**:
-```yaml
-- uses: ./.github/actions/zram
-  with:
-    algorithm: zstd       # Algoritmo de compresión
-    size: 16G             # Tamaño virtual del dispositivo
-    priority: 100         # Prioridad de swap (mayor = preferido)
-    device_name: /dev/zram0
-```
-
-**Mecanismo**:
-1. Configura el algoritmo de compresión en el dispositivo zram
-2. Asigna tamaño (`16G` comprimidos → ~8G RAM real usados con zstd)
-3. Crea un swap filesystem
-4. Activa el swap con alta prioridad
-
----
-
-## Troubleshooting Avanzado
-
-### Anatomía de un Fallo de Build
-
-Los fallos de build de Julia suelen caer en una de estas categorías:
-
-#### Categoría 1: CROSS_COMPILE Leak (85% de los fallos)
-
-**Síntoma**:
-```
-make[2]: Entering directory '.../src/flisp/host'
-aarch64-linux-android-gcc -o flisp flisp.o ...
-.../flisp: cannot execute binary file: Exec format error
-```
-
-**Causa**: `CROSS_COMPILE=aarch64-linux-android-` se heredó al sub-make de flisp.
-
-**Diagnóstico**:
-```bash
-grep "^override CROSS_COMPILE" Make.inc
-# Si existe → el parche F8 no se aplicó
-grep "BUILDING_HOST_TOOLS" Make.inc
-# Si no existe → el parche F9 no se aplicó
-```
-
-**Solución**: Revisar los seds de la sección K en build.sh.
-
-#### Categoría 2: Linker Errors (10% de los fallos)
-
-**Síntoma**:
-```
-/usr/bin/ld: cannot find -lLLVM-19: No such file or directory
-```
-
-**Causa**: LLVM no instalado o no encontrado por `llvm-config`.
-
-**Diagnóstico**:
-```bash
-llvm-config --libdir     # Debe ser $TERMUX_PREFIX/lib
-ls $TERMUX_PREFIX/lib/libLLVM*  # Debe existir
-```
-
-**Solución**: Ejecutar `install-deps.sh` o verificar los symlinks de LLVM.
-
-#### Categoría 3: Errores de bionic (3% de los fallos)
-
-**Síntoma**:
-```
-error: 'pthread_mutexattr_setrobust' was not declared in this scope
-```
-
-**Causa**: El parche A (LMDB) no se aplicó.
-
-**Diagnóstico**:
-```bash
-grep "MDB_USE_ROBUST" deps/lmdb.mk
-# Si existe → el parche no se aplicó
-```
-
-**Solución**: Verificar que el sed de la línea 18 se ejecutó correctamente.
-
-#### Categoría 4: OOM Killer (2% de los fallos)
-
-**Síntoma**:
-```
-Killed
-```
-Sin mensaje de error adicional. El proceso fue killado por OOM.
-
-**Diagnóstico**: Revisar `dmesg`:
-```bash
-dmesg | grep -i oom
-dmesg | grep -i killed
-```
-
-**Solución**: Reducir `TERMUX_PKG_MAKE_PROCESSES` o habilitar más swap.
-
-### Cómo Depurar el Build Localmente
-
-```bash
-# 1. Build en modo interactivo
-./scripts/run-docker.sh bash
-# Dentro del contenedor:
-cd ~/.termux-build/julia/src
-
-# 2. Ejecutar pasos manualmente
-# (los hooks de termux-packages se pueden invocar individualmente)
-source ~/termux-packages/scripts/build/termux_step_pre_configure.sh
-
-# 3. Ver Make.inc después de parches
-grep "CROSS_COMPILE" Make.inc
-grep "OSLIBS" Make.inc
-
-# 4. Compilar solo flisp host (para probar el fix)
-make -C src/flisp/host -f "$PWD/src/flisp/Makefile" \
-    SRCDIR="$PWD/src/flisp" \
-    BUILDDIR="$PWD/src/flisp/host" \
-    BUILDING_HOST_TOOLS=1 XC_HOST="" CROSS_COMPILE="" \
-    CC="gcc" CXX="g++" AR="ar" RANLIB="ranlib" \
-    V=1 flisp
-
-# 5. Verificar el binario resultante
-file src/flisp/host/flisp
-# Debe decir: ELF 64-bit LSB executable, x86-64
-
-# 6. Si todo funciona, hacer el build completo
-make -j4 HOSTCC="gcc" HOSTCXX="g++" HOST_LDFLAGS="" \
-    PREFIX="$TERMUX_PREFIX" LOCALBASE="$TERMUX_PREFIX" \
-    FC_VERSION=dummy release
-```
-
-### Cómo Depurar en CI/CD
-
-```bash
-# 1. Ejecutar workflow manualmente desde GitHub UI
-# Actions → "Build Julia for Termux" → "Run workflow"
-
-# 2. SSH al runner (si tienes self-hosted)
-# No es posible en runners de GitHub, pero se puede:
-# - Añadir un step con action/labeler para etiquetar
-# - Usar tmate para debug interactivo:
-#   - name: Debug via tmate
-#     uses: mxschmitt/action-tmate@v3
-
-# 3. Analizar los artifacts de debug
-# Cuando el build falla, el pipeline guarda:
-# - config.log
-# - *.log y *.err
-# - Las últimas 100 líneas de cada log
-
-# 4. Descargar artifacts
-gh run download <run-id> --repo {owner}/julia-termux
-```
-
----
-
-## Decisiones de Diseño (ADRs)
-
-### ADR-001: Seds Inline vs Parches Externos
-
-**Estado**: Aceptado
-
-**Contexto**: Necesitábamos aplicar ~22 modificaciones al código de Julia. Las opciones eran:
-1. Archivos de patch externos (`.patch`)
-2. Operaciones `sed` inline en `build.sh`
-
-**Decisión**: Usar `sed` inline.
-
-**Consecuencias**:
-- Positivo: Single file de build, fácil de leer y modificar
-- Positivo: No requiere mantenimiento de archivos patch separados
-- Negativo: Frágil ante cambios en el código fuente de Julia
-- Negativo: Seds complejos son difíciles de depurar
-
-**Mitigación**:
-- Cada `sed` tiene protección contra fallo (`|| echo "Warning"`)
-- Los seds más complejos se documentan con comentarios
-- Se verifican en cada actualización de versión de Julia
-
----
-
-### ADR-002: Host flisp Manual vs Automático
-
-**Estado**: Aceptado
-
-**Contexto**: El build system de Julia intenta compilar flisp para el target, pero necesitamos flisp para el host.
-
-**Decisión**: Compilar flisp host manualmente antes del build principal.
-
-**Consecuencias**:
-- Positivo: Control total sobre las flags de compilación
-- Positivo: Evita el Bug #1 (CROSS_COMPILE leak)
-- Negativo: Código adicional en `termux_step_make()`
-- Negativo: Si Julia cambia el Makefile de flisp, el build manual puede fallar
-
----
-
-### ADR-003: USE_SYSTEM_LLVM=1
-
-**Estado**: Aceptado
-
-**Contexto**: Julia incluye LLVM en su tarball y puede compilarlo desde source. En Termux, LLVM ya está disponible como paquete.
-
-**Decisión**: Usar `USE_SYSTEM_LLVM=1` para aprovechar el LLVM de Termux.
-
-**Consecuencias**:
-- Positivo: Ahorra ~2 horas de compilación
-- Positivo: LLVM de Termux está optimizado para aarch64
-- Negativo: Dependencia de la versión de LLVM en Termux
-- Negativo: Posibles incompatibilidades si Julia requiere una versión específica
-
----
-
-### ADR-004: zram en CI/CD
-
-**Estado**: Aceptado
-
-**Contexto**: El build de Julia consume >12GB de RAM. Los runners de GitHub tienen 7GB.
-
-**Decisión**: Usar una acción composite de zram para habilitar swap comprimido.
-
-**Consecuencias**:
-- Positivo: Evita OOM kills durante el build
-- Positivo: zstd comprime ~2:1, dando ~14GB efectivos
-- Negativo: Overhead de compresión/descompresión
-- Negativo: No funciona en todos los runners (algunos no tienen módulo zram)
-
----
-
-### ADR-005: Release Mutable (julia-latest)
-
-**Estado**: Aceptado
-
-**Contexto**: Necesitamos que los usuarios descarguen siempre la última versión sin cambiar la URL.
-
-**Decisión**: Usar una GitHub Release mutable llamada `julia-latest` que se elimina y recrea en cada build.
-
-**Consecuencias**:
-- Positivo: URL fija para descargas automáticas
-- Positivo: Fácil integración con scripts de instalación
-- Negativo: Se pierde el historial de versiones (solo existe la última)
-- Negativo: Si el build falla, la release anterior se ha eliminado
-
-**Mitigación**: Los artifacts se guardan con el SHA del commit como respaldo.
-
----
-
-### ADR-006: No Usar BinaryBuilder
-
-**Estado**: Aceptado
-
-**Contexto**: Julia proporciona BinaryBuilder para compilar dependencias. Sin embargo, no tiene soporte completo para Android/bionic.
-
-**Decisión**: `USE_BINARYBUILDER=0`, usar dependencias del sistema Termux.
-
-**Consecuencias**:
-- Positivo: Build más simple y rápido
-- Positivo: Dependencias optimizadas para ARM64 por el equipo de Termux
-- Negativo: Dependencia de la disponibilidad de paquetes en Termux
-- Negativo: No es reproducible fuera del ecosistema Termux
-
----
-
-### ADR-007: Formato Pacman vs Dpkg
-
-**Estado**: Aceptado
-
-**Contexto**: Termux soporta tanto `dpkg` (`.deb`) como `pacman` (`.pkg.tar.xz`).
-
-**Decisión**: Generar paquetes en formato pacman (`--format pacman`).
-
-**Consecuencias**:
-- Positivo: Pacman es más rápido y confiable para paquetes grandes
-- Positivo: Mejor manejo de dependencias conflictivas
-- Negativo: Algunos usuarios prefieren dpkg
-- Negativo: No es el formato por defecto de Termux
-
----
-
-> **Última actualización**: Julio 2026 — Julia v1.12.6
+> Última actualización: 2026-10-08.
 >
-> *Este documento describe la arquitectura del sistema a nivel de diseño. Para bugs conocidos y guía de modificación, ver [AGENTS.md](./AGENTS.md). Para instalación y uso, ver [README.md](./README.md).*
+> Este documento explica el **por qué**: qué decisión sostiene el sistema de
+> build, qué mecanismo del entorno produce cada modo de fallo y qué principio
+> motivó cada gate. Las **reglas operativas** (qué está permitido, qué cuesta
+> dinero) están en `AGENTS.md`; el **estado con evidencia** (run IDs, minutos,
+> hipótesis en curso) está en `PROGRESS.md` y es la única fuente fechada. El
+> uso práctico (instalar, probar, inspeccionar) está en `README.md`. Si este
+> archivo y `PROGRESS.md` discrepan, gana `PROGRESS.md`.
+
+---
+
+## 0. Índice
+
+1. [La decisión que sostiene todo: host == target](#1)
+2. [El entorno del runner como fuente de modos de fallo](#2)
+3. [Gates: uno por fallo medido](#3)
+4. [La regla de capa](#4)
+5. [La receta: flags y parches, y por qué cada uno](#5)
+6. [DAG, caché y presupuesto](#6)
+7. [Artefactos y su inspección](#7)
+8. [Verificación en el dispositivo](#8)
+9. [Límites conocidos y estado honesto](#9)
+10. [Restos de la ruta abandonada](#10)
+
+---
+
+<a name="1"></a>
+## 1. La decisión que sostiene todo: host == target
+
+### 1.1 Qué se abandonó, y por qué no era una cuestión de gusto
+
+La arquitectura anterior cross-compilaba en Docker sobre un runner x86_64 con
+`XC_HOST=aarch64-linux-android`, `HOSTCC=gcc`, un bootstrap manual de `flisp`
+para el host y `scripts/build-deps-docker.sh`. Fue **abandonada**, no
+"postergada", por una razón mecánica: el build system de Julia necesita
+**ejecutar** herramientas que él mismo acaba de compilar (el generador de
+tablas `llvm-min-tblgen`, `flisp`, y después el propio `julia` para producir la
+sysimage). En cross-compilación pura, sobre un host que no puede ejecutar el
+target, eso obliga o a compilar dos veces cada herramienta o a emular aarch64;
+el builder Docker hacía lo primero y moría **60–76 minutos después** de cada
+run en `llvm-min-tblgen: Exec format error` (`PROGRESS.md` "Arquitectura
+vigente", `AGENTS.md` "La arquitectura vigente").
+
+No era un bug con arreglo: era la geometría del problema. Julia no soporta
+cross-compilar su sysimage sin ejecutar código del target.
+
+### 1.2 La cadena de sondas que legitima la arquitectura actual
+
+La decisión no se tomó por intuición; hay tres workflows de viabilidad, cada
+uno con la pregunta y la respuesta medidas, y **son la prueba de que el modo
+on-device sobre `ubuntu-24.04-arm` funciona**:
+
+| Workflow | Pregunta | Resultado |
+|---|---|---|
+| `.github/workflows/probe-bionic-exec.yml` | ¿ejecuta un ELF bionic/aarch64 (el `linker64` de Android + userland Termux) en un runner de GitHub? | sí — eso decidió la arquitectura; el fixture vive en la rama huérfana `ci/probe-rootfs` |
+| `.github/workflows/probe-native-termux.yml` | ¿también funciona el *toolchain* de Termux cuando su prefijo se materializa en la ruta absoluta que va quemada en los binarios? | sí — clang de Termux compila y enlaza ahí |
+| `.github/workflows/probe-ondevice-builder.yml` | ¿el propio `build-package.sh` de termux-packages, en su rama on-device, construye un paquete real dentro de un rootfs Termux en el runner? | sí — el sujeto de prueba fue un paquete pequeño real, no Julia |
+
+Consecuencia: **el CI usa exactamente el camino que ya funciona en el
+teléfono**. Esto no es una optimización, es una propiedad de seguridad: la
+hipótesis "esto compila" se mide con el mismo ejecutor, el mismo loader y el
+mismo prefijo que tendrá el usuario.
+
+### 1.3 Cómo se activa el modo on-device
+
+`termux-packages` decide su modo por la presencia de un fichero:
+
+```sh
+# build-package.sh:38 (clonado de termux-packages en el runner)
+if [[ "$(uname -o)" == "Android" || -e "/system/bin/app_process" ]]; then
+```
+
+El runner no es Android, así que `.github/actions/termux-builder/action.yml`
+le da esa señal:
+
+```yaml
+# action.yml:51-52
+sudo mkdir -p /system/bin
+sudo touch /system/bin/app_process
+```
+
+Con esa rama activa, `build-package.sh` exige además que el target coincida
+con el entorno ("For on device builds cross compiling is not supported",
+`build-package.sh:443-446`) y toma la arquitectura de `dpkg
+--print-architecture` (`action.yml:50`), y se niega a correr como root
+(`build-package.sh:39-42`), por lo que el action `chown` del prefijo al usuario
+del runner (`action.yml:133-136`).
+
+### 1.4 Consecuencia directa: el LLVM bundled es compilable
+
+Si host == target, el compilador real es el `clang` de Termux y todo binario
+generado se puede ejecutar en el mismo sitio donde se genera. Por eso la
+receta puede permitirse **compilar LLVM desde `deps/llvm.mk`**:
+
+- `USE_SYSTEM_LLVM := 0` (`packages/julia/build.sh:84`). Julia 1.12 pinea LLVM
+  18.1.7 con sus propios parches y una versión de símbolos `JL_LLVM_18.1`, y
+  Termux solo ofrece LLVM 21: usar el del sistema no es una opción, es otra
+  ruta de fallo.
+- El corolario se verifica en el artefacto, no en la fe: `build-package.yml:309-325`
+  rechaza un `libjulia-codegen.so` enlazado contra `libLLVM-21` y exige el
+  symver `JL_LLVM_18.1`; la receta ya lo comprueba tras install
+  (`build.sh:210-212`).
+- Medido: LLVM 18.1.7-4 completo en ~43 min (`PROGRESS.md` "Avance medible").
+
+`packages/llvm-julia` **no es la ruta**: es la contingencia cacheada de la
+Fase 2 de `PROGRESS.md` para el caso de que el LLVM bundled resultara no
+cacheable. Hoy no existe en el árbol (`packages/` solo contiene `julia`), y
+nada en el DAG lo invoca.
+
+### 1.5 El empaquetado es una consecuencia, no un paso aparte
+
+En modo on-device, termux-packages empaqueta **todo lo más reciente que el
+stamp de build** dentro del prefijo vivo:
+
+```sh
+# scripts/build/termux_step_copy_into_massagedir.sh:5
+tar -C "$TERMUX_PREFIX_CLASSICAL" -N "$TERMUX_BUILD_TS_FILE" --exclude='tmp' --exclude='__pycache__' -cf - . | ...
+```
+
+Eso es correcto en un teléfono y peligroso en un runner compartido: un proceso
+ajeno que escriba durante la compilación entra en el payload (el documento
+cita el caso real de un `.deb` que salió con `var/log/...` y `opt/flutter/**`).
+Por eso existen **dos mitades de la misma defensa**:
+
+- `termux_step_pre_massage()` en la receta poda lo que no es Julia y **imprime
+  cada ruta podada**, para que una suposición equivocada se vea en el log en
+  lugar de manifestarse como un fichero que falta (`build.sh:225-263`).
+- `build-package.yml:259-300` hace la mitad contraria: desmonta el `.deb` y
+  exige que **no haya nada fuera del footprint de Julia**, con la lista de
+  nombres permitidos copiada de `termux_step_pre_massage()`. La duplicación es
+  deliberada y está declarada: si cambias el hook sin cambiar la comprobación,
+  esta se pone roja (`build-package.yml:259-263`).
+
+---
+
+<a name="2"></a>
+## 2. El entorno del runner como fuente de modos de fallo
+
+Un prefijo Termux materializado dentro de un Linux glibc no es un entorno
+neutro: es **dos sistemas de nombres y dos loaders conviviendo**. Casi todos
+los fallos de la cadena no son de Julia ni de Termux, son de esa convivencia.
+Los cinco mecanismos, cada uno con su run medido (`PROGRESS.md` "Cadena de
+modos de fallo"):
+
+| Mecanismo | Efecto | Cierre en el action |
+|---|---|---|
+| `libtermux-exec` (`LD_PRELOAD=$PREFIX/lib/libtermux-exec.so`, `action.yml:220`) reescribe `/bin`, `/etc`, `/lib`, `/usr`, `/var` en `execve`/`open` | las herramientas del runner son **inalcanzables** desde una shell con ese entorno, sin importar cómo las escribas: `/usr/bin/curl` se convierte en el `curl` bionic del prefijo (run 37786844653) | copias del host en `~/.termux-builder-hostbin`, una ruta que no está bajo ningún prefijo aliasado (`action.yml:208-213`) |
+| Un `LD_PRELOAD` bionic heredado a una herramienta glibc | el loader de glibc toma `libtermux-exec.so` como ELF, resuelve su `DT_NEEDED "libc.so"` contra el linker script de Debian y aborta con `invalid ELF header` (run 37788134488) | `LD_PRELOAD` **nunca** va a `GITHUB_ENV`; solo al fichero de entorno que sourcean los pasos que necesitan Termux (`action.yml:214-228`), y `unset LD_PRELOAD` en el hijo (`action.yml:241`) |
+| El shebang del script que arranca el build | `build-package.sh` empieza con `#!/bin/bash`; el kernel ejecuta el bash glibc del runner con el preload bionic en el entorno y su loader muere **sin imprimir una línea** (rc 127 a los 12 ms, run 37789690789) | el build se lanza desde un script generado con shebang del prefijo: `#!/data/data/com.termux/files/usr/bin/bash` (`build-package.yml:224`) |
+| El resolver DNS de bionic en estos runners | `No address associated with hostname` para **cualquier** nombre; el `curl` del host resuelve el mismo nombre sin problema (run 37782123436) | toda la closure se baja con el `curl` del host (`action.yml:85-88,106-109`) y `apt update` **desaparece del pipeline** |
+| Herramientas del Tier 1 de termux-packages | `build-package.sh:64` ejecuta `jq` sobre `repo.json` **antes** de leer ninguna receta; el aliasado convierte esa llamada en `/usr/bin/jq` → `jq` del prefijo, donde no estaba (run 37790992541) | `jq`, `unzip`, `lzip` en los roots de la closure (`termux-closure-resolver.py:51`) |
+
+### 2.1 El shim de `curl`, o cómo se baja un tarball sin resolver DNS
+
+`termux_download.sh:55` y todos los `deps/*.mk` de Julia descargan con `curl`.
+En el entorno del prefijo eso es bionic, que aquí no resuelve nada. El action
+no parchea termux-packages ni la receta: **sustituye el binario**, dejando el
+original como fallback (`action.yml:264-294`):
+
+```sh
+mv "$ROOT/bin/curl" "$ROOT/bin/curl.bionic"     # conservado, no borrado
+# $ROOT/bin/curl = shim con shebang del prefijo que hace:
+#   unset LD_PRELOAD; exec "$TERMUX_BUILDER_HOSTBIN/curl" "$@"
+```
+
+Y lo demuestra en el job de dos minutos, no una hora dentro de una compilación:
+el propio paso hace un `--range 0-0` de la URL del tarball de Julia 1.12.6 que
+figura en la receta (`action.yml:292-294`).
+
+### 2.2 Cómo se siembra el prefijo (y por qué no se instala)
+
+1. **Runtime Android**: se baixa la rama `ci/probe-rootfs` del propio repo, se
+   verifica su SHA-256 fijado y se descomprime `/system` (`action.yml:44-53`).
+   Los ELFs bionic piden `PT_INTERP /system/bin/linker64`: sin ese árbol no
+   ejecuta **nada** del prefijo (run 37716844030). La rama es un **asset del
+   build**: borrarla rompe todos los jobs que usan el action.
+2. **Closure de paquetes**: un único paso resuelve el cierre transitivo sobre
+   el índice `Packages.gz` de Termux y extrae cada `.deb` con `dpkg-deb -x`
+   contra `/` (`action.yml:98-112`).
+3. **Base de datos sembrada**: se anexa a `$PREFIX/var/lib/dpkg/status` un
+   `Status: install ok installed` por paquete (`action.yml:113-131`). Esto
+   existe porque `termux_step_start_build.sh:125` ejecuta
+   `apt install -y termux-elf-cleaner` **incondicionalmente** en toda build
+   bionic on-device; con el paquete sembrado, apt responde "already the newest
+   version" sin tocar la red, y el job `lint`/`build` lo comprueba llamando a
+   ese `apt install` exacto (`action.yml:161-171`).
+4. **Formato y paquete manager**: `repo.json` declara `pkg_format`, y
+   `build-package.sh:438-441` sourcea (línea 441) `$PREFIX/bin/termux-setup-package-manager`
+   para aprender el gestor; un runner no tiene la app Termux que lo traiga, así
+   que el action lo crea (`action.yml:147-153`).
+5. **Cobertura verificada**: el paso "Check that the closure really covers the
+   recipe" lee la receta (`TERMUX_PKG_DEPENDS`/`TERMUX_PKG_BUILD_DEPENDS`) y
+   exige `dpkg -s` para cada root; si falta uno, el mensaje es "fix the
+   resolver, not the build" (`action.yml:173-194`).
+6. **Tabla de herramientas**: el action exige en PATH las que el build realmente
+   ejecuta (incluidas `ar`, `ranlib`, `objcopy`, `readelf`, `dsymutil`, que en
+   Termux vienen de `llvm`, no de `binutils`) (`action.yml:244-262`).
+
+`TERMUX_SKIP_DEPCHECK=true` (`-s` en `build-package.yml:227`) hace inalcanzables
+las ramas de `apt`/`gpg` de `build-package.sh`: por eso el prefijo se **siembra**
+en lugar de instalarse, y por eso gnupg está deliberadamente fuera de la closure
+(`termux-closure-resolver.py:46-51`).
+
+### 2.3 El paso `gmake`: un fallo del entorno, arreglado en una sola capa
+
+CMake sondea `gmake` antes que `make` y guarda el resultado como **ruta
+absoluta**. En un teléfono el sondeo no encuentra nada y usa `$PREFIX/bin/make`;
+en el runner contesta el `/usr/bin/gmake` del host, y ejecutar esa ruta desde un
+proceso bionic vuelve a caer en el aliasado, donde no hay `gmake` (run
+37801929253, perdido en el configure de LLVM). El cierre es `ln -s make
+$PREFIX/bin/gmake` (`action.yml:296-317`), es decir, **la capa que produce el
+valor**, y por eso arregla todos los deps basados en CMake a la vez (LLVM,
+utf8proc, dSFMT) en lugar de un `-DCMAKE_MAKE_PROGRAM` por dep. La prueba no es
+que `gmake --version` funcione: es configurar **y compilar** un proyecto CMake
+real (`action.yml:319-343`).
+
+### 2.4 Ruido benigno conocido
+
+Aparece en todo log de estos runners y no debe leerse como fallo: `linker:
+Warning: failed to find generated linker configuration from
+"/linkerconfig/ld.config.txt"`, `__bionic_open_tzdata: …`, `bionic-icu: couldn't
+open libicu.so`, `expr: syntax error: unexpected argument 'Warning:'` (se cuela
+en una sustitución de comando de `configure`; autoconf cae a su default), y
+`Warning: git information unavailable`. El build filtra los dos primeros
+(`build-package.yml:233`). **No** es ruido `error: linker cannot load itself`:
+ese fue la causa del run 37811196090 (§3.4).
+
+---
+
+<a name="3"></a>
+## 3. Gates: uno por fallo medido
+
+### 3.0 El principio común
+
+Tres invariantes recorren todos los gates; ninguna es estética:
+
+1. **Un gate nunca mantiene su propia copia de lo que el build hace.** Si
+   necesita una lista (qué sonames va a pedir `base/Makefile`, qué triplet se va
+   a empotrar, qué nombres versionados pide el fuente), la **deriva**
+   preguntándole a `make` o al propio fuente. Una lista escrita a mano costó un
+   run de ~44 min mirando `libopenblas.so` mientras el build moría por
+   `libblas.so` (run 37823556050).
+2. **Un stdout vacío nunca es "nada que comprobar".** Cada script de gate
+   distingue `exit 2` (no se pudo derivar, el árbol no está configurado, `make`
+   se negó a parsear) de `exit 1` (derivado, y el valor es inválido) y de `exit
+   0`. Los reportes corren con `|| true`; solo las aserciones fallan. Esto viene
+   de un job que murió en un *diagnóstico*: un `du` sobre un directorio que el
+   build fallido nunca había creado bajo `set -e` (run 37784767638).
+3. **Nada caro empieza sin el gate.** Un run de CI cuesta ~49-55 min y responde
+   una sola hipótesis; el gate responde en segundos y el job `lint` es
+   prerequisito duro de `build` (`build-package.yml:136`).
+
+Medición del avance (de `PROGRESS.md` "Avance medible"): `12 ms` → `4 min` →
+`4.5 min` → `43 min` → `44 min` → `47 min` → `49 min`. Cada salto corresponde a
+un gate nuevo.
+
+### 3.1 La cadena de modos de fallo (el corazón del documento)
+
+Todos los runs son del 2026-10-08; la evidencia completa, con más detalle, está
+en `PROGRESS.md` "Cadena de modos de fallo".
+
+| Run | UTC | Síntoma | Causa raíz | Cierre |
+|---|---|---|---|---|
+| 37716844030 | — | nada bionic ejecuta | ELFs con `PT_INTERP /system/bin/linker64` | rama `ci/probe-rootfs` + el action la descomprime, con checksum fijado |
+| 37782123436 | 13:09 | `No address associated with hostname` | el resolver bionic no tiene DNS en el runner; el `curl` del host sí | toda la closure se baja con el host y `apt update` desaparece (`bcd822b`) |
+| 37784767638 | 13:29 | el job muere en un *diagnóstico* | `set -e` sobre un reporte (`du` de un directorio que el build fallido no creó) | los reportes con `|| true`; solo las aserciones fallan (`bb2f0e0`) |
+| 37786844653 | 13:45 | `/usr/bin/curl` "no existe" | `libtermux-exec` reescribe `/bin`, `/etc`, `/lib`, `/usr`, `/var` en `execve`/`open` | herramientas del host copiadas a `~/.termux-builder-hostbin`, ruta no aliasada (`d5e227a`) |
+| 37788134488 | 13:54 | `invalid ELF header` | `LD_PRELOAD` bionic dentro de una herramienta glibc (`df`) | `unset LD_PRELOAD` en el hijo y `LD_PRELOAD` fuera de `GITHUB_ENV` (`53b8a49`) |
+| 37789690789 | 14:06 | rc 127 a los 12 ms, sin una línea | shebang `#!/bin/bash` de `build-package.sh` ejecutado por el kernel con el preload bionic en el entorno | el build se arranca con un script cuyo shebang es el del prefijo (`2915554`) |
+| 37790992541 | 14:15 | `build-package.sh:64: /usr/bin/jq: cannot execute` | el aliasado vuelve inalcanzable el `jq` del runner y faltaba el Tier 1 de `setup-termux.sh` en la closure | `jq`, `unzip`, `lzip` en los roots + shim `$PREFIX/bin/curl` (`12f31be`, `bd781c6`) |
+| 37795904301 | 14:51 | `Make.inc:1434 … without a functioning fortran compiler!` | `Make.inc:541` fija `FC := gfortran`; Termux no trae `gfortran` y OpenBLAS se construyó con `-DC_LAPACK=ON` | `FC := $PREFIX/bin/clang` en `Make.user` + sonda `-dM -E`/`__GNUC__` (`755fab0`) |
+| 37801929253 | 15:34 | CMake: `/usr/bin/gmake: no such file or directory` | CMake ancla `CMAKE_MAKE_PROGRAM` a la ruta del host; `make` de Termux no provee `gmake` | `$PREFIX/bin/gmake -> make` + sonda que configura **y compila** (`e2802de`) |
+| 37803324627 | 15:45 | 4 errores en `src/flisp/flisp.c:991` | ciclo de macros `BYTE_ORDER ↔ __BYTE_ORDER` entre `dtypes.h` y el `<sys/endian.h>` de bionic: el preprocessor corta la recursión, ambos valen 0 y `#if BYTE_ORDER == BIG_ENDIAN` se vuelve `0 == 0`; se compila la rama big-endian, cuyo `#define` en `flisp.c:990` carece de barra de continuación (bug latente de upstream) | `#ifndef` en los tres `#define` de `dtypes.h` + sección "endianness macros" en el gate (`f1f9638`) |
+| 37811196090 | 16:44 | `Unable to locate libpcre2-8.so` → `Makefile:93: julia-base`, ~47 min, con LLVM y flisp ya compilados | el `libwhich` parcheado **moría al responder**: su rama sin `dlinfo` re-`dlopen`ea cada imagen que `dl_iterate_phdr` reporta para comparar el handle, y la primera es `/system/bin/linker64`. En el teléfono ese pedido se rechaza por namespace y devuelve `NULL` sin consecuencias; en el runner, sin `/linkerconfig/ld.config.txt`, `/system/bin` sí es ruta de búsqueda y bionic se niega a cargarse a sí mismo (`error: linker cannot load itself`), matando el proceso **con stdout sin flush** → `libwhich -p` respondió `""` con rc=1 y el `2>/dev/null` de `base/Makefile:166` se llevó la única pista | `RTLD_LAZY \| RTLD_NOLOAD` al sondear el mapa (la rama Apple de libwhich ya lo usa) + saltar entradas sin `/` inicial, en `patches/deps/termux-libwhich-dlinfo-android.patch`; verificado con el tool real en el gate |
+| 37820685855 | 18:00 | `GATE: FAIL` con `resolution=1` en `lint`; el build ni empezó | la sonda nueva heredaba el algoritmo fatal de libwhich: `FAIL libpcre2-8.so` con el detalle vacío, porque el proceso moría antes de imprimir | la sonda reporta **por etapas** (`CTRL` de arranque, `LOAD <soname> ok` con `flush`, `NEEDED` del binario, stderr completo): un stdout vacío ahora significa "no llegó a `main()`" |
+| 37823556050 | 18:20 | `GATE: PASS` y `PROBE: PASS` en el runner, pero ~44 min después `Unable to locate libblas.so` → `Makefile:250` → `Makefile:93: julia-base`; el fix de libwhich **sí** había funcionado | el nombre que faltaba no era el que se verificaba: con `USE_SYSTEM_BLAS := 1`, `Make.inc` fija `LIBBLASNAME := libblas`/`LIBLAPACKNAME := liblapack` y `base/Makefile` pregunta por **esos alias**, que en Termux pertenecen al paquete split `blas-openblas`; la receta solo declaraba `libopenblas`, y gate y sonda llevaban la lista a mano | `blas-openblas` en `TERMUX_PKG_BUILD_DEPENDS`; `scripts/symlinked-libraries.sh` deriva los 19 nombres con `make` sobre el árbol parcheado; `MISS` pasó a ser `FAIL` |
+| 37833826111 | 19:41 | el job `build` **nunca arrancó**: el gate pasó con la lista derivada (19 nombres, `PROBE: PASS`) y falló el paso nuevo que se la pasa al job build | `tr '\n' ' '` convierte el último salto de línea en un **espacio final**, y la validación anclada `^[A-Za-z0-9_.+-]+( [A-Za-z0-9_.+-]+)*$` del propio paso lo rechaza; el guard era correcto, quien normalizaba mal era el join | `paste -sd' '`. Reproducido en el teléfono antes de tocar nada (`build-package.yml:116-119`) |
+| 37841320064 | 21:33 | hipótesis de `libblas.so` **confirmada** en el build (0 apariciones de `System library symlink failure`, 19 `ln -sf` incluidos `libblas.so` y `liblapack.so`); ~47 min después muere en `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1` con `ArgumentError("Platform \`ERROR: Unmatchable platform string 'aarch64-unknown-linux-gnu24'!-julia_version+1.12.6\` …")` | `base/Makefile:85` empotra `$(BB_TRIPLET_LIBGFORTRAN_CXXABI)` como `const BUILD_TRIPLET`, y esa variable es el stdout de `contrib/normalize_triplet.py $(BUILD_MACHINE)` invocado en `Make.inc:1380` **sin mirar el rc**. `BUILD_MACHINE` sale de `$(HOSTCC) -dumpmachine` (`Make.inc:917`) y en Termux es `aarch64-unknown-linux-android24`; las tablas del script no conocen android, así que imprimió su queja y **ese texto se convirtió en la constante**. El parche que había (`base-binaryplatforms.jl.patch`) reescribía `-android`→`-gnu` dentro de `parse`: una capa más abajo, arreglando el mensaje de error | `contrib-normalize_triplet.py.patch` (dos hunks) + eliminación del parche en `binaryplatforms.jl`; gate nuevo `scripts/embedded-triplet.sh`. Rojo→verde en el teléfono: `triplet=1` → `triplet=0 resolution=1` (descubierto el `libgfortran.so.5`, 19→20 nombres) → `triplet=0 resolution=0` con 19 nombres |
+| 37851961397 | 22:12→23:05 | hipótesis del triplet **confirmada** (`Unmatchable` 0 veces, `julia` arranca, `sysimage.mk` invoca el bootstrap); ~49 min después aborta otra vez en `sysimage.mk:129`, ahora con `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\""))` | causa distinta, una capa más abajo: `base/gmp.jl:32` pide `"libgmp.so.10"` y `base/mpfr.jl:40` `"libmpfr.so.6"` como **literales** (upstream no lo nota porque compila su propio GMP, cuyo SONAME sí lleva versión) y el `dlopen` de Android empareja **nombres de fichero**; ningún SONAME del prefijo lleva versión (medido con `readelf -d`). El alias de `base/Makefile:162` no puede ayudar: crea el nombre **sin** versión. Y la receta creaba los symlinks en `termux_step_post_make_install`, **después** de `make` | `packages/julia/soname-aliases.sh` deriva los nombres del fuente y veredicta `native`/`alias`/`built`/`absent`; `termux_link_soname_aliases` los enlaza en `usr/lib/julia` **antes** de `make` (`build.sh:172`) y de nuevo en `$PREFIX/lib/julia` tras install; sección `dlopen'ed versioned sonames` en el gate. Rojo→verde: `sonames=1` (`build.sh never creates the aliases the source demands`, rc=5) → `sonames=0`, 8 alias, 21 `native`, `libblastrampoline.so.5` `built`, 8 `absent` inocuos |
+
+Las secciones siguientes explican el **por qué** de cada cierre, no el qué.
+
+### 3.2 `scripts/lint-workflows.sh` — el gate del gate
+
+**Fallo que lo motivó**: GitHub ejecuta cada bloque `run:` como `bash -e {0}`.
+Un error de sintaxis o un comando no protegido que devuelve distinto de cero
+cuesta un arranque de runner completo y no dice nada de la hipótesis que se
+quería medir. Pasó al menos una vez por categoría (`lint-workflows.sh:6-9`).
+
+Qué hace y por qué cada pieza: parsear el YAML con PyYAML y **rechazar el fichero
+si no parsea** (informando la posición real, no `<unicode string>`); rechazar las
+palabras `and`/`or`/`not` dentro de `${{ }}` —PyYAML las acepta y GitHub rechaza
+el fichero entero antes de crear un job, así que ese fallo consume una cola sin
+producir log (`lint-workflows.sh:30-38,62-66`); extraer cada `run:` y pasarlo por
+`bash -n` (incluidos los `run:` de las composite actions, que se ejecutan en
+**todos** los jobs que las usan); advertir, no fallar, ante un fichero sin
+bloques `run:` (la última vez que pasó era un `run:` mal indentado); y resolver
+cada `uses: ./ruta` contra el disco.
+
+### 3.3 `scripts/rehearse-recipe.sh` — el replay, no una simulación
+
+**Fallo que lo motivó**: colectivamente, los modos de fallo que ocurrían dentro
+del runner pero eran **deterministas y baratos de detectar fuera**: un `*.patch`
+que deja de casar con upstream produce un `.rej` y un árbol medio parcheado; un
+`USE_SYSTEM_* := 1` apuntando a una librería que Termux no shippea falla ~70 min
+después; un soname que el loader no resuelve falla dentro de `julia-base` cuando
+LLVM ya está compilado (`rehearse-recipe.sh:7-12`).
+
+Es un **replay**, no una reimplementación: reimprime la selección de ficheros,
+la sustitución de tokens `@TERMUX_…@` y el `patch -p1` de
+`termux_step_patch_package()` (comparado con `termux-packages`), y ejecuta los
+hooks reales de la receta (`termux_step_pre_configure`, `termux_step_configure`)
+sobre el tarball pineado por SHA-256 (`rehearse-recipe.sh:63-72`). Las secciones,
+con su motivo:
+
+| Sección | Qué responde | Coste si se descubre en CI |
+|---|---|---|
+| `patch stage report` (`:101-128`) | los 22 parches aplican al árbol real, dry-run **y** aplicación real | árbol medio parcheado, fallo tardío |
+| `endianness macros` (`:130-153`) | si el árbol parcheado settlea `BYTE_ORDER`; preprocesar un header, no compilar flisp | run 37803324627 |
+| `recipe hooks` (`:155-196`) | rc de los hooks de la receta | — |
+| `Make.user` (`:198-219`) | el generado **no resucita vocabulario de cross**: veta `XC_HOST`, `HOSTCC`, `HOST_CMAKEFLAGS`, `BUILDOFFLINE`, `flang`, `F77=`, `USE_SYSTEM_LLVM:=1`, `JULIA_PRECOMPILE:=0`, `usr-staging`, `@TERMUX_` | silenciar la ruta muerta por convención no basta; se comprueba |
+| `Make.inc parse` (`:221-257`) | `Make.inc` acepta el `Make.user` **y** `FC_VERSION` no es vacío | run 37795904301, ~1 h |
+| `system dependency reality check` (`:259-313`) | cada `USE_SYSTEM_* := 1` respaldado por un fichero o binario real del prefijo | ~70 min |
+| `bundled-dep patches` (`:315-397`) | los ficheros que referencian `deps/*.mk` existen, y cada `patches/deps/termux-*.patch` aplica **al commit que `deps/*.mk` descarga** (SHA de `deps/*.version`) | fallo en `make -C deps` |
+| `library resolution` (`:399-432`) | ver §3.4/§3.5 | run 37811196090, ~47 min |
+| `embedded platform triplet` (`:434-455`) | ver §3.6 | run 37841320064, ~47 min |
+| `dlopen'ed versioned sonames` (`:457-522`) | ver §3.7 | run 37851961397, ~49 min |
+| `declared packages` (`:524-540`) | todo `TERMUX_PKG_*DEPENDS` existe en el repo de Termux | closure incompleta en el runner |
+
+El veredicto es una línea machine-readable con todas las banderas
+(`:544-545`) y `GATE: FAIL` con `exit 5` (`:546-552`). La línea de summary es
+intencionadamente un registro: los gates rojo→verde citados en la tabla de arriba
+se leen de ahí.
+
+**Por qué el gate veta vocabulario de cross** y no simplemente no lo usa: porque
+`termux_step_configure` genera el `Make.user` con un heredoc. Un flag residual
+sobrevive ediciones y reescrituras de la receta indefinidamente; vetarlo en el
+gate lo convierte en un hecho verificable en segundos.
+
+### 3.4 `scripts/symlinked-libraries.sh` — derivar la lista preguntándole a `make`
+
+**Fallo que lo motivó**: run 37823556050. Gate y sonda llevaban una lista escrita
+a mano con `libopenblas.so`; el build murió 44 min después pidiendo `libblas.so`.
+El nombre que faltaba no era el que se verificaba, y ni el gate ni la sonda podían
+descubrirlo por construcción.
+
+El mecanismo: el macro `symlink_system_library` de `base/Makefile:162` corre
+`libwhich -p` por cada library del sistema y convierte una respuesta vacía en
+`System library symlink failure` dentro del target `julia-base`. **Qué** nombres
+son esos, y cuáles pueden fallar, es el producto de los `$(eval $(call …))` bajo
+condicionales de OS/ARCH, de `LIBMNAME`/`LIBBLASNAME`/`LIBLAPACKNAME`/`SHLIB_EXT`
+de `Make.inc` y de los flags `USE_SYSTEM_*` de la receta (`symlinked-libraries.sh:5-14`).
+
+La derivación es una **grabadora**: se corta el bloque del árbol *parcheado* desde
+el condicional que lo abre (`'WINNT emscripten'`) hasta el target que lo consume
+(`symlink_system_libraries:`), se reemplaza el `define symlink_system_library`
+por un `$(info CALL …)`, y se incluye el resultado sobre `Make.inc` con el
+`Make.user` generado. Así expanden el mismo `versioned_libname` y `SHLIB_EXT`, y
+los guardas `USE_SYSTEM_*` y los `ALLOW_FAILURE` se resuelven como en el build.
+Detalles que son decisiones:
+
+- Se busca por **contenido**, no por número de línea, porque la receta parchea
+  ese mismo fichero (`base-Makefile.patch`); si el bloque cambia de forma, el
+  gate falla en lugar de derivar una lista vacía (`:39-45`).
+- `libLLVM` es una regla propia fuera del macro, bajo dos guardas, y se añade a
+  mano en el mismo sitio que el resto (`:60-65`).
+- stdout son **solo** los nombres cuya respuesta vacía aborta el build (guarda
+  activa, sin `ALLOW_FAILURE`); stderr es la tabla completa, incluido lo que se
+  saltó y por qué (`:84-95`). Una salida vacía es `FAIL`, nunca "nada que
+  comprobar".
+- Hoy: **19 nombres**, de los cuales `libblas.so` y `liblapack.so` son los que
+  la lista a mano nunca vio.
+
+### 3.5 `scripts/probe-library-resolution.sh` — la sonda por etapas
+
+**Fallo que lo motivó**: run 37811196090 (`libwhich` matándose al responder, §3.1)
+y luego run 37820685855, donde la sonda **heredó el mismo algoritmo fatal**:
+reportaba `FAIL libpcre2-8.so` con el detalle vacío porque el proceso moría antes
+de imprimir. Un fallo de diagnóstico es peor que un fallo de build: consume el
+mismo run y no enseña nada.
+
+Por eso el protocolo exige una línea por etapa, cada una flushada antes de la
+siguiente (`probe-library-resolution.sh:14-18,103-107`):
+
+- `CTRL` — ¿un binario recién compilado aquí alcanza `main()`? Si no, **todas**
+  las librerías parecerían irresolubles; se comprueba antes de culpar a `dlopen`.
+- `LOAD <soname> ok` — el loader encontró la librería. Lo que venga después ya
+  es otro problema.
+- `NEEDED`/`RUNPATH`/`interp` del propio binario de la sonda (`:154-162`) — la
+  sonda lleva el mismo `PT_INTERP` y la misma cadena de loaders que la
+  herramienta real, porque se compila con el clang de este entorno.
+- stderr **completo** en cada fallo; el `2>/dev/null` de `base/Makefile:166` es
+  exactamente lo que ocultó la pista original.
+- `TOOL` — cuando se le pasa `--src-dir`, se compila el `libwhich` pinned y
+  parcheado y se le aplica **la misma cadena de shell** que `base/Makefile:166`
+  aplica a su respuesta (`:218-238`). No se imita el consumo: se reproduce.
+
+La sonda no tiene lista propia: o `--tree` (y entonces llama a
+`symlinked-libraries.sh`) o `PROBE_LIBS` con la lista que el job `lint` derivó.
+Un nombre ausente del prefijo es `FAIL`, no `MISS`, porque `julia-base` aborta
+justo ahí (`:181-190`).
+
+**Por qué el `lint` pasa su lista al `build` por output del job**: el job build no
+tiene árbol fuente en el momento de la sonda (`build-package.yml:47-51,105-125`);
+inventar una segunda lista ahí es lo que dejó pasar `libblas.so` hasta un build.
+Este handoff motivó además el run 37833826111: el join con `tr '\n' ' '` deja un
+espacio final que la validación anclada del propio paso rechaza, y el guard era
+correcto. Se usa `paste -sd' '` (`build-package.yml:116-119`).
+
+### 3.6 `scripts/embedded-triplet.sh` — round-trip contra el productor, no contra una expectativa
+
+**Fallo que lo motivó**: run 37841320064, 47 min, `sysbase-o.a` con `ERROR:
+Unmatchable platform string 'aarch64-unknown-linux-gnu24'!` dentro de la
+constante.
+
+La cadena de causalidad, toda ella verificada en el fuente de Julia 1.12.6:
+`Make.inc:917` pone `BUILD_MACHINE := $(shell $(HOSTCC) -dumpmachine)`; en
+Termux eso es `aarch64-unknown-linux-android24`. `Make.inc:1380` calcula
+`BB_TRIPLET_LIBGFORTRAN_CXXABI` como `$(shell …contrib/normalize_triplet.py…)`
+**sin inspeccionar el rc**; cuando el script no reconoce el triple, imprime su
+queja a stdout. `base/Makefile:85` escribe ese stdout en `build_h.jl` como `const
+BUILD_TRIPLET`. `base/binaryplatforms.jl:958` le añade `-julia_version+1.12.6`,
+`parse` no casa nada y lanza en `:769`, abortando el bootstrap en `sysimage.mk:129`.
+
+La pregunta que hace el gate **no** es "¿se parece esto a un triplet linux": una
+expectativa escrita a mano es justo lo que permitió que la respuesta anterior
+fuera errónea. La pregunta es: ¿sobrevive el valor que se va a empotrar a un
+**round-trip por la misma gramática** que `base/binaryplatforms.jl` parsea? Y eso
+lo responde el mismo script que lo produce, invocado con el `$(PYTHON)` y el
+`invoke_python` de `Make.inc` (`embedded-triplet.sh:40-52`). La verificación
+cruzada adicional —transcribir el `triplet_regex` de `binaryplatforms.jl:678-695`
+y comprobar que ni la cadena cruda ni la reescrita casan, mientras
+`aarch64-linux-gnu-cxx11` sí casa— es lo que cerró el caso.
+
+Un efecto de segunda capa que la sonda cazó antes de gastar un run: arreglado el
+triple, el default "sin versión de compilador → `libgfortran5`" del propio script
+añadía la etiqueta; `Make.inc:1385` la convierte en `LIBGFORTRAN_VERSION=5` y
+`base/Makefile:239` pide `libgfortran.so.5` **sin** `ALLOW_FAILURE`. La lista
+derivada pasó de 19 a 20 nombres y la sonda lo marcó como fallo. Por eso el
+segundo hunk de `contrib-normalize_triplet.py.patch` no es cosmético (§4).
+
+### 3.7 `packages/julia/soname-aliases.sh` — leer los literales del fuente
+
+**Fallo que lo motivó**: run 37851961397, 49 min, `could not load library
+"libgmp.so.10"` durante el bootstrap de la sysimage, con `$PREFIX/lib/libgmp.so`
+instalado y correcto.
+
+`dlopen` en Android empareja **nombres de fichero**. `base/gmp.jl:32` y
+`base/mpfr.jl:40` piden nombres versionados estilo glibc como literales, porque
+upstream compila su propio GMP, cuyo SONAME sí lleva la versión. Un `readelf -d`
+sobre el prefijo muestra que ningún SONAME de Termux lleva versión. Y el alias de
+`base/Makefile:162` no puede ayudar: `symlink_system_library` crea el nombre **sin**
+versión en `usr/lib/julia`, y `libwhich -p libgmp.so.10` no resuelve.
+
+La derivación es un `grep` de literales `"lib…so[.N…]"` sobre `base/*.jl` y
+`stdlib/*/src/*.jl` (`soname-aliases.sh:43-48`) y un veredicto por nombre contra
+el prefijo: `native`, `alias <nombre> <sin-versión>`, `built` (esta receta lo
+compila: `libblastrampoline`, `libLLVM`) o `absent`.
+
+La **frontera de cobertura está declarada, no adivinada** (`:15-19`): esto lee
+literales. Un nombre construido por interpolación (`"libgfortran.so." * major`,
+`"libopenblas$(libsuffix).so"`) no es un literal y **no** aparece aquí; esos
+sitios pertenecen a los parches de stdlib que resuelven o saltan su propio
+`dlopen`, y `PROGRESS.md` los nombra como candidatos del tramo de precompile. Un
+gate que pretende cubrir lo que no puede ver miente en verde.
+
+La segunda parte del cierre es una **cuestión de capa temporal**, y es lo que
+make la derivación obligatoria en dos sitios: la receta creaba los symlinks en
+`termux_step_post_make_install`, es decir **después** de `make`, mientras el
+sysimage se bootstrapa **dentro** de `make`. Por eso `termux_link_soname_aliases
+usr/lib/julia` se llama en `termux_step_make` antes de `make` (`build.sh:159-172`)
+y se repite en `$PREFIX/lib/julia` tras install (`build.sh:187-195`). El gate
+exige esa evidencia, no la asume: localiza el cuerpo de `termux_step_make`,
+encuentra la línea de su `make` y reclama que la derivación aparezca **antes**
+(`rehearse-recipe.sh:494-516`); si no, `FAIL build.sh never creates the aliases
+the source demands`. También cruza los `absent` con la lista REQUIRED de §3.4: un
+nombre letal para `julia-base` y sin respuesta es `FAIL`; uno sin respuesta que
+`julia-base` no requiere es solo una nota (`:473-493`).
+
+Hoy: 8 alias (`libcurl.so.4`, `libgit2.so.1.9`, `libgmp.so.10`, `libgmpxx.so.4`,
+`libmpfr.so.6`, `libnghttp2.so.14`, `libpcre2-8.so.0`, `libssh2.so.1`), 21
+`native`, `libblastrampoline.so.5` `built`, 8 `absent` inocuos.
+
+### 3.8 `.github/scripts/termux-closure-resolver.py` — la closure como gate
+
+Sin red dentro del prefijo (§2), todo lo que el build necesita tiene que salir de
+**una** lista cerrada. El resuelve el cierre transitivo sobre `Depends`/
+`Pre-Depends` del índice de Termux; los roots son el bootstrap recortado + el
+Tier 1 de `setup-termux.sh` de termux-packages + `termux-elf-cleaner` + los
+`TERMUX_PKG_*DEPENDS` de la receta (`termux-closure-resolver.py:25-52`). Su
+política de fallo es deliberada: **solo** aborta si falta un root; una hoja sin
+resolver (un paquete virtual, un `Pre-Depends` que Termux expresa de otra forma)
+se reporta en stderr sin matar la preparación del prefijo (`:5-7,100-106`).
+Imprime su propio reporte `resolved=… unresolved=…` **tenga éxito o falle**,
+porque ese reporte es el diagnóstico.
+
+---
+
+<a name="4"></a>
+## 4. La regla de capa
+
+> Un parche arregla la capa que **produce** el valor, no la que lo consume.
+
+Es la lección cruzada de dos fallos y un cierre:
+
+- **Mal**: `base-binaryplatforms.jl.patch` hacía `replace("-android" => "-gnu")`
+  dentro de `parse`. Esa función ya está mirando un `ArgumentError` construido a
+  partir de un texto que **el error** contiene: el parche reescribía el mensaje,
+  no el valor. De ahí la bizarrez medida de un `24` escrito como `gnu` en el log
+  del run 37841320064, y de ahí que no pudiera arreglar nada.
+- **Bien**: `packages/julia/contrib-normalize_triplet.py.patch` canoniza
+  `-android<api>` → `-gnu` **donde nace la cadena**, en el script que `Make.inc:1380`
+  invoca. Un solo punto, todos los consumidores a la vez (el `BUILD_TRIPLET`
+  empotrado, el `USE_BINARYBUILDER` autodetectado en `Make.inc:1365`, las
+  etiquetas de libgfortran y cxxabi).
+- **Prueba de que la regla funcionó**: la cadena de fallo avanzó de capa. Con el
+  fix en `binaryplatforms.jl` el bootstrap moría en `binaryplatforms.jl`; con el
+  fix en `normalize_triplet.py` pasó de `binaryplatforms.jl` a `gmp.jl` (run
+  37851961397), es decir, el obstáculo real se movió al siguiente problema en vez
+  de maquillarse el anterior.
+
+Consecuencias no obvias de tocar la capa productora:
+
+1. **Puede activar cosas**. Hacer que `normalize_triplet.py` reconozca el triple
+   hace que el test de `Make.inc:1365` pase, y ahí `USE_BINARYBUILDER ?= 1`. La
+   receta lo impide con `:=`, que gana al `?=` (`build.sh:79`). Un arreglo en la
+   capa productora exige revisar qué más escucha esa señal.
+2. **Arrastra la segunda etiqueta**. Con el triple arreglado, el default
+   "sin versión de compilador → `libgfortran5`" del mismo script habría añadido
+   la etiqueta, `Make.inc:1385` la habría convertido en `LIBGFORTRAN_VERSION=5` y
+   `base/Makefile:239` habría exigido `libgfortran.so.5` sin `ALLOW_FAILURE`. El
+   segundo hunk del parche (`:111-124` del fichero original) suprime ese default
+   para android, igual que para musl: bionic no tiene libgfortran.
+3. **Es la misma lógica que el `gmake` del action** (§2.3): un symlink en la capa
+   que produce la ruta que CMake va a anclar, en lugar de un `-DCMAKE_MAKE_PROGRAM`
+   por dep.
+
+Regla práctica asociada: los parches llevan en su cabecera **el por qué y el run
+que lo motivó** (todos los `packages/julia/*.patch` empiezan con `# Termux/Bionic
+port: <ruta tocada>` y un párrafo de motivo). Un parche sin explicación de capa no
+se puede revisar cuando upstream cambie.
+
+---
+
+<a name="5"></a>
+## 5. La receta: flags y parches, y por qué cada uno
+
+### 5.1 flags del `Make.user` generado
+
+El `Make.user` lo escribe `termux_step_configure` con un heredoc
+(`build.sh:76-135`); no es un fichero versionado. Cada decisión existe por un
+motivo medido:
+
+| Flag | Por qué |
+|---|---|
+| `prefix`/`LOCALBASE = $TERMUX_PREFIX` | on-device: instalar dentro del prefijo vivo |
+| `USE_BINARYBUILDER := 0` | `USE_BINARYBUILDER=0` es lo que impide que los deps se descarguen de ArtifactHub; hay que ganarle al `?=` de `Make.inc:1366`, que ahora **sí** querría activarse (§4.1) |
+| `JULIA_CPU_TARGET := generic` | el target de CPU que `sysimage.mk:104,118` pasa como `-C` al bootstrap. La receta lo fija explícitamente; `Make.inc:1175` tiene `?= native` |
+| `USE_SYSTEM_LLVM := 0` | Julia 1.12 pinea LLVM 18.1.7 + symver `JL_LLVM_18.1`; Termux solo da LLVM 21. Compilarlo es posible **porque host == target** (§1.4) |
+| `USE_SYSTEM_LLD := 1`, `USE_SYSTEM_PATCHELF := 1`, `USE_SYSTEM_P7ZIP := 1` | binarios que Termux shippea y Julia solo necesita encontrar en PATH |
+| `USE_SYSTEM_{ZLIB,PCRE,GMP,MPFR,OPENSSL,LIBSSH2,NGHTTP2,CURL,LIBGIT2,LIBSUITESPARSE,BLAS,LAPACK} := 1` | cada uno respaldado por un fichero real del prefijo; el gate lo comprueba uno a uno (§3.3) |
+| `USE_SYSTEM_LIBM := 1` | libm es de bionic, no del prefijo: el gate **no** busca un fichero (`rehearse-recipe.sh:298`) |
+| `USE_SYSTEM_CSL := 1` | no hay `libgcc_s`/`libstdc++`/`libgfortran` que bundlear en bionic; también inercializa `deps/csl.mk`, el otro consumidor de `$(FC)` en parse-time (`build.sh:62-64`) |
+| `USE_SYSTEM_{LIBUV,UTF8PROC,DSFMT,LIBWHICH} := 0` | Julia pinea sus propios forks/commits; las versiones de Termux son otras release y el código de Julia asume las suyas. `libwhich` **además** se parchea aquí (§3.1) |
+| `FC := $PREFIX/bin/clang` | `Make.inc:541` fija `FC := $(CROSS_COMPILE)gfortran` y `Make.inc:1375` deriva `FC_VERSION` de `$(FC) -dM -E`; el guarda de `Make.inc:1432-1434` aborta si `FC_VERSION` es vacío y OpenBLAS/SuiteSparse no vienen de BinaryBuilder. Termux no trae `gfortran`; flang arrastraría una segunda toolchain LLVM (mlir, libllvm, libandroid-complex-math-static) para satisfacer un sondeo. El override **debe** vivir en `Make.user`: `Make.inc` lo incluye una segunda vez en `:754`, después de la línea 541 |
+| `USE_BLAS64 := 0` | el `libopenblas` de Termux exporta símbolos ILP32 (`dgemm_`), no los suffixed `64_` |
+| `USE_SYSTEM_LIBBLASTRAMPOLINE := 0` | se compila el LBT de Julia, que redirige a `$PREFIX/lib/libopenblas.so`; su SONAME versionado es lo que hace `built` en §3.7 |
+| `DISABLE_LIBUNWIND := 1` | aarch64 usa el cambio de pila en ensamblar propio de Julia (`JL_HAVE_ASM`); libunwind no hace falta ni es portable aquí. Su guard en `src/signals-unix.c` es un parche aparte |
+| `USE_PERF_JITEVENTS := 0` | Android no expone la interfaz de muestreo `perf(1)` que LLVM engancha |
+| `CLANG_RT_BUILTINS := $PREFIX/lib/clang/*/lib/linux/libclang_rt.builtins-aarch64-android.a` | bionic no tiene `libgcc_s`: los builtins de compiler-rt son los que aportan esos símbolos, y hay que enlazarlos `--whole-archive` en el loader (`cli-Makefile.patch`) y en runtime/codegen (`src-Makefile.patch`). La receta **aborta** si el .a no está (`build.sh:47-53`) |
+| `JULIA_PRECOMPILE := 1` | los stdlibs precompilados son lo que hace que `Pkg`/`LinearAlgebra` se comporten como el paquete real; el runner tiene memoria para ello. En el teléfono, no |
+
+No hay `CC` ni `CXX` a propósito: `Make.inc` detecta clang desde `cc --version` y
+elige `USECLANG` solo, y el clang de Termux ya apunta al API level del dispositivo.
+
+### 5.2 Las 22 + 2 parches, por capa
+
+Convención de `termux-packages` (`termux_step_patch_package.sh:5-34`): los
+`*.patch` se aplican con `patch -p1` en orden alfabético, con los tokens
+`@TERMUX_*@` sustituidos; existen sufijos condicionales (`.patch32`/`.patch64`,
+`.patch.debug`, `.patch.ondevice`) que aquí no se usan. El nombre del fichero es
+documentación de la ruta tocada (`/` → `-`), no un mecanismo.
+
+| Capa | Ficheros | Motivo común |
+|---|---|---|
+| Build system | `Make.inc.patch` (quita `libgcc_s` de las listas de deplibs del loader), `base-Makefile.patch` (`ALLOW_FAILURE` en `libm`, `libgcc_s`, `libstdc++`: el mismo trato que Julia ya da a `libssp`/`libatomic`/`libgomp`), `cli-Makefile.patch` (Android rechaza `DT_TEXTREL`; compiler-rt en el loader), `src-Makefile.patch` (compiler-rt en runtime y codegen), `deps-llvm.mk.patch` (cmira al zlib de Termux, no al `deps/usr` vacío), `deps-libuv.mk.patch` y `deps-libwhich.mk.patch` (insertan un target `source-patched` en la cadena de rules de los deps) | la capa que **produce** valores de build |
+| Runtime C/C++ | `src-support-platform.h.patch` (define `_OS_ANDROID_`; es el guard maestro de todo lo demás), `src-support-dtypes.h.patch` (ciclo de endianness + `uint_t` de bionic), `src-sys.c.patch` (`jl_pathname_for_handle` por `dl_iterate_phdr`: no hay `dlinfo`), `src-cgmemmgr.cpp.patch` (sin `shm_open` → fallback `tmpfile`), `src-debuginfo.cpp.patch` (sin `__register_frame` sin libgcc_s), `src-gc-debug.c.patch` (sin `malloc_stats`), `src-init.c.patch` (sin `pthread_get_stackaddr_np`), `src-jlapi.c.patch` y `src-scheduler.c.patch` (rr no existe; su syscall de probe 1008 lo bloquea seccomp), `src-runtime_ccall.cpp.patch` (sin `getdomainname`), `src-signals-unix.c.patch` (`signal_bt_*` referenciados fuera del guard de libunwind), `cli-loader_lib.c.patch` (saltar la sonda de `libstdc++`: hay libc++ y no hay ldconfig) | bionic ≠ glibc, y Julia solo conocía `_OS_LINUX_` |
+| Configuración | `contrib-normalize_triplet.py.patch` (§4) | la capa que produce el triplet |
+| Stdlib JLL | `stdlib-OpenBLAS_jll.jl.patch`, `stdlib-libblastrampoline_jll.jl.patch` | **no congelar rutas en la sysimage**: un `const` a nivel de módulo de un stdlib entra en `sys.so` con el prefijo de la máquina de build; todo se calcula dentro de `__init__()`. Y `dlpath()` no basta: en bionic respondía `NULL` para un handle cargado, dejando la ruta en `""` y matando a todo proceso en la init de BLAS |
+| Contenido de deps | `patches/deps/termux-libuv-process-android.patch` (no hay `pthread_cancel`/`pthread_setcancelstate`), `patches/deps/termux-libwhich-dlinfo-android.patch` (rama `dlinfo` solo fuera de Android; `RTLD_NOLOAD` y saltar entradas sin `/` inicial, §3.1) | se instalans en `$SRCDIR/deps/patches/` desde `termux_step_pre_configure` (`build.sh:37-42`) porque `deps/Makefile` redefine `SRCDIR` a `deps/` |
+
+---
+
+<a name="6"></a>
+## 6. DAG, caché y presupuesto
+
+### 6.1 El DAG
+
+```
+lint (Static gate, sin compilar)  ->  build (.deb)  ->  bundle (.pkg.tar.xz + tar.gz)  ->  publish (opt-in)
+   ubuntu-24.04-arm, 40 min           ubuntu-24.04-arm, 300 min   ubuntu-24.04, 20 min       ubuntu-24.04, 15 min
+```
+
+- Nada caro empieza sin el gate: `build.needs: lint`. El gate está **dentro** del
+  DAG (job `lint` sobre el mismo action) además de ser obligatorio localmente,
+  porque el gate deriva conclusiones del prefijo real del runner: un gate solo
+  local validaría contra un prefijo distinto del que compila.
+- `lint` exporta `probe_libs` (`build-package.yml:50-51`) y `build` la consume
+  (§3.5). Esta arista de datos es la razón por la que el gate y el build no
+  pueden divergir en la lista de nombres.
+- El disparador es `push` a `main` **filtrado por paths** (`packages/**`,
+  `scripts/**`, `.github/actions/**`, `.github/scripts/**`, el workflow) y
+  `workflow_dispatch` con el input `publish` (`build-package.yml:16-30`). El
+  filtro existe porque un commit de documentación no debe gastar un run, y el
+  dispatch existe porque publicar es una decisión aparte (§6.3).
+- `publish` está condicionado a `workflow_dispatch` **y** `publish == 'true'`
+  (`build-package.yml:444`); usa `github.event.inputs` en lugar de `inputs`
+  porque el job también se evalúa en eventos `push`, donde los inputs no existen.
+
+### 6.2 Caché: el contrato es sobre el artefacto, no sobre el árbol
+
+```
+julia-deb-v1-aarch64-<tp_sha>-<repo_stamp>-<hashFiles('packages/julia/**')>
+                                                       (build-package.yml:182,336)
+```
+
+Los tres componentes son las tres cosas que cambian el binario resultante:
+
+1. `tp_sha`: el commit de `termux-packages` clonado en `--depth 1`
+   (`build-package.yml:153-155`). No se pinea: un bump del framework de build
+   cambia el paquete.
+2. `repo_stamp`: los primeros 16 hex del SHA-256 del índice `Packages` descargado
+   por el action (`build-package.yml:163-166`). Cualquier librería movida en el
+   repo de Termux cambia lo que se produce.
+3. `hashFiles('packages/julia/**')`: la receta **y cada uno de sus 22 parches**.
+
+Y el árbol de trabajo **deliberadamente no se cachea** (`build-package.yml:168-176`):
+termux-packages borra `$TERMUX_PKG_SRCDIR` al empezar toda build
+(`termux_step_setup_build_folders.sh:20`, alcanzado desde `termux_step_start_build`
+porque solo `-c` lo salta), y con `-c` el empaquetado barrería solo los ficheros
+más recientes que su nuevo timestamp. Cachear un árbol que el framework destruye
+produce un artefacto deshonesto. Un artefacto reconstruido es el resultado
+honesto; la caché de artefacto es lo que hace gratis repetir una receta sin
+cambios.
+
+Consecuencia económica: **tocar la receta o cualquier `*.patch` paga ~45-52 min de
+reconstrucción** (`PROGRESS.md`). Mientras un run mide una hipótesis, `packages/**`
+no se toca. Y `concurrency.group = <workflow>-<ref>` con
+`cancel-in-progress: true` (`build-package.yml:35-37`) convierte un push en la
+cancelación del run en curso.
+
+### 6.3 Publicación
+
+Un build verde **no publica nada ni mueve ningún puntero**. La release `julia-latest`
+se destruye y se recrea (`build-package.yml:478-484`), así que publicar un artefacto
+sin verificación en dispositivo sería publicar una mentira: la nota que genera el
+propio job dice en claro que un run verde significa "build e inspección", no
+"funciona en un teléfono" (`build-package.yml:475-476`).
+
+### 6.4 Paso de informe: reportar nunca es sentenciar
+
+El paso `Where the time went` (`build-package.yml:338-365`) empieza con `set +e`.
+No es decorativo: fue la causa de un job rojo (run 37784767638) por un `du` sobre
+un directorio que el build fallido nunca creó. La regla general del repo: los
+reportes van con `|| true` o con guardas; **solo las aserciones pueden fallar**.
+Análogamente, `Inspect the artifact` informa también lo que no es un fallo duro
+(`WARN libLLVM-18jl.so not in the package`) porque una build que enlace LLVM
+estáticamente no es una regresión.
+
+---
+
+<a name="7"></a>
+## 7. Artefactos y su inspección
+
+Salida **triple**, porque el usuario gestiona Termux con pacman (`repo.json`
+declara `pkg_format: pacman`):
+
+- `.deb` — lo produce `build-package.sh --format debian` en el job `build`; es el
+  artefacto que se cachea (`output/julia_*_aarch64.deb`).
+- `.pkg.tar.xz` — lo deriva el job `bundle` con `scripts/make-pacman-pkg.sh` **a
+  partir del `.deb`**, no de un árbol de build: así es imposible que los dos
+  formatos contengan bytes distintos, y la lista de dependencias se lee del member
+  `control` del `.deb`, o sea, de la receta (`make-pacman-pkg.sh:1-13`, replicando
+  el layout de `termux_step_create_pacman_package.sh`).
+- `julia-termux-aarch64.tar.gz` + `SHA256SUMS.txt` — el paquete descargable.
+
+La coherencia se comprueba, no se afirma (`build-package.yml:417-430`): `sha256sum
+-c` y un `diff` de las listas de ficheros del `.deb` desmontado contra las del
+`.pkg.tar.xz`, excluyendo los metadatos de pacman (`.PKGINFO`, `.BUILDINFO`,
+`.MTREE`).
+
+**Inspección del `.deb`** (`build-package.yml:239-329`), con su motivo:
+
+| Comprobación | Por qué |
+|---|---|
+| presencia de `bin/julia`, `lib/julia/sys.so`, `lib/julia/libblastrampoline.so*` | una julia sin sysimage o sin codegen **instala limpio y luego no corre**; la receta ya lo exige en `termux_step_post_make_install` (`build.sh:199-203`) |
+| nada fuera del footprint de Julia | la otra mitad de `termux_step_pre_massage` (§1.5) |
+| `readelf -d` exige `RUNPATH` y rechaza `DT_TEXTREL` | sin `RUNPATH` los stdlibs no encuentran `$PREFIX/lib/julia`; Android **rechaza** `DT_TEXTREL` (por eso `cli-Makefile.patch` quita `-Wl,-z,notext`… y por eso hace falta el `--whole-archive` de compiler-rt) |
+| `NEEDED` de `libjulia-codegen.so` y rechazo explícito de `libLLVM-21` | demuestra que el LLVM es el bundled de Julia, no el de Termux (§1.4) |
+| `readelf -V` del symver `JL_LLVM_18.1` | si falta, las referencias versionadas de codegen no resuelven en tiempo de carga |
+| `du` del payload y recuento de `*.so*` | presupuesto y señal de contaminación del prefijo |
+
+El `build.log` se sube siempre (`if: always()`), con el filtro del ruido
+`linkerconfig|ld.config.txt` aplicado, y la summary del job extrae los primeros
+errores y las últimas 60 líneas: la fuente de verdad de un run sigue siendo
+`gh run view <id> --json status,conclusion` (`PROGRESS.md` "Notas": `gh run watch`
+devolvió 0 en runs fallidos).
+
+---
+
+<a name="8"></a>
+## 8. Verificación en el dispositivo
+
+**"Compila" no es "funciona"**, y la diferencia no es retórica: hasta el minuto 49
+el build compila y la sysimage aborta. La definición de hecho vive en
+`scripts/device-smoke.sh`, que se corre **en el teléfono y nunca en CI**: CI
+construye, el dispositivo prueba (`device-smoke.sh:1-5`).
+
+Estructura y por qué:
+
+- Guarda de espacio (600 MB libres en `$PREFIX`, `:45-49`) antes de tocar nada, y
+  `JULIA_DEPOT_PATH`/`JULIA_COMPILED_CACHE_PATH`/`TMPDIR` apuntando a un workdir
+  desechable (`:51-54`): la smoke no puede ensuciar ni depender del depot real.
+- Verifica `SHA256SUMS` si el bundle los trae (`:73-80`).
+- Instala con `pacman -U` si hay `.pkg.tar.xz`, si no `dpkg -i`, y en ese caso
+  ordenando inversamente para que `llvm-julia` aterrice antes de `julia` si la
+  receta llegara a partirse (`:94-103`) — es decir, instala en el formato que el
+  dispositivo use realmente, que es exactamente por qué la salida es triple.
+- Cada aserción es un proceso `julia --startup=no` con `timeout` (`:112-124`) y
+  **stdout/stderr capturados por aserción**; un FAIL imprime 15 líneas. No hay
+  aserción "el paquete está instalado".
+- Las aserciones escogen los mecanismos que el port toca: `dlpath_regression`
+  pide exactamente `"libgmp.so.10"`/`"libmpfr.so.6"`/`"libblastrampoline.so.5"`
+  y exige que `dlpath` devuelva una ruta existente (`:128-139`) — es la prueba en
+  dispositivo de §3.7 y del `jl_pathname_for_handle` de `src-sys.c.patch`;
+  `pcre_jit` ejercita SLJIT escribiendo en memoria ejecutable, que es lo que
+  rompen los entornos emulados (`:214-229`); `gemm_threads` y `threads_spawn`
+  cubren BLAS y las tasks de aarch64; `codegen_llvm` emite IR, o sea usa
+  `libjulia-codegen` y su LLVM 18 (§1.4); `libgit2`/`suitesparse`/`arpack`/`fft`
+  cubren los deps de sistema cuyos nombres revisa §3.3.
+- Con `--network` añade la batería de `Pkg` (add/instantiate/download, MbedTLS);
+  con `--runtests` corre subconjuntos de la suite propia de Julia (`linalg
+  sparsearrays libdl sockets errors` por defecto) **a través de `tcr`**, que es el
+  envoltorio de límites de CPU/memoria del dispositivo (`:272-299`).
+- `scripts/device-diag.sh` es el hermano read-mostly: diagnostica el `julia`
+  **ya instalado** sin reinstalar nada, con las mismas aserciones básicas y los
+  mismos `dlpath` de nombres versionados (`device-diag.sh:99-111`). Es la
+  herramienta para distinguir "este paquete no funciona" de "me falta algo en el
+  entorno".
+
+Nada de esto está todavía ejecutado: la Fase 5 de `PROGRESS.md` está **pendiente**
+porque no existe artefacto que instalar (§9).
+
+---
+
+<a name="9"></a>
+## 9. Límites conocidos y estado honesto (2026-10-08)
+
+Copiado de `PROGRESS.md`, sin relajar:
+
+- La cadena está medida hasta el **minuto ~49**. Compilan y están validados en CI:
+  la receta y sus 22 parches, el `configure` con un `Make.user` que `Make.inc`
+  acepta, los gates, el entorno del runner, LLVM 18.1.7-4 bundled, `src/`, flisp,
+  `julia-base` con sus 19 symlinks derivados, el arranque de `julia` y el
+  bootstrap de la sysimage **arrancando** (triplet cerrado y confirmado en el run
+  37851961397).
+- **No hay ningún `.deb` o `.pkg.tar.xz` producido.** Consecuencia: `bundle` y
+  `publish` quedan `skipped` mientras no exista artefacto, y la Fase 5
+  (verificación en dispositivo) está pendiente.
+- Sin demostrar: `sys-o.a` + precompile (`sysimage.mk:110-123`), `pkgimage.mk`,
+  `make install`, y todo lo que el instalador de paquetes haga después.
+- El fallo actual (sonames versionados) **tiene fix y gate, pero el fix todavía no
+  está medido en CI**: la hipótesis del próximo run es que el bootstrap pasa de
+  `gmp.jl` y `sysimage.mk:129` produce `sysbase-o.a`.
+- Riesgo residual declarado: después de `sysimage.mk:129` vienen
+  `julia-sysimg-*`, el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que nunca
+  corrió en Android. Si el run cae ahí, la nueva línea de `make` y el `LoadError`
+  dicen desde dónde ampliar el gate. Como `packages/**` y `scripts/**` cambian, la
+  clave de caché no hita y el run vuelve a pagar la compilación completa.
+
+Candidatos del tramo siguiente, ya medidos y descartados/afirmados
+(`PROGRESS.md` "Tramo siguiente"):
+
+- **`RTLD_DEEPBIND` no rompe nada.** `contrib/generate_precompile.jl:231` hace
+  `dlopen("libjulia", RTLD_LAZY | RTLD_DEEPBIND)` y `base/libdl.jl:30` define
+  `RTLD_DEEPBIND = 0x40` como constante escrita a mano, así que parecía un abort
+  seguro. Pero `src/dlload.c:210` envuelve la bandera en `#if defined(RTLD_DEEPBIND)`
+  y bionic **no** la define (probe con `#ifdef`: `RTLD_NODELETE` sí;
+  `RTLD_DEEPBIND`/`RTLD_FIRST` no), así que `jl_dlopen` la descarta y
+  `default_rtld_flags` (`base/libdl.jl:49`) es inofensivo. La falla solo aparece
+  llamando a la libc directamente.
+- **Las stdlibs externas ya se bajaron bien.** 15 de las 66 entradas de `stdlib/`
+  son ficheros `*.version` que `deps/tools/stdlib-external.mk` descarga de
+  `api.github.com`. En 37841320064 el log no tiene una línea de `Pkg` (GitHub
+  omitió la ventana), pero `Makefile:113` hace `julia-stdlib` prerequisito de
+  `julia-sysimg-release` y el recipe de ese target fue el que corrió `sysimage.mk`:
+  la descarga terminó. El límite de tasa anónimo **no** es un bloqueo observado.
+- **El runtime GNU no existe en el prefijo; `CompilerSupportLibraries_jll` es el
+  candidato nombrado para `sys-o.a`.** Medido en el teléfono: no hay `libgcc_s*`,
+  `libgfortran*`, `libstdc++*`, `libgomp*` ni `libssp*` en `$PREFIX/lib` ni en
+  `$PREFIX/lib/julia` (Termux usa clang + libc++), y
+  `stdlib/CompilerSupportLibraries_jll/src/…:57-64` los dlopen **con throw**. Sus
+  únicas aristas de dependencia son `OpenBLAS_jll` y `p7zip_jll`, y el propio
+  `OpenBLAS_jll` upstream tiene comentado el `using CompilerSupportLibraries_jll`
+  (nuestro `stdlib-OpenBLAS_jll.jl.patch` ya salta el `dlopen(_libgfortran)`).
+  instantiate ≠ init: un módulo congelado en la imagen no ejecuta `__init__` si
+  nadie lo carga, así que **no está demostrado como bloqueo**. Si `sys-o.a` muere
+  con `could not load library "libgcc_s.so.1"`, el parche es ese archivo (o bajar
+  `JULIA_PRECOMPILE` a 0), **no otro alias**.
+- **`--cpu-target=native` literal dentro del precompile, sin evidencia de fallo.**
+  Medido sobre el tarball pineado hay **dos** invocaciones y solo una controlable:
+  la externa (`sysimage.mk:118`, `-C "$(JULIA_CPU_TARGET)"`, que la receta fija en
+  `generic` en `build.sh:80`) y la interna — `contrib/generate_precompile.jl:360`
+  spawnea `$(julia_exepath()) -O0 --trace-compile=… --cpu-target=native` para
+  precompilar cada paquete, con **native como literal**; `JULIA_CPU_TARGET` no
+  aparece en el script (buscado) y ningún parche de la receta toca esa línea. El
+  machine code de los `.ji` se genera entonces para la CPU del runner, no para la
+  del teléfono. Como no hay todavía un log que lo señale, no se parchea: si
+  `sys-o.a` muere con `Illegal instruction`/`SIGILL`, o si la imagen arranca en el
+  runner y revienta en el dispositivo, el fix es esa línea 360 (regla de capa: el
+  valor se produce ahí), no una bandera más en la receta.
+- Los 8 alias se crean ahora **antes** de `make`, porque cada etapa de precompile
+  abre un `julia` nuevo y los `_jll` del árbol vendido piden `libcurl.so.4`,
+  `libgit2.so.1.9`, `libssh2.so.1`, `libnghttp2.so.14`, `libgmpxx.so.4`,
+  `libpcre2-8.so.0`. Que `usr/lib/julia` esté en la búsqueda es medible en el
+  paquete instalado: `readelf -d libjulia-internal.so` da
+  `RUNPATH [$ORIGIN:$ORIGIN/..]`, y `base/Makefile` ya enlaza ahí sus 19 nombres.
+
+Límites estructurales que no van a desaparecer:
+
+- Los runners no son Android: `/system` es un asset y `libtermux-exec` aliasa
+  FHS. Cualquier herramienta nueva que el build invoque tiene que cumplir las dos
+  reglas de §2 (ruta no aliasada **y** sin `LD_PRELOAD`).
+- La línea de tiempo de termux-packages no es fixeada: el job clona `--depth 1`
+  del HEAD y su sha entra en la clave de caché; una regresión upstream se manifiesta
+  como misses de caché completos y un run de ~45-52 min. Los números de línea de
+  termux-packages citados aquí son del clon actual del repo upstream.
+- La rama `ci/probe-rootfs` es un asset del build: borrarla rompe todos los jobs
+  que usan el action.
+- El teléfono no compila Julia: solo baixa, instala y prueba.
+
+---
+
+<a name="10"></a>
+## 10. Restos de la ruta abandonada
+
+Algunos ficheros de la arquitectura cross-compilar/Docker siguen en el árbol.
+Ninguno está referenciado por `.github/workflows/build-package.yml` ni por
+`packages/julia/**` (verificado con grep sobre el repo): si ves alguno, es la ruta
+muerta y **no lo uses**.
+
+| Fichero | Estado |
+|---|---|
+| `scripts/Dockerfile`, `scripts/run-docker.sh`, `scripts/build-deps-docker.sh`, `scripts/setup-ccache-docker.sh`, `scripts/patch-fuse-overlayfs.sh` | builder Docker x86_64 de la ruta cross; nada los invoca |
+| `scripts/install-deps.sh` | instala deps a mano con patrones HTTP de la época cross; `device-smoke.sh:56-57` reserva su ruta pero **no la invoca** |
+| `scripts/build-local.sh` | build local en el teléfono; contradice la regla de presupuesto (`AGENTS.md`: el teléfono no compila Julia) |
+| `.github/actions/zram/` | acción de swap comprimido del builder anterior; **ningún workflow la usa hoy** |
+| `ndk-patches/29/` | directorio vacío del NDK cross |
+| `tasks/`, `trace-dl/` | notas y trazas de sesiones anteriores |
+
+El vocabulario prohibido —`XC_HOST`, `HOSTCC`, `BUILDING_HOST_TOOLS`, `--host`,
+`host-flisp`— no solo está desaconsejado: el gate lo **rechaza** si aparece en el
+`Make.user` generado (`rehearse-recipe.sh:209-215`).
+
+---
+
+## 11. Dónde mirar
+
+| Quiero saber… | Archivo |
+|---|---|
+| qué falló, en qué minuto, qué gate lo cerró, qué queda | `PROGRESS.md` |
+| reglas operativas, presupuesto, qué está prohibido | `AGENTS.md` |
+| la receta y sus flags reales | `packages/julia/build.sh` |
+| el DAG real (lint → build → bundle → publish) | `.github/workflows/build-package.yml` |
+| cómo se materializa el prefijo en el runner | `.github/actions/termux-builder/action.yml` |
+| el gate local completo | `scripts/rehearse-recipe.sh` |
+| derivación de sonames / triplet / alias versionados | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh` |
+| la sonda del loader por etapas | `scripts/probe-library-resolution.sh` |
+| la closure del prefijo | `.github/scripts/termux-closure-resolver.py` |
+| cómo se prueba que funciona | `scripts/device-smoke.sh`, `scripts/device-diag.sh` |
+| las tres sondas que legitimaron host == target | `.github/workflows/probe-*.yml` |
