@@ -1,29 +1,52 @@
 # Termux/Bionic port: stdlib/libblastrampoline_jll/src/libblastrampoline_jll.jl
 #
-# Load Julia's own libblastrampoline from its installed path, computed per
-# process instead of via dlpath().
+# Load Julia's own libblastrampoline from whichever directory actually holds it,
+# computed per process instead of via dlpath().
 --- a/stdlib/libblastrampoline_jll/src/libblastrampoline_jll.jl
 +++ b/stdlib/libblastrampoline_jll/src/libblastrampoline_jll.jl
-@@ -27,8 +27,20 @@
+@@ -27,8 +27,43 @@
  end
  
++# There is no artifact directory: Julia builds libblastrampoline itself
++# (USE_SYSTEM_LIBBLASTRAMPOLINE=0), so deps/blastrampoline.mk stages it into
++# $(build_shlibdir) - `usr/lib` while the system image is generated - and the
++# install rule copies it into $(private_libdir) - `$PREFIX/lib/julia`.
++# base/Makefile:249 would have linked it into usr/lib/julia during the build as
++# well, but only for a system libblastrampoline, which is what this recipe turns
++# off.  So neither directory alone answers for both trees, and the one that is
++# there depends on whether this code runs before or after `make install`.
++#
++# The path is computed inside __init__() rather than as a module-level `const`,
++# because a top-level const in a stdlib is frozen into sys.so and would keep the
++# build machine's prefix.  `dlpath()` alone is not acceptable either: on Bionic
++# it answered NULL for a loaded handle, which turned the path into a silent "".
++function load_libblastrampoline()
++    libdir = joinpath(dirname(Sys.BINDIR), "lib")
++    candidates = (joinpath(libdir, "julia", libblastrampoline),
++                  joinpath(libdir, libblastrampoline),
++                  libblastrampoline)
++    for candidate in candidates
++        handle = dlopen(candidate; throw_error=false)
++        handle === C_NULL && continue
++        isfile(candidate) && return (handle, normpath(candidate))
++        path = try
++            dlpath(handle)
++        catch err
++            Base.@warn "libblastrampoline_jll: dlpath() of $(candidate) failed" exception=(err, catch_backtrace())
++            ""
++        end
++        isempty(path) || return (handle, path)
++    end
++    error("libblastrampoline_jll: none of ", join(candidates, ", "),
++          " could be loaded; is libblastrampoline built?")
++end
++
  function __init__()
 -    global libblastrampoline_handle = dlopen(libblastrampoline)
 -    global libblastrampoline_path = dlpath(libblastrampoline_handle)
-+    # Julia builds libblastrampoline itself (USE_SYSTEM_LIBBLASTRAMPOLINE=0) and
-+    # installs it in $(prefix)/lib/julia, which is `usr/lib/julia` while the system
-+    # image is generated and $PREFIX/lib/julia on the device.  The path is computed
-+    # here rather than as a module-level `const`, because a top-level `const` in a
-+    # stdlib is frozen into sys.so and would keep the build machine's prefix.
-+    # `dlpath()` is not consulted: on Bionic it used to answer NULL for a loaded
-+    # handle, which turned the path into a silent "".
-+    lbt_path = joinpath(dirname(Sys.BINDIR), "lib", "julia", libblastrampoline)
-+    global libblastrampoline_handle = dlopen(lbt_path; throw_error=false)
-+    if libblastrampoline_handle === C_NULL
-+        error("libblastrampoline_jll: could not dlopen ", lbt_path,
-+              "; is libblastrampoline installed?")
-+    end
-+    global libblastrampoline_path = lbt_path
++    loaded = load_libblastrampoline()
++    global libblastrampoline_handle = loaded[1]
++    global libblastrampoline_path = loaded[2]
      global artifact_dir = dirname(Sys.BINDIR)
      LIBPATH[] = dirname(libblastrampoline_path)
      push!(LIBPATH_list, LIBPATH[])

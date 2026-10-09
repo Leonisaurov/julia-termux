@@ -47,10 +47,14 @@ demanded=$(
 )
 [ -n "$demanded" ] || { echo "FAIL  no dlopen'able library name found in the source" >&2; exit 2; }
 
-# Libraries this recipe compiles itself, whose versioned file therefore appears
-# in usr/lib/julia with no alias: deps builds libblastrampoline with its own
-# SONAME, and libLLVM carries Julia's version (the readelf -V check in build.sh
-# is what pins that).
+# Libraries this recipe compiles itself, so no alias is created for them: deps
+# stages libblastrampoline and LLVM into $(build_shlibdir) - `usr/lib` during the
+# build, `$PREFIX/lib/julia` after make install - under their own versioned file
+# names, which is the directory the loading object already searches.  Nothing
+# here claims those names are reachable under a *different* directory: the Julia
+# code that asks for them by literal has to be told both trees, which is what
+# stdlib-libblastrampoline_jll.jl.patch does.  libLLVM carries Julia's version
+# (the readelf -V check in build.sh is what pins that).
 built_by_us="libblastrampoline libLLVM"
 
 while read -r name; do

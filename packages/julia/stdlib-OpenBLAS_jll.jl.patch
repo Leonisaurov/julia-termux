@@ -33,7 +33,7 @@
 +        path = try
 +            dlpath(handle)
 +        catch err
-+            @warn "OpenBLAS_jll: dlpath() of $(candidate) failed" exception=(err, catch_backtrace())
++            Base.@warn "OpenBLAS_jll: dlpath() of $(candidate) failed" exception=(err, catch_backtrace())
 +            ""
 +        end
 +        isempty(path) || return (handle, path)
