@@ -591,6 +591,20 @@ los avisos `OpenBLAS_jll init failed` venían del julia del sistema (su `sys.so`
 el patch; el nuestro sí: `load_openblas` ×2 contra ×0).  Un artefacto de Termux **solo**
 se puede probar instalado en el prefijo real.
 
+Segundo gap de la misma corrida: **TLS sin CA bundle**.  `libgit2`, `Downloads` y `Pkg`
+leen el CA por `NetworkOptions.ca_roots`, cuyo default es
+`"$(Sys.BINDIR)/../share/julia/cert.pem"` (`NetworkOptions/src/ca_roots.jl:56`,
+`MozillaCACerts_jll.jl:19`); upstream lo instala desde el artefacto Mozilla y esta receta
+fija `USE_BINARYBUILDER=0`, así que no existía y todo request HTTPS moría con `error
+adding trust anchors from file: .../share/julia/cert.pem`.  Termux ya tiene el bundle en
+`etc/tls/cert.pem` (dueño `ca-certificates`), así que la receta ahora declara
+`ca-certificates` en `TERMUX_PKG_DEPENDS` y crea el link en `post_make_install`, con
+aserción de que el target exista.  Rojo→verde medido: sin el link `Downloads.download`
+sobre https falla; con él devuelve el fichero.  Aparte y cosmético:
+`InteractiveUtils.versioninfo()` imprime la plataforma y muere en
+`uv_cpu_info: permission denied (EACCES)` — es una restricción de Android al leer la
+topología de CPU, no del port.
+
 ### Caché de CI: la clave no debe depender de lo que deriva solo
 
 La clave era `julia-deb-v1-aarch64-<HEAD de termux-packages>-<hash del índice

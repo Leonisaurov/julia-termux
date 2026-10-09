@@ -14,7 +14,7 @@ TERMUX_PKG_HOSTBUILD=false
 # versioned soname, while Julia's source asks the loader for the glibc-style
 # versioned names by literal - see termux_link_soname_aliases below, which
 # derives the aliases from the source rather than from this comment.
-TERMUX_PKG_DEPENDS="7zip, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, libopenblas, libssh2, openssl, pcre2, suitesparse, zlib"
+TERMUX_PKG_DEPENDS="7zip, ca-certificates, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, libopenblas, libssh2, openssl, pcre2, suitesparse, zlib"
 # The build tools are not implicit here: the deps/ build downloads and patches
 # tarballs (curl, xz for .tar.xz), Make.inc calls contrib/relative_path.py to
 # compute the loader's DEP_LIBS rpath strings (python), and termux_step_patch_package
@@ -272,6 +272,22 @@ termux_step_post_make_install() {
 	[ -z "${_left}" ] || termux_error_exit \
 		"the installed lib/julia still misses DT_NEEDED names: $(printf '%s' "${_left}" | tr '\n' ' ')"
 	unset _left
+
+	# libgit2, Downloads and Pkg read the CA bundle through
+	# NetworkOptions.ca_roots, whose default answer is
+	# "$(Sys.BINDIR)/../share/julia/cert.pem" (NetworkOptions/src/ca_roots.jl:56,
+	# MozillaCACerts_jll.jl:19).  Upstream ships that file from the Mozilla
+	# artifact; this recipe sets USE_BINARYBUILDER=0, so nothing installs it and
+	# every TLS request dies with "error adding trust anchors from file:
+	# .../share/julia/cert.pem".  Termux's ca-certificates already keeps the
+	# bundle at etc/tls/cert.pem, so point the name Julia asks at it and make
+	# ca-certificates a runtime dependency - the same shape as the soname aliases:
+	# the name the program asks for has to exist, not just the data.  Device
+	# probe, 2026-10-09: without the link Downloads.download over https fails, with
+	# it it returns the file.
+	[ -e "${TERMUX_PREFIX}/etc/tls/cert.pem" ] ||
+		termux_error_exit "ca-certificates did not install etc/tls/cert.pem"
+	ln -sfn "${TERMUX_PREFIX}/etc/tls/cert.pem" "${TERMUX_PREFIX}/share/julia/cert.pem"
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
