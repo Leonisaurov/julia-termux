@@ -22,6 +22,13 @@ for tool in bsdtar dpkg-deb xz; do
 	command -v "$tool" > /dev/null || { echo "$tool is required" >&2; exit 3; }
 done
 
+# Canonicalize the output directory now, before the script cd's into the extracted
+# payload: a relative OUTPUT_DIR (the workflow passes `bundle`, run 37930497581)
+# would otherwise be created and written *inside* $WORK, and the EXIT trap would
+# delete it before the caller's `tar julia-*.pkg.tar.xz` ran.
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)" || { echo "cannot use output dir: $OUTPUT_DIR" >&2; exit 2; }
+
 # This script runs both on a device (where /tmp does not exist) and in CI (where
 # $TMPDIR does).
 TMPBASE="${TMPDIR:-}"
@@ -114,7 +121,6 @@ printf '%s\0' **/* | bsdtar -cnf - --format=mtree \
 	--null --files-from - --exclude .MTREE | gzip -c -f -n > .MTREE
 touch -d "@$EPOCH" .MTREE
 
-mkdir -p "$OUTPUT_DIR"
 printf '%s\0' **/* | bsdtar --no-fflags -cnf - --null --files-from - | xz -c -z - > "$PKGFILE"
 touch -d "@$EPOCH" "$PKGFILE"
 
