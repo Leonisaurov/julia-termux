@@ -228,14 +228,33 @@ termux_step_post_make_install() {
 
 	# The bundled LLVM must carry Julia's own symbol version, otherwise
 	# libjulia-codegen's versioned references do not resolve at load time.
-	local _readelf
+	# Test the captured output, never a pipe into `grep -q`: this hook runs
+	# under the `set -euo pipefail` of build-package.sh:21, and there
+	# `readelf -V f | grep -q PAT` stops being a test of the file and becomes a
+	# race with it - `grep -q` leaves at the first match while readelf is still
+	# printing 35 000 version entries, readelf takes SIGPIPE, and pipefail
+	# reports 141.  Run 37904805726 lost the first `make install` this port
+	# ever completed to exactly that: the assertion fired on an LLVM that had
+	# the symbol version, and `2>/dev/null` hid even whether a file was found.
+	local _readelf _llvm _vers
 	_readelf=$(command -v readelf || command -v llvm-readelf)
-	if [ -n "${_readelf}" ]; then
-		"${_readelf}" -V "${TERMUX_PREFIX}/lib/julia/libLLVM-18jl.so" 2>/dev/null | \
-			grep -q 'JL_LLVM_18\.1' || \
+	_llvm="${TERMUX_PREFIX}/lib/julia/libLLVM-18jl.so"
+	if [ -z "${_readelf}" ]; then
+		echo "WARN  no readelf in PATH: the LLVM symbol version goes unchecked" >&2
+	elif [ ! -e "${_llvm}" ]; then
+		termux_error_exit "install produced no ${_llvm}"
+	else
+		_vers=$("${_readelf}" -V "${_llvm}" 2>&1 || true)
+		case "${_vers}" in
+		*JL_LLVM_18.1*) : ;;
+		*)
+			head -20 <<<"${_vers}"
 			termux_error_exit "libLLVM-18jl.so lacks the JL_LLVM_18.1 symbol version"
+			;;
+		esac
+		unset _vers
 	fi
-	unset _f _readelf
+	unset _f _llvm _readelf
 }
 
 # termux-packages packages an on-device build by copying everything *newer than the
