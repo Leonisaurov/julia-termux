@@ -1,6 +1,6 @@
 # PROGRESS.md — Estado del proyecto julia-termux
 
-> Última actualización: 2026-10-08 ~22:10 UTC
+> Última actualización: 2026-10-09 ~03:20 UTC
 >
 > Este archivo es el **registro de evidencia**: qué se intentó, qué falló, por
 > qué y qué gate local cerró ese fallo. Las decisiones de diseño viven en
@@ -14,17 +14,22 @@
 Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
-**Estado** (2026-10-09): la arquitectura de build está validada de punta a punta
-hasta el minuto ~50; el compilador llega a `src/`, enlaza `julia-base` con los 19
-symlinks, arranca `julia` y muere en el bootstrap de la imagen por los nombres
-versionados que el fuente pide al loader.  Esa causa quedó cerrada con dos runs: el
-primero falsificó la hipótesis de *presencia* (37862103015 creó los 8 alias y el
-loader siguió respondiendo `not found`) y la causa real es de **directorio** —el
-`dlopen` sale de `libjulia-internal.so`, cuyo RUNPATH es solo `$ORIGIN`, y ese
-`$ORIGIN` (`usr/lib`) no era donde los poníamos—, reproducida y discriminada en el
-teléfono antes del siguiente run.  Quedan por demostrarse `sys-o.a` + precompile,
-empaquetado y la verificación en dispositivo.  El run `37870492832`
-(2026-10-09 01:35 UTC) mide ahora esa consecuencia.
+**Estado** (2026-10-09 ~02:35 UTC): la arquitectura de build está validada de punta
+a punta hasta el **arranque de la sysimage**, y el tramo que mataba el build desde
+`37841320064` —los nombres versionados que el fuente pide al loader— quedó
+**cerrado en CI**: el run `37870492832` no produjo ni un `could not load library`
+en 13 394 líneas de log y el bootstrap **cargó Base y las stdlibs** (su propia
+tabla: `Stdlibs ─ 14,48 s / Total ─ 54,34 s`, 338 M de allocations, GC 68).  La
+causa era de **directorio**, no de presencia: el `dlopen` sale de
+`libjulia-internal.so`, cuyo RUNPATH es solo `$ORIGIN`, y los alias se ponían en
+`usr/lib/julia` en vez de `usr/lib`.  El build muere ahora un paso más allá, en la
+**emisión** de `sysbase-o.a` (`sysimage.mk:129`) con `scudo: Can't populate more
+pages` → `std::bad_alloc` → `SIGABRT`: el proceso pidió memoria y el asignador no
+pudo conseguirla.  **No es todavía un diagnóstico** —en reposo el runner tenía
+14 621 MB disponibles y 3 071 MB de swap sin usar, y el OOM-killer no intervino
+(cero `Killed` de proceso)—, así que el próximo run lleva instrumento para
+separar RAM real, límite de mappings y overcommit en vez de suponerlo.  Quedan por
+demostrarse `sys-o.a` + precompile, empaquetado y la verificación en dispositivo.
 
 | Pieza | Estado |
 |---|---|
@@ -33,7 +38,7 @@ empaquetado y la verificación en dispositivo.  El run `37870492832`
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
 | `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
-| Sysimage (`sysimg`/`base/`) | aborta en `sysimage.mk:129` (`sysbase-o.a`): el triplet quedó cerrado y **confirmado en CI** (37851961397); de los sonames versionados se falsificó la hipótesis de presencia (37862103015) y la causa real —el directorio del alias frente al `RUNPATH=$ORIGIN` de `libjulia-internal`— está medida en el teléfono, con el fix y su gate pendientes de CI |
+| Sysimage (`sysimg`/`base/`) | **cargada en CI**: `37870492832` pasó los sonames versionados (0 `could not load library`) y Base + stdlibs se cargaron; aborta al **emitir** `sysbase-o.a` por `std::bad_alloc` dentro de scudo — causa nueva, aún sin clasificar (RAM / mappings / overcommit) |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -147,26 +152,38 @@ del árbol de build (`$PREFIX/tmp/ororigin-probe`: librería en `usr/lib` con
 `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`), alias en `usr/lib/julia` → el
 mensaje exacto de CI, alias en `usr/lib` → resuelto.
 
-**Hipótesis del próximo run** — con los alias en el directorio que el loader busca, el
-bootstrap pasa de `gmp.jl` y `sysimage.mk:129` produce `sysbase-o.a`.  La receta enlaza
-ahora en `usr/lib` antes de `make` (`build.sh:192`) y sigue enlazando en
-`$PREFIX/lib/julia` tras install (`build.sh:219`); el directorio ya no es un literal,
-lo deriva `scripts/runtime-library-dir.sh` preguntándole a `make` y el gate confronta
-esa respuesta con los destinos de la receta (rojo→verde: `FAIL nothing links the
+**Hipótesis del run cerrado (37870492832, 2026-10-09 01:35 → 02:34 UTC, ~59 min)**
+— con los alias en el directorio que el loader busca, el bootstrap pasa de `gmp.jl`:
+**confirmada**.  `could not load library` aparece **0** veces en 13 394 líneas y el
+propio bootstrap imprime su timing de carga (`Stdlibs total ─ 14,48 s`,
+`Total ─ 54,34 s`): Base y las 14 stdlibs se cargaron con los 8 alias versionados
+resueltos desde `usr/lib`.  El directorio ya no es un literal: lo deriva
+`scripts/runtime-library-dir.sh` preguntándole a `make` y el gate confronta esa
+respuesta con los destinos de la receta (rojo→verde: `FAIL nothing links the
 aliases into usr/lib (the build tree)` → `OK the aliases for the build tree go to
-usr/lib, the directory make names`).  Lo que este run todavía no mide: `sys-o.a`
+usr/lib, the directory make names`).
+
+**Hipótesis del próximo run** — el abort de `sysbase-o.a` es un muro de memoria del
+runner, y la red propuesta es a la vez el medidor: swap comprimido
+(`.github/actions/zram`) + `vm.max_map_count=1048576` + el watchdog de 20 s.  Las
+tres candidatas (pico de RSS, agotamiento de VMAs, overcommit) se discriminan con
+ese log, no con suposición: si `SwapTotal` crece y `MemAvailable` cae a ~0, era
+RAM; si `vmas` del `julia` se acerca a 65 536 mientras queda memoria, eran los
+mappings; si `Committed_AS` pasa de `CommitLimit`, es la política de overcommit.
+Si el run sobrevive, lo que queda por medir sigue siendo el mismo tramo: `sys-o.a`
 (`sysimage.mk:109-125` ejecutando `contrib/generate_precompile.jl` con
 `--cpu-target=native` y precompile paralelo), `pkgimage.mk` y `make install`.
+Como `packages/**` y `.github/**` cambian, la clave de caché no hit y el run vuelve
+a pagar la compilación completa (~45-50 min).
 
 Riesgo residual declarado: después de `sysimage.mk:129` vienen `julia-sysimg-*`,
 el `stdlib` y `JULIA_PRECOMPILE := 1`, territorio que todavía no corrió en
 Android; si el run cae ahí, la nueva línea de `make` y el `LoadError` dicen desde
-dónde ampliar el gate. Como `packages/**` y `scripts/**` cambian, la clave de
-caché no hit y el run vuelve a pagar la compilación completa (~45-47 min).
+dónde ampliar el gate.
 
 ---
 
-## Cadena de modos de fallo (evidencia fechada, todos 2026-10-08)
+## Cadena de modos de fallo (evidencia fechada, 2026-10-08 → 2026-10-09)
 
 El mismo entorno falló de maneras distintas; cada una se cerró con un run y se
 convirtió en gate local cuando era reproducible fuera del runner.
@@ -195,7 +212,31 @@ convirtió en gate local cuando era reproducible fuera del runner.
 
 | 37862103015 | 23:55→00:49 (~54 min) | **hipótesis de los sonames FALSIFICADA**: la tabla del helper se imprimió completa con los 8 `aliased` (línea 350, 23:59:48.5715505Z) y no hay ni un `ln: failed` entre las 12 128 líneas del log, así que los enlaces existieron durante todo el build; y aun así el bootstrap aborta idéntico — `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))` (línea 12121, 00:49:48.7302374Z) → `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, `build rc=2`. Marcadores: `could not load library`=1, `sysbase-o.a`=2, `sys-o.a`=0, `generate_precompile`=0, `Killed`=0 | el fichero no faltaba: **estaba donde el loader no mira**. El `dlopen` de un nombre sin barra lo emite `src/dlload.c:376`, dentro de `libjulia-internal.so`, y esa librería se enlaza en `$(build_shlibdir)` = `usr/lib` (`src/Makefile:417`; `Make.inc:729,328,320`) con `RPATH_LIB := RPATH_ORIGIN = -Wl,-rpath,'$ORIGIN'` (`Make.inc:1475,1472`): su conjunto de búsqueda es **su propio directorio** y nada más. `usr/lib/julia` —donde `julia-base` deja sus symlinks sin versión y donde la receta puso los alias— no figura en ese RUNPATH, y en todo el log no aparece un solo `LD_LIBRARY_PATH`, así que tampoco entró por la variable de entorno. Nota de capa: `base/gmp.jl:35` no usa `Libdl.dlopen`, usa `cglobal` a nivel top-level, que es exactamente la ruta de `jl_load_library` | Reproducido y discriminado en el teléfono con el mismo layout (`$PREFIX/tmp/ororigin-probe`: una librería en `usr/lib` con `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`): alias en `usr/lib/julia` → `dlopen failed: library "libgmp.so.10" not found`, el mismo mensaje que CI; el mismo alias en `usr/lib` → resuelto. Fix: el call site del árbol de build pasa a `usr/lib`. El instalado se queda en `$PREFIX/lib/julia` porque `make install` **mueve** `libjulia-internal` ahí y le reescribe el RUNPATH a `$ORIGIN:$ORIGIN/../` (`Makefile:468-481`) — el mismo dato confirma que la aserción `lib/julia/libblastrampoline.so.5` es correcta, porque `Makefile:223` la clasifica de librería privada con `USE_SYSTEM_LIBBLASTRAMPOLINE := 0`. Para que un directorio escrito a mano no vuelva a costar un run: `scripts/runtime-library-dir.sh` le pregunta a make `$(build_shlibdir)`, `$(private_libdir)`, `$(RPATH_LIB)` y `$(reverse_private_libdir_rel)` (rechaza el resultado si `RPATH_LIB` ya no menciona `$ORIGIN`) y la sección `dlopen'ed versioned sonames` del gate exige que los destinos de `termux_link_soname_aliases` sean exactamente esa respuesta |
 
-Ruido benigno conocido del runner: `linker: Warning: failed to find generated
+| 37870492832 | 01:35→02:34 (~59 min) | **hipótesis del directorio CONFIRMADA**: `could not load library` aparece **0 veces** en 13 394 líneas, el bootstrap llega hasta el final de la carga —`Stdlibs total ─ 14.479918 seconds`, `Total ─ 54.337887 seconds` (líneas 13267-13271, 02:33:40Z), `Allocations: 338327679 (Pool: 338324218; Big: 3461); GC: 68`— y aborta un paso más allá, al **emitir** el fichero: 49× `scudo: Can't populate more pages for size class N` (primera línea 3163 a 01:45:11Z, última 13300 a 02:33:40Z), 2× `libc++abi: terminating due to uncaught exception of type St9bad_alloc: std::bad_alloc` (13302-13303), `[23944] signal 6 (-1): Aborted` (13305) → `sysimage.mk:129: …/usr/lib/julia/sysbase-o.a Error 1`, `Makefile:114: julia-sysimg-release Error 2`, `build rc=2`. El OOM-killer **no** intervino: el único `Killed` del log (13333) es el patrón `grep` que el paso *Where the time went* se imprime a sí mismo | causa abierta, y no es "falta de RAM en reposo": a 01:39:32Z el action reportó `Mem: 15947 total / 12528 free / 14621 available` y `Swap: 3071 0 3071` (líneas 706-707). Tampoco es un síntoma del tramo final: los avisos scudo son **crónicos** —34 en 37862103015, que murió por otra causa— y aquí se agrupan en 01:45-01:46 (33 avisos, LLVM compilando con `-j4`) y 02:33 (16, el abort). Tres candidatas sin discriminar: pico real de RSS (4 × `cc1plus`/`as` + el `julia` del precompile sobre 15,9 GB), agotamiento de VMAs (scudo fragmenta su arena en muchos mappings y el límite del runner aún no está medido —`/proc/sys/vm/max_map_count` no es legible en el teléfono, así que lo imprime el propio run—), o `overcommit_memory=2`/heurística que rechaza el `mmap` grande haciendo que `malloc` devuelva NULL → `operator new` lance → `abort()`. El log no permite elegirlas porque **no contiene ninguna medición durante el build** | Este run no cierra una causa: **instrumenta**. El job build recibe red y medidor a la vez — `.github/actions/zram` (swap comprimido) y `sudo sysctl -w vm.max_map_count=1048576`, ambos con `continue-on-error` porque son mejora, no requisito; un watchdog que cada 20 s anota `MemAvailable/Committed_AS/CommitLimit/SwapTotal/Writeback`, los 3 procesos de mayor RSS y los `vmas`+`VmRSS` de cada `julia`; y un paso `if: always()` que reporta nº de muestras, mínimo de `MemAvailable`, el `vm.max_map_count` y `ulimit -v` vigentes y el `dmesg` filtrado por `oom|mmap|vmalloc`. La hipótesis declarada del próximo run es la memoria, y su salida debe **clasificarla**, no solo sobrevivir a ella |
+
+Hallazgo estático que no costó un run (medido antes de pushear, 2026-10-09
+~03:10 UTC): el parche `_jll` de libblastrampoline pedía la librería **solo** en
+`$PREFIX/lib/julia` con `error()` duro, y en el árbol de build esa ruta no existe.
+`deps/blastrampoline.mk` instala con `DESTDIR=` en un staging que `staged-install`
+(`deps/tools/common.mk:159`) untarrea sobre `$(build_prefix)`, así que durante el
+build la librería vive en `$(build_shlibdir)` = `usr/lib` (`usr/lib/libblastrampoline.so{,.5,.5.15.0}`);
+`make install` la copia después a `$(private_libdir)` porque `Makefile:223`
+(`JL_PRIVATE_LIBS-$(USE_SYSTEM_LIBBLASTRAMPOLINE) += libblastrampoline`) la
+clasifica de privada y la receta fija `USE_SYSTEM_LIBBLASTRAMPOLINE := 0`
+(`build.sh:122`).  Y `base/Makefile:249` (`symlink_system_library,…,libblastrampoline`)
+**solo** se añade cuando `USE_SYSTEM_$1 != 0`, así que tampoco existía
+`usr/lib/julia/libblastrampoline.so.5` que buscar.  Habría matado el precompile en
+el primer `__init__` de una stdlib, justo el tramo que este port necesita medir.
+Fix: `stdlib-libblastrampoline_jll.jl.patch` intenta los tres candidatos (privada
+del árbol, privada instalada, nombre desnudo para que decida el `RUNPATH`) y solo
+`error()` si ninguno carga; el mismo motivo cualificó `Base.@warn` ahí y en
+`stdlib-OpenBLAS_jll.jl.patch`, porque esos stubs son `baremodule` y `@warn` no
+está importado sin `using Base`.  `soname-aliases.sh` llevaba un comentario que
+afirmaba que las librerías construidas por uno mismo "aparecen en `usr/lib/julia`":
+eso es falso en el árbol de build y se corrigió para que el helper no vuelva a
+inducir a error a nadie.
+
+
 linker configuration from "/linkerconfig/ld.config.txt"`,
 `__bionic_open_tzdata: …`, `bionic-icu: couldn't open libicu.so`,
 `expr: syntax error: unexpected argument 'Warning:'` (el anterior se cuela en
@@ -356,16 +397,21 @@ medir) → `~50 min` (37862103015: el `mkdir -p` devolvió la cadena a su punto 
 lejo, los 8 alias se crearon y aun así `sysbase-o.a` muere con el mismo
 `not found`; la hipótesis de presencia queda **falsificada** y la causa real es de
 directorio —`usr/lib`, el `$ORIGIN` de `libjulia-internal.so` —, medida en el
-teléfono).
+teléfono) → `~59 min` (37870492832: el directorio correcto cierra la cadena —0
+`could not load library`, Base + stdlibs cargadas— y por primera vez el fallo **no
+es del port**: el `malloc` de scudo se rinde al emitir `sysbase-o.a`).  El tramo
+`sys-o.a` + precompile + `make install` + empaquetado sigue sin medir.
 
 ---
 
 ## Pendientes
 
 1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  El run
-   `37870492832` (`c5a575e`, 2026-10-09 01:35 UTC) mide la hipótesis del
-   directorio; mientras no exista artefacto, `bundle` y `publish` siguen
-   `skipped`.
+   `37870492832` (`c5a575e`, 2026-10-09 01:35 UTC) cerró la hipótesis del
+   directorio; el siguiente mide la de memoria con `zram` + `vm.max_map_count` +
+   watchdog, cuyo resultado debe **clasificar** la causa (RAM / mappings /
+   overcommit), no solo sobrevivir a ella.  Mientras no exista artefacto, `bundle`
+   y `publish` siguen `skipped`.
 2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
    correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
    Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
