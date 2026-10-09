@@ -31,9 +31,10 @@ Remoto: `https://github.com/Leonisaurov/julia-termux` (rama `main`).
   árbol como restos. Tampoco existe `packages/llvm-julia`: hoy LLVM se compila
   desde `deps/llvm.mk`.
 
-## Estado (2026-10-08)
+## Estado (2026-10-09)
 
-La cadena está medida hasta el **minuto ~50**. Todavía **no existe ningún
+La cadena está medida hasta el **minuto ~50** y hay un run en curso
+(`37870492832`, 01:35 UTC) midiendo la causa de directorio. Todavía **no existe ningún
 `.deb` ni `.pkg.tar.xz` producido**: no hay artefacto que instalar.
 
 | Pieza | Estado |

@@ -14,7 +14,7 @@
 Port de **Julia v1.12.6** a Termux/Android aarch64 mediante el build system de
 `termux-packages`, construido en **CI** y validado **en el dispositivo**.
 
-**Estado** (2026-10-08): la arquitectura de build está validada de punta a punta
+**Estado** (2026-10-09): la arquitectura de build está validada de punta a punta
 hasta el minuto ~50; el compilador llega a `src/`, enlaza `julia-base` con los 19
 symlinks, arranca `julia` y muere en el bootstrap de la imagen por los nombres
 versionados que el fuente pide al loader.  Esa causa quedó cerrada con dos runs: el
@@ -23,7 +23,8 @@ loader siguió respondiendo `not found`) y la causa real es de **directorio** �
 `dlopen` sale de `libjulia-internal.so`, cuyo RUNPATH es solo `$ORIGIN`, y ese
 `$ORIGIN` (`usr/lib`) no era donde los poníamos—, reproducida y discriminada en el
 teléfono antes del siguiente run.  Quedan por demostrarse `sys-o.a` + precompile,
-empaquetado y la verificación en dispositivo.
+empaquetado y la verificación en dispositivo.  El run `37870492832`
+(2026-10-09 01:35 UTC) mide ahora esa consecuencia.
 
 | Pieza | Estado |
 |---|---|
@@ -262,20 +263,55 @@ pida `dlopen` del linker del runner.
   (dejar que `deps/unwind.mk` lo compile, cuyo SONAME de GNU ya lleva el `.8`),
   **no** un alias hacia nada: en bionic no existe un `libunwind.so` al que apuntar.
 
-- **Los 8 `alias` se crean ahora antes de `make`.** El tramo que sigue a
-  `sysbase-o.a` tampoco está medido en Android: `sysimage.mk:109-125` produce
-  `sys-o.a` ejecutando `contrib/generate_precompile.jl`, que spawnea
-  `$(julia_exepath()) -O0 --trace-compile=… --cpu-target=native` con
-  `PARALLEL_PRECOMPILE` y luego `pkgimage.mk` (`stdlibs-cache-%`) y
-  `make install`.  Cada una de esas etapas abre un `julia` nuevo, así que los
-  nombres versionados que los `_jll` del árbol vendido piden (`libcurl.so.4`,
-  `libgit2.so.1.9`, `libssh2.so.1`, `libnghttp2.so.14`, `libgmpxx.so.4`,
-  `libpcre2-8.so.0`) tienen que existir ya en `usr/lib/julia`; por eso el fix se
-  puso en `termux_step_make` y no solo tras install.  `--cpu-target=native` es
-  el siguiente candidato a problema si `sys-o.a` falla: es un **literal** de
-  `contrib/generate_precompile.jl:360` (medido: `JULIA_CPU_TARGET` no aparece en
-  el script, así que el `generic` de la receta solo gobierna la invocación externa
-  de `sysimage.mk:118`), y aún no hay evidencia de fallo.
+- **Los 8 `alias` se crean ahora antes de `make`, y en el directorio que lee el
+  loader.** El tramo que sigue a `sysbase-o.a` tampoco está medido en Android:
+  `sysimage.mk:109-125` produce `sys-o.a` ejecutando `contrib/generate_precompile.jl`,
+  que spawnea `$(julia_exepath()) -O0 --trace-compile=… --cpu-target=native` con
+  `PARALLEL_PRECOMPILE` y luego `pkgimage.mk` (`stdlibs-cache-%`) y `make install`.
+  Cada una de esas etapas abre un `julia` nuevo, así que los nombres versionados que
+  los `_jll` del árbol vendido piden (`libcurl.so.4`, `libgit2.so.1.9`,
+  `libssh2.so.1`, `libnghttp2.so.14`, `libgmpxx.so.4`, `libpcre2-8.so.0`) tienen que
+  existir ya **en `usr/lib` durante el build** (es el `$ORIGIN` de
+  `libjulia-internal.so`, §3.7) y en `$PREFIX/lib/julia` una vez instalado; por eso
+  el fix se puso en `termux_step_make` y no solo tras install.  `--cpu-target=native`
+  es el siguiente candidato a problema si `sys-o.a` falla: es un **literal** de
+  `contrib/generate_precompile.jl:360` (medido: `JULIA_CPU_TARGET` no aparece en el
+  script, así que el `generic` de la receta solo gobierna la invocación externa de
+  `sysimage.mk:118`), y **no se puede medir en este teléfono**: el `julia` de
+  referencia aborta antes de evaluar nada (bullet siguiente), así que ningún `-e`
+  sobrevive a `--cpu-target`.
+
+- **El propio paquete de Termux corrobora el directorio del árbol instalado.**
+  `ls -l $PREFIX/lib/julia` muestra `libgmp.so.10 -> libgmp.so` y
+  `libmpfr.so.6 -> libmpfr.so` con la fecha de instalación (08-18 17:43), y
+  `pacman -Qo` responde que **los posee `julia 1.12.6-1`**: upstream hace exactamente
+  lo que la receta repite tras `make install`, en `$(private_libdir)`, porque allí el
+  `RUNPATH` de `libjulia-internal.so` es `$ORIGIN:$ORIGIN/..`.  Lo que **no** trae es
+  `libcurl.so.4` (`pacman -Qo`: *no package owns*), así que la asimetría entre los dos
+  árboles no es una excentricidad nuestra: es la diferencia entre `$ORIGIN` de build y
+  `$ORIGIN` de instalado.
+
+- **El `julia` de referencia instalado en el teléfono no evalúa código (medido
+  2026-10-09 ~01:45 UTC).** El paquete `julia 1.12.6-1` de Termux (instalado
+  2026-08-18 según `var/log/pacman.log`, `pacman -Qk julia` → 5805 archivos, 0
+  faltantes) responde a `julia --version` pero muere en el arranque del resto:
+  `julia -e 'exit(3)'` devuelve **rc=1** (el código del usuario nunca corre),
+  `julia -e 'open("/…/eval.txt","w")'` no crea el fichero, `--banner=yes` no
+  imprime el banner, y lo único que sale son
+  `OpenBLAS_jll init failed` / `libblastrampoline_jll init failed` con
+  `ArgumentError: cannot convert NULL to string`, más
+  `Unable to autodetect symbol suffix of ""` y
+  `No loaded BLAS libraries were built with LP64 support.`  No es el entorno de
+  este shell: con `LD_LIBRARY_PATH=$PREFIX/lib` exportado el resultado es el mismo
+  (`rc=1`), y en Termux el `LD_PRELOAD` de `libtermux-exec` está activo.  Dos
+  consecuencias para el port, ninguna de ellas una causa nuestra: (a) **Fase 5 no
+  puede usar "el paquete de referencia funciona" como baseline** —`device-smoke.sh`
+  tiene que afirmarse contra `hello`/`LinearAlgebra` suyos, no contra una
+  comparación que hoy no existe en este dispositivo—; (b) la ruta
+  `libblastrampoline` → BLAS es un riesgo de runtime **medido**, no hipotético, y
+  cae justo en el tramo de precompile que este run todavía no alcanza.  Abrir causa
+  raíz aparte (es el paquete de Termux, no nuestra receta) antes de fiarse de cualquier
+  medición que necesite un `julia` que evalúe.
 
 - **El runtime GNU no existe en el prefijo; `CompilerSupportLibraries_jll` es el
   candidato nombrado para `sys-o.a`.** Medido en el teléfono (2026-10-08 ~18:00
@@ -312,22 +348,42 @@ teléfono).
 
 ## Pendientes
 
-1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`. Mientras no
-   exista artefacto, `bundle` y `publish` siguen `skipped`.
+1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  El run
+   `37870492832` (`c5a575e`, 2026-10-09 01:35 UTC) mide la hipótesis del
+   directorio; mientras no exista artefacto, `bundle` y `publish` siguen
+   `skipped`.
 2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
    correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
    Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
-   es "funciona".
-3. **Fase 6 — documentación**: `AGENTS.md`, `ARCHITECTURE.md` y `README.md`
-   **todavía describen la arquitectura cross-compilar/Docker abandonada**
-   (XC_HOST, host-flisp bootstrap, `scripts/build-deps-docker.sh`). Hay que
-   reescribirlos al modo on-device o un agente futuro volverá a ese camino.
+   es "funciona".  **Y sin baseline prestada**: el `julia` de referencia de este
+   teléfono no evalúa código (bullet arriba), así que `device-smoke.sh` se
+   afirma contra sus propios `assert`s, no contra "el otro julia sí anda".
+   Antes de fiarse de una comparación, abrir la causa raíz de ese arranque roto
+   (es el paquete de Termux, no esta receta).
+3. **Plegar la derivación de `built`**: `packages/julia/soname-aliases.sh` decide
+   `built` con la lista a mano `built_by_us="libblastrampoline libLLVM"`.  La
+   derivación que la reemplaza está nombrada arriba (`$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT)
+   $(build_shlibdir)/…` en `deps/*.mk`, cruzado con el `USE_SYSTEM_*` efectivo).
+   **No se toca mientras haya un run en curso**: vive en `packages/**`, así que
+   invalida la clave de caché y costaría ~50 min por un veredicto que hoy no
+   cambia ningún enlace.
 4. **Fase 2 (opcional)**: `packages/llvm-julia` solo si el LLVM bundled resulta
    no cacheable.
 5. **Limpieza**: restos de sesiones en `$PREFIX/tmp` (`gate*.txt`,
    `watch-*.txt/.sh`, `rehearse-*.txt`, `julia-rehearse.*`, `tp-clone.55c0Aq`,
    `tp-path`, `julia-index-cache`, `julia-rehearse-cache`, logs de diagnóstico)
-   al terminar los runs.
+   al terminar los runs.  Hecho 2026-10-09: se borraron `julia-rehearse.CtINL5`,
+   `julia-rehearse.i5mnhh`, `rtlib-test.tPVm63`, `dlload-read.zpiRpY` y
+   `gate-red.7807` (~230 MB).  Quedan a propósito: `julia-rehearse-cache` (17 MB,
+   es la caché del gate), `julia-run-u4kkcj` (el log con el que se compara este
+   run) y `ororigin-probe` (la reproducción citada en `ARCHITECTURE.md` §3.7).
+   Los `jpre.*`/`jdiag.*` de las mediciones de esta tarde se borran al cerrar
+   Fase 5.
+6. **Restos de la ruta Docker** (`scripts/Dockerfile`, `run-docker.sh`,
+   `build-deps-docker.sh`, `setup-ccache-docker.sh`, `build-local.sh`,
+   `ndk-patches/`, `trace-dl/`, `tasks/`, `.github/actions/zram/`): están
+   declarados como ruta muerta en `README.md`, pero borrarlos es destructivo y
+   necesita OK explícito del usuario.
 
 ---
 
