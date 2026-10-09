@@ -881,19 +881,21 @@ Límites estructurales que no van a desaparecer:
 <a name="10"></a>
 ## 10. Restos de la ruta abandonada
 
-Algunos ficheros de la arquitectura cross-compilar/Docker siguen en el árbol.
-Ninguno está referenciado por `.github/workflows/build-package.yml` ni por
-`packages/julia/**` (verificado con grep sobre el repo): si ves alguno, es la ruta
-muerta y **no lo uses**.
+Los ficheros del builder Docker de la ruta cross **ya no están en el árbol**:
+`scripts/Dockerfile`, `scripts/run-docker.sh`, `scripts/build-deps-docker.sh`,
+`scripts/setup-ccache-docker.sh`, `scripts/patch-fuse-overlayfs.sh` y
+`scripts/build-local.sh` se borraron el 2026-10-09 (ninguno los referenciaba;
+verificado con grep antes de borrar). Queda lo que sí sigue viviendo:
 
 | Fichero | Estado |
 |---|---|
-| `scripts/Dockerfile`, `scripts/run-docker.sh`, `scripts/build-deps-docker.sh`, `scripts/setup-ccache-docker.sh`, `scripts/patch-fuse-overlayfs.sh` | builder Docker x86_64 de la ruta cross; nada los invoca |
 | `scripts/install-deps.sh` | instala deps a mano con patrones HTTP de la época cross; `device-smoke.sh:56-57` reserva su ruta pero **no la invoca** |
-| `scripts/build-local.sh` | build local en el teléfono; contradice la regla de presupuesto (`AGENTS.md`: el teléfono no compila Julia) |
-| `.github/actions/zram/` | acción de swap comprimido del builder anterior; **ningún workflow la usa hoy** |
+| `.github/actions/zram/` | swap comprimido del runner; en uso desde 2026-10-09 como red de memoria del job `build`, con `continue-on-error` para que nunca cueste el build |
 | `ndk-patches/29/` | directorio vacío del NDK cross |
 | `tasks/`, `trace-dl/` | notas y trazas de sesiones anteriores |
+
+`scripts/build-local.sh` no se echa de menos: hacía compilar Julia en el teléfono,
+que es exactamente lo que prohíbe `AGENTS.md` (el teléfono baixa, instala y prueba).
 
 El vocabulario prohibido —`XC_HOST`, `HOSTCC`, `BUILDING_HOST_TOOLS`, `--host`,
 `host-flisp`— no solo está desaconsejado: el gate lo **rechaza** si aparece en el

@@ -145,6 +145,42 @@ jobs:
         with:
           recipe: ${{ env.RECIPE }}
 
+      # `JULIA_PRECOMPILE := 1` (packages/julia/build.sh:134) starts one julia per
+      # TERMUX_PKG_MAKE_PROCESSES, so the stage this port has never reached is the
+      # one most likely to be limited by memory rather than by correctness.
+      # Compressed RAM is the cheapest headroom available without changing the
+      # build: run 37870492832 measured the runner at 15 947 MB of RAM with a
+      # 3 071 MB swap that had 0 MB used at rest, so the disk-backed swap already
+      # there is not what a page-fault storm can live on.  It is deliberately not
+      # allowed to cost a run: a runner kernel that refuses an out-of-tree zram.ko
+      # must leave the job building on plain RAM, which is what it did before.
+      - name: Add compressed swap to the runner
+        uses: ./.github/actions/zram
+        continue-on-error: true
+
+      # The same measurement question as the step above, answered in advance:
+      # bionic's scudo reserves a region per size class, and the refusing message
+      # is identical whether the kernel ran out of RAM or out of VMAs.  The
+      # runner's own limit is printed by the `before:` line below and reported
+      # again on failure, because /proc/sys/vm/max_map_count is not readable from
+      # the phone to compare.  Raising it costs nothing and cannot change the code
+      # being built.
+      - name: Raise the runner's mapping limit
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "before: $(cat /proc/sys/vm/max_map_count)"
+          sudo sysctl -w vm.max_map_count=1048576
+          echo "after:  $(cat /proc/sys/vm/max_map_count)"
+
+      - name: Report what the build will really have
+        shell: bash
+        run: |
+          set -uo pipefail
+          free -m
+          swapon --show || echo "no swap device"
+
       - name: Clone termux-packages and stage the recipe
         id: tp
         shell: bash
@@ -228,13 +264,63 @@ jobs:
             '  -o "$GITHUB_WORKSPACE/output" "$PKG"' \
             > "$RUNNER_TEMP/run-build.sh"
           chmod 755 "$RUNNER_TEMP/run-build.sh"
+          # Run 37870492832 loaded Base and the stdlibs in 54 s and then died
+          # emitting sysbase-o.a: scudo refused pages, LLVM threw std::bad_alloc
+          # and the process took SIGABRT - with no `Killed` line, so the kernel's
+          # OOM killer is not what stopped it.  Whether the refusal came from RAM,
+          # from the address-space/VMA limit or from an overcommit heuristic
+          # decides the fix, and the difference is not visible in the build log, so
+          # sample it while the build runs.  `pgrep -x`, never `-f`: the sampler
+          # must not match this shell.
+          : > "$RUNNER_TEMP/memwatch.log"
+          while :; do
+            {
+              date -u '+%FT%TZ'
+              grep -E 'MemAvailable|Committed_AS|CommitLimit|SwapTotal|Writeback' /proc/meminfo
+              ps -eo pid,rss,comm --sort=-rss | sed -n '2,4p'
+              for p in $(pgrep -x julia | head -3); do
+                printf 'julia pid=%s vmas=%s rss=%skB\n' "$p" \
+                  "$(wc -l < "/proc/$p/maps" 2>/dev/null)" \
+                  "$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null)"
+              done
+              echo '---'
+            } >> "$RUNNER_TEMP/memwatch.log" 2>/dev/null
+            sleep 20
+          done &
+          watch_pid=$!
           "$RUNNER_TEMP/run-build.sh" 2>&1 |
             tee "$RUNNER_TEMP/build.log" |
             grep -vE 'linkerconfig|ld.config.txt'
           rc=${PIPESTATUS[0]}
+          kill "$watch_pid" 2>/dev/null || true
           echo "build rc=$rc"
           ls -l "$GITHUB_WORKSPACE/output"
           exit "$rc"
+
+      - name: Report what stopped the build
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # This step runs on failure too: the failure is the reason for the
+          # question.  It only reads what the sampler left behind.
+          watch="$RUNNER_TEMP/memwatch.log"
+          if [ -s "$watch" ]; then
+            echo "samples: $(grep -c -- '---' "$watch")  (taken 20 s apart)"
+            echo "lowest MemAvailable observed (kB): $(awk '/MemAvailable/ {print $2}' "$watch" | sort -n | head -1)"
+            echo "largest julia observed:"
+            grep -h '^julia pid=' "$watch" | sort -t= -k4 -n -r | head -3
+            echo "tail of the samples:"
+            tail -12 "$watch"
+          else
+            echo "no memory samples were taken (cache hit, or the build step did not run)"
+          fi
+          echo "vm.max_map_count = $(cat /proc/sys/vm/max_map_count)"
+          echo "ulimit -v        = $(ulimit -v)"
+          echo "=== the kernel's account (empty output is itself a result) ==="
+          sudo dmesg | tail -80 |
+            grep -iE 'oom|out of memory|killed process|mmap|vmalloc' ||
+            echo "no OOM line in dmesg"
 
       - name: Inspect the artifact
         shell: bash

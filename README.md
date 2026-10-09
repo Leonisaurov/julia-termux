@@ -24,12 +24,14 @@ Remoto: `https://github.com/Leonisaurov/julia-termux` (rama `main`).
   **LLVM bundled** (`USE_SYSTEM_LLVM := 0`, `packages/julia/build.sh:84`) es
   compilarable.
 - **Ruta muerta, no la uses**: `XC_HOST`, `HOSTCC`, `BUILDING_HOST_TOOLS`,
-  `host-flisp`, `scripts/Dockerfile`, `scripts/run-docker.sh`,
-  `scripts/build-deps-docker.sh`, `scripts/build-local.sh`. Era el builder Docker
-  de x86_64: compilaba LLVM 60-76 min para morir en
-  `llvm-min-tblgen: Exec format error`. Algunos de esos ficheros siguen en el
-  árbol como restos. Tampoco existe `packages/llvm-julia`: hoy LLVM se compila
-  desde `deps/llvm.mk`.
+  `host-flisp`. Era el builder Docker de x86_64: compilaba LLVM 60-76 min para
+  morir en `llvm-min-tblgen: Exec format error`. Sus ficheros
+  (`scripts/Dockerfile`, `scripts/run-docker.sh`,
+  `scripts/build-deps-docker.sh`, `scripts/build-local.sh`,
+  `scripts/setup-ccache-docker.sh`, `scripts/patch-fuse-overlayfs.sh`) **fueron
+  borrados el 2026-10-09** para que no quede nada que reintroducir; si alguien
+  vuelve a escribirlos, esos nombres siguen siendo la ruta muerta. Tampoco existe
+  `packages/llvm-julia`: hoy LLVM se compila desde `deps/llvm.mk`.
 
 ## Estado (2026-10-09)
 
@@ -191,7 +193,8 @@ scripts/                 gates locales (lint-workflows.sh, rehearse-recipe.sh),
                          runtime-library-dir.sh),
                          make-pacman-pkg.sh, device-smoke.sh, device-diag.sh
 .github/workflows/       build-package.yml (lint → build → bundle → publish)
-.github/actions/         termux-builder/ (materializa el prefijo en el runner)
+.github/actions/         termux-builder/ (materializa el prefijo en el runner),
+                         zram/ (swap comprimido del job build, tolerante a fallo)
 .github/scripts/         termux-closure-resolver.py (cierre de dependencias)
 repo.json                formato de paquete publicado (pacman/termux-main)
 PROGRESS.md              fuente fechada del estado con evidencia
@@ -199,10 +202,10 @@ AGENTS.md                reglas operativas para agentes
 ARCHITECTURE.md          por qué del build system y sus gates
 ```
 
-Restos de la ruta abandonada que conviene no seguir: `scripts/Dockerfile`,
-`scripts/run-docker.sh`, `scripts/build-deps-docker.sh`, `scripts/build-local.sh`,
-`.github/actions/zram/` (el workflow no lo usa), `ndk-patches/`, `trace-dl/`,
-`tasks/`.
+Restos que aún existen y conviene no seguir: `ndk-patches/` (vacío), `trace-dl/` y
+`tasks/` (notas y trazas de sesiones anteriores). Los ficheros del builder Docker
+ya están borrados (§ "Qué es y qué no es"). `.github/actions/zram/` **sí se usa**:
+es la red de swap comprimido del job `build`.
 
 ## Licencia y créditos
 

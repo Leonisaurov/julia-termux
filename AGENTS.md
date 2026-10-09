@@ -18,9 +18,11 @@ materializado por `.github/actions/termux-builder/action.yml`.
 - **No existe `XC_HOST` ni cross-compilación ni `host-flisp`.** El builder Docker
   de x86_64 que los usaba fue **abandonado**: compilaba LLVM 60-76 min para morir
   en `llvm-min-tblgen: Exec format error`. Si ves `XC_HOST`, `HOSTCC`,
-  `BUILDING_HOST_TOOLS`, `--host`, `host-flisp`, `scripts/Dockerfile`,
-  `scripts/run-docker.sh` o `scripts/build-deps-docker.sh`, eso es la ruta muerta:
-  algunos de esos ficheros siguen en el repo como restos, **no los uses**.
+  `BUILDING_HOST_TOOLS`, `--host` o `host-flisp`, eso es la ruta muerta. Sus
+  ficheros (`scripts/Dockerfile`, `scripts/run-docker.sh`,
+  `scripts/build-deps-docker.sh`, `scripts/build-local.sh`,
+  `scripts/setup-ccache-docker.sh`, `scripts/patch-fuse-overlayfs.sh`) se
+  **borraron el 2026-10-09**: no hay que reconocerlos ni resucitarlos.
 - `packages/llvm-julia` **no es la ruta**: es solo la contingencia cacheada si el
   LLVM bundled resultara no cacheable (PROGRESS "Pendientes" §4). Hoy la receta
   compila LLVM desde `deps/llvm.mk`.
