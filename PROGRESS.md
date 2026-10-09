@@ -194,6 +194,22 @@ pida `dlopen` del linker del runner.
   terminó con éxito: el límite de tasa anónimo de `api.github.com` no es un
   bloqueo observado.
 
+- **`left absent  libdSFMT.so` en la tabla del helper no es un riesgo: es su
+  límite.** `soname-aliases.sh` decide `built` con una lista a mano
+  (`built_by_us="libblastrampoline libLLVM"`), así que todo lo que el build
+  produce pero **sin versión en el nombre** cae en `absent` aunque vaya a existir
+  en el árbol.  Medido sobre el tarball pineado: `deps/dsfmt.mk:45` copia
+  `libdSFMT.$(SHLIB_EXT)` a `$(build_shlibdir)` y `Make.inc:45` fija
+  `USE_SYSTEM_DSFMT:=0` (no es un flag de la receta), o sea `usr/lib/libdSFMT.so`
+  existe durante el precompile y `stdlib/dSFMT_jll/src/dSFMT_jll.jl:29` lo
+  `dlopen` (con throw por defecto), encontrándolo por el `RUNPATH`
+  `$ORIGIN:$ORIGIN/..` de `libjulia-internal.so`.  La derivación que reemplaza la lista son las líneas
+  `$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT) $(build_shlibdir)/…` de `deps/*.mk`,
+  verificadas contra el `USE_SYSTEM_*` efectivo.  **No se toca ahora**: es
+  comentario sobre el artefacto de caché (`hashFiles('packages/julia/**')`) y
+  pagar ~49 min por un veredicto que hoy no cambia ningún enlace sería comprar
+  ruido con runs.  Queda como primer cambio a plegar en el próximo fix real.
+
 - **Los 8 `alias` se crean ahora antes de `make`.** El tramo que sigue a
   `sysbase-o.a` tampoco está medido en Android: `sysimage.mk:109-125` produce
   `sys-o.a` ejecutando `contrib/generate_precompile.jl`, que spawnea
