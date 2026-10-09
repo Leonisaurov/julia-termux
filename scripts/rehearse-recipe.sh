@@ -508,9 +508,40 @@ if verdicts=$(bash "$REPO_ROOT/packages/julia/soname-aliases.sh" "$SRCDIR" 2>"$W
 			if [ -z "$make_at" ] || [ "$line" -lt "$make_at" ]; then wired=1; fi
 		done
 		if [ "$wired" = 1 ]; then
-			echo "  OK    build.sh creates them in usr/lib/julia before make starts"
+			echo "  OK    build.sh creates the aliases before make starts"
 		else
 			echo "  FAIL  build.sh does not create the aliases the source demands before make starts"
+			soname_fail=1
+		fi
+		# Creating them is half of it; creating them where the loader looks is the
+		# other half.  Run 37862103015 linked all eight demanded names into
+		# usr/lib/julia and died at sysimage.mk:129 anyway with 'dlopen failed:
+		# library "libgmp.so.10" not found', because the object issuing the dlopen
+		# is libjulia-internal.so and its RUNPATH is only '$ORIGIN'.  So the
+		# directory comes from make, not from a value kept here: ask for
+		# build_shlibdir (where src/Makefile links it) and private_libdir (where
+		# make install moves it, with the RUNPATH Makefile:481 gives it).
+		if rtlib=$(bash "$REPO_ROOT/scripts/runtime-library-dir.sh" "$SRCDIR" 2>"$WORK/rtlib.txt"); then
+			sed 's/^/  /' "$WORK/rtlib.txt"
+			build_dir=$(printf '%s\n' "$rtlib" | awk '$1 == "build" { print $2; exit }')
+			install_dir=$(printf '%s\n' "$rtlib" | awk '$1 == "install" { print $2; exit }')
+			sites=$(sed -n 's/^[[:space:]]*termux_link_soname_aliases[[:space:]]\{1,\}//p' "$RECIPE" |
+				sed -e 's/"//g' -e 's|^\${TERMUX_PREFIX}/||')
+			for pair in "build tree:$build_dir" "installed tree:$install_dir"; do
+				kind=${pair%%:*}
+				want=${pair#*:}
+				if [ -n "$want" ] && printf '%s\n' "$sites" | grep -qxF "$want"; then
+					printf '  OK    the aliases for the %s go to %s, the directory make names\n' "$kind" "$want"
+				else
+					printf '  FAIL  nothing links the aliases into %s (the %s) - the loader will not see them\n' \
+						"${want:-?}" "$kind"
+					printf '%s\n' "$sites" | sed 's/^/          the recipe links into: /'
+					soname_fail=1
+				fi
+			done
+		else
+			sed 's/^/  /' "$WORK/rtlib.txt" | head -14
+			echo "  FAIL  the directory the loader searches could not be derived from make"
 			soname_fail=1
 		fi
 		# Linking into a directory that make has not created yet is not a missing
