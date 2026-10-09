@@ -16,7 +16,7 @@ Remoto: `https://github.com/Leonisaurov/julia-termux` (rama `main`).
 ## Qué es y qué no es
 
 - Receta declarativa de termux-packages en `packages/julia/build.sh`
-  (`TERMUX_PKG_VERSION=1.12.6`, `packages/julia/build.sh:6`), con 24 parches
+  (`TERMUX_PKG_VERSION=1.12.6`, `packages/julia/build.sh:6`), con 25 parches
   `*.patch` junto a la receta y 2 en `packages/julia/patches/deps/`.
 - Build nativo bionic: `build-package.sh` se ejecuta en su rama on-device porque
   el action crea `/system/bin/app_process`
@@ -41,7 +41,7 @@ La cadena está medida hasta el **minuto ~50** y hay un run en curso
 
 | Pieza | Estado |
 |---|---|
-| Receta `packages/julia/build.sh` + 24 parches + `Make.user` | OK |
+| Receta `packages/julia/build.sh` + 25 parches + `Make.user` | OK |
 | Gates estáticos locales y en el job `lint` | OK |
 | Runner con prefijo Termux (`termux-builder`) | OK |
 | LLVM 18.1.7 bundled (symver `JL_LLVM_18.1`) | OK (~43 min) |
@@ -187,7 +187,7 @@ codegen LLVM y, con `--runtests`, partes de la batería propia de Julia
 ## Índice del repo
 
 ```
-packages/julia/          receta + 24 parches + patches/deps/ + soname-aliases.sh
+packages/julia/          receta + 25 parches + patches/deps/ + soname-aliases.sh
 scripts/                 gates locales (lint-workflows.sh, rehearse-recipe.sh),
                          derivaciones (symlinked-libraries.sh, embedded-triplet.sh,
                          runtime-library-dir.sh),

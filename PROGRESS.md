@@ -37,15 +37,26 @@ parches `_jll`, que usaban la centinela equivocada: `dlopen(…; throw_error = f
 devuelve `nothing`, no `C_NULL` —`base/libdl.jl:119-125`—).  Quedan por demostrarse
 el resto del precompile, empaquetado y la verificación en dispositivo.
 
+El mismo cruce (`scripts/unguarded-dlopen.sh`) encontró después **otros dos stubs
+con la misma forma de muro**, uno por día: `LibUnwind_jll` (`libunwind.so.8`, que
+`DISABLE_LIBUNWIND := 1` no instala) y `OpenLibm_jll` (`libopenlibm.so.4`, que
+`USE_SYSTEM_LIBM := 1` no instala), y los tres están declarados opcionales con
+guarda `throw_error = false`.  Este último costó un run de 2 min 24 s **porque el
+gate local no podía verlo**: el veredicto `native` se lo preguntaba al prefijo del
+teléfono, donde ese fichero lo dejó el `julia` publicado que este port reconstruye.
+Desde 2026-10-09 el gate pregunta a una copia del prefijo **sin los ficheros que
+posee el paquete que se construye**, así que un `GATE: PASS` local y el del runner
+responden a la misma pregunta.
+
 | Pieza | Estado |
 |---|---|
-| Receta declarativa `packages/julia/build.sh` | OK (24 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
-| Gates estáticos locales | OK y en el DAG de CI |
+| Receta declarativa `packages/julia/build.sh` | OK (25 parches aplican, `configure` genera un `Make.user` que `Make.inc` acepta) |
+| Gates estáticos locales | OK y en el DAG de CI; desde 2026-10-09 el veredicto de los sonames se pregunta al sysroot del build (prefijo sin los ficheros del paquete que se construye), no al prefijo del teléfono |
 | Entorno de runner (`termux-builder`) | OK: materializa un prefijo Termux real en `ubuntu-24.04-arm` |
 | LLVM 18.1.7-4 bundled compilado | OK (43 min) |
 | `src/` de Julia y `julia-base` | OK (flisp, runtime y los 19 symlinks de system libs, `libblas.so`/`liblapack.so` incluidos) |
 | Sysimage (`sysimg`/`base/`) | **emitida en CI**: `37876520515` produce `sysbase-o.a` **y** `sys-o.a`; la memoria quedó descartada como causa |
-| Precompile de stdlibs (`pkgimage.mk:28`) | **muro actual**: `CompilerSupportLibraries_jll` asume runtime GCC; parche + centinela corregidos y validados en el gate local, sin correr en CI todavía |
+| Precompile de stdlibs (`pkgimage.mk:28`) | **muro actual**: tres stubs *dummy* cargan librerías que este build no produce (`CompilerSupportLibraries_jll`, `LibUnwind_jll`, `OpenLibm_jll`); los tres con guarda y validados en el gate local, sin correr en CI todavía |
 | Artefactos `.deb` + `.pkg.tar.xz` + bundle | sin producir todavía |
 | Verificación en dispositivo (Fase 5) | pendiente |
 
@@ -245,13 +256,15 @@ convirtió en gate local cuando era reproducible fuera del runner.
 
 | 37851961397 | 22:12→23:05 | **hipótesis del triplet confirmada en el build real**: `Unmatchable` aparece 0 veces en el log y `julia-base` termina; ~49 min después el run aborta otra vez en `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, ahora con `LoadError("sysimg.jl", 0, LoadError("Base.jl", 0, LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))))` (líneas 15842-15847 del log, 23:05:03Z) | causa distinta, una capa más abajo: `base/gmp.jl:32` y `base/mpfr.jl:40` piden al loader nombres versionados estilo glibc como **literales** (upstream no lo nota porque compila su propio GMP, cuyo SONAME sí lleva la versión) y `dlopen` de Android empareja el **nombre de fichero**, así que `$PREFIX/lib/libgmp.so` no responde `libgmp.so.10` — medido con `readelf -d` sobre el prefijo: ningún SONAME de Termux lleva versión. El alias de `base/Makefile` (`symlink_system_library`, línea 162) no puede ayudar: crea el nombre **sin** versión en `usr/lib/julia` y `libwhich -p libgmp.so.10` no resuelve. Y la receta creaba los symlinks en `termux_step_post_make_install`, **después** de `make`: por eso `pacman -Qo` atribuye `libgmp.so.10`/`libmpfr.so.6` al paquete julia instalado mientras el build nunca los vio | `packages/julia/soname-aliases.sh` lee los nombres pedidos del fuente (`base/*.jl`, `stdlib/*/src/*.jl`) y veredicta cada uno `native`/`alias`/`built`/`absent` contra el prefijo; `termux_link_soname_aliases` en la receta los enlaza en `usr/lib/julia` **antes** de `make` y de nuevo en `$PREFIX/lib/julia` tras install, borrando la lista a mano de tres pares. Sección `dlopen'ed versioned sonames` en `rehearse-recipe.sh`: cruza los `absent` con la lista REQUIRED de `symlinked-libraries.sh` (un nombre letal para `julia-base` y sin respuesta = FAIL) y exige que `termux_step_make` invoque la derivación antes de su `make`. Rojo→verde: gate16 `sonames=1` (`FAIL build.sh never creates the aliases the source demands`, rc=5) → gate17 `sonames=0`, 8 alias (`libcurl.so.4`, `libgit2.so.1.9`, `libgmp.so.10`, `libgmpxx.so.4`, `libmpfr.so.6`, `libnghttp2.so.14`, `libpcre2-8.so.0`, `libssh2.so.1`), 21 `native`, `libblastrampoline.so.5` `built` y 8 `absent` inocuos |
 
-| 37859841658 | 23:30→23:35 | `GATE: PASS` en el runner (`sonames=0`) y **la hipótesis de `libgmp.so.10` no llegó a medirse**: el job build murió a los 4 min 21 s, antes de entrar a `make`, con `ln: failed to create symbolic link 'usr/lib/julia/libcurl.so.4': No such file or directory` (línea 1478 del log, 23:35:01Z) y `build rc=1`.  La tabla de veredictos sí se imprimió completa en el runner: los mismos 8 `aliased` que en el teléfono | el fix estaba roto, no la hipótesis: `termux_link_soname_aliases` enlazaba en `usr/lib/julia` **antes** de `make`, y ese directorio lo crea `make`; con `set -e` del harness el primer `ln` abortó el build.  El gate verde no lo veía porque su chequeo nuevo era estático (¿`termux_step_make` llega a la derivación antes de su `make`?) y no preguntaba si el destino existe.  Detalle honesto adicional: en el prefijo del runner `libopenlibm.so.4` sale `left absent` (en el teléfono es `native` porque el julia instalado lo dejó ahí) y no es un fallo — `USE_SYSTEM_OPENLIBM` no está en 1, así que `make` no pide ese nombre; el veredicto del helper describe el prefijo, no el árbol de build | `mkdir -p "${_dir}"` en la función, demostrado en el teléfono: la misma invocación contra un directorio inexistente ahora devuelve `rc=0` con 8 enlaces.  Gate: el chequeo de wiring pasó a exigir también que **quien enlaza antes de `make` cree el directorio de destino** (`FAIL  %s links into a directory it never creates`); discrimina — con la receta corregida `OK`, con la misma receta sin la línea de `mkdir` `FAIL` |
+| 37859841658 | 23:30→23:35 | `GATE: PASS` en el runner (`sonames=0`) y **la hipótesis de `libgmp.so.10` no llegó a medirse**: el job build murió a los 4 min 21 s, antes de entrar a `make`, con `ln: failed to create symbolic link 'usr/lib/julia/libcurl.so.4': No such file or directory` (línea 1478 del log, 23:35:01Z) y `build rc=1`.  La tabla de veredictos sí se imprimió completa en el runner: los mismos 8 `aliased` que en el teléfono | el fix estaba roto, no la hipótesis: `termux_link_soname_aliases` enlazaba en `usr/lib/julia` **antes** de `make`, y ese directorio lo crea `make`; con `set -e` del harness el primer `ln` abortó el build.  El gate verde no lo veía porque su chequeo nuevo era estático (¿`termux_step_make` llega a la derivación antes de su `make`?) y no preguntaba si el destino existe.  Detalle honesto adicional: en el prefijo del runner `libopenlibm.so.4` sale `left absent` (en el teléfono es `native` porque el julia instalado lo dejó ahí) y no es un fallo — `USE_SYSTEM_OPENLIBM` no está en 1, así que `make` no pide ese nombre; el veredicto del helper describe el prefijo, no el árbol de build **(Corrección 2026-10-09: el veredicto era el bueno y la exculpación no.  Quien apaga openlibm es `USE_SYSTEM_LIBM := 1`, porque `deps/Makefile:89-91` lo añade a `DEP_LIBS` sólo si *ambas* flags valen 0, y el nombre sí se pide: `stdlib/OpenLibm_jll/src/OpenLibm_jll.jl:28` lo `dlopen`ea sin guarda en el precompile.  Ese `note` del gate era un muro mal llamado inocuo y costó el run 37886407453; ver su fila.)** | `mkdir -p "${_dir}"` en la función, demostrado en el teléfono: la misma invocación contra un directorio inexistente ahora devuelve `rc=0` con 8 enlaces.  Gate: el chequeo de wiring pasó a exigir también que **quien enlaza antes de `make` cree el directorio de destino** (`FAIL  %s links into a directory it never creates`); discrimina — con la receta corregida `OK`, con la misma receta sin la línea de `mkdir` `FAIL` |
 
 | 37862103015 | 23:55→00:49 (~54 min) | **hipótesis de los sonames FALSIFICADA**: la tabla del helper se imprimió completa con los 8 `aliased` (línea 350, 23:59:48.5715505Z) y no hay ni un `ln: failed` entre las 12 128 líneas del log, así que los enlaces existieron durante todo el build; y aun así el bootstrap aborta idéntico — `LoadError("gmp.jl", 0, ErrorException("could not load library \"libgmp.so.10\"\ndlopen failed: library \"libgmp.so.10\" not found"))` (línea 12121, 00:49:48.7302374Z) → `sysimage.mk:129: usr/lib/julia/sysbase-o.a Error 1`, `build rc=2`. Marcadores: `could not load library`=1, `sysbase-o.a`=2, `sys-o.a`=0, `generate_precompile`=0, `Killed`=0 | el fichero no faltaba: **estaba donde el loader no mira**. El `dlopen` de un nombre sin barra lo emite `src/dlload.c:376`, dentro de `libjulia-internal.so`, y esa librería se enlaza en `$(build_shlibdir)` = `usr/lib` (`src/Makefile:417`; `Make.inc:729,328,320`) con `RPATH_LIB := RPATH_ORIGIN = -Wl,-rpath,'$ORIGIN'` (`Make.inc:1475,1472`): su conjunto de búsqueda es **su propio directorio** y nada más. `usr/lib/julia` —donde `julia-base` deja sus symlinks sin versión y donde la receta puso los alias— no figura en ese RUNPATH, y en todo el log no aparece un solo `LD_LIBRARY_PATH`, así que tampoco entró por la variable de entorno. Nota de capa: `base/gmp.jl:35` no usa `Libdl.dlopen`, usa `cglobal` a nivel top-level, que es exactamente la ruta de `jl_load_library` | Reproducido y discriminado en el teléfono con el mismo layout (`$PREFIX/tmp/ororigin-probe`: una librería en `usr/lib` con `RUNPATH=$ORIGIN` que hace `dlopen("libgmp.so.10")`): alias en `usr/lib/julia` → `dlopen failed: library "libgmp.so.10" not found`, el mismo mensaje que CI; el mismo alias en `usr/lib` → resuelto. Fix: el call site del árbol de build pasa a `usr/lib`. El instalado se queda en `$PREFIX/lib/julia` porque `make install` **mueve** `libjulia-internal` ahí y le reescribe el RUNPATH a `$ORIGIN:$ORIGIN/../` (`Makefile:468-481`) — el mismo dato confirma que la aserción `lib/julia/libblastrampoline.so.5` es correcta, porque `Makefile:223` la clasifica de librería privada con `USE_SYSTEM_LIBBLASTRAMPOLINE := 0`. Para que un directorio escrito a mano no vuelva a costar un run: `scripts/runtime-library-dir.sh` le pregunta a make `$(build_shlibdir)`, `$(private_libdir)`, `$(RPATH_LIB)` y `$(reverse_private_libdir_rel)` (rechaza el resultado si `RPATH_LIB` ya no menciona `$ORIGIN`) y la sección `dlopen'ed versioned sonames` del gate exige que los destinos de `termux_link_soname_aliases` sean exactamente esa respuesta |
 
 | 37870492832 | 01:35→02:34 (~59 min) | **hipótesis del directorio CONFIRMADA**: `could not load library` aparece **0 veces** en 13 394 líneas, el bootstrap llega hasta el final de la carga —`Stdlibs total ─ 14.479918 seconds`, `Total ─ 54.337887 seconds` (líneas 13267-13271, 02:33:40Z), `Allocations: 338327679 (Pool: 338324218; Big: 3461); GC: 68`— y aborta un paso más allá, al **emitir** el fichero: 49× `scudo: Can't populate more pages for size class N` (primera línea 3163 a 01:45:11Z, última 13300 a 02:33:40Z), 2× `libc++abi: terminating due to uncaught exception of type St9bad_alloc: std::bad_alloc` (13302-13303), `[23944] signal 6 (-1): Aborted` (13305) → `sysimage.mk:129: …/usr/lib/julia/sysbase-o.a Error 1`, `Makefile:114: julia-sysimg-release Error 2`, `build rc=2`. El OOM-killer **no** intervino: el único `Killed` del log (13333) es el patrón `grep` que el paso *Where the time went* se imprime a sí mismo | causa abierta, y no es "falta de RAM en reposo": a 01:39:32Z el action reportó `Mem: 15947 total / 12528 free / 14621 available` y `Swap: 3071 0 3071` (líneas 706-707). Tampoco es un síntoma del tramo final: los avisos scudo son **crónicos** —34 en 37862103015, que murió por otra causa— y aquí se agrupan en 01:45-01:46 (33 avisos, LLVM compilando con `-j4`) y 02:33 (16, el abort). Tres candidatas sin discriminar: pico real de RSS (4 × `cc1plus`/`as` + el `julia` del precompile sobre 15,9 GB), agotamiento de VMAs (scudo fragmenta su arena en muchos mappings y el límite del runner aún no está medido —`/proc/sys/vm/max_map_count` no es legible en el teléfono, así que lo imprime el propio run—), o `overcommit_memory=2`/heurística que rechaza el `mmap` grande haciendo que `malloc` devuelva NULL → `operator new` lance → `abort()`. El log no permite elegirlas porque **no contiene ninguna medición durante el build** | Este run no cierra una causa: **instrumenta**. El job build recibe red y medidor a la vez — `.github/actions/zram` (swap comprimido) y `sudo sysctl -w vm.max_map_count=1048576`, ambos con `continue-on-error` porque son mejora, no requisito; un watchdog que cada 20 s anota `MemAvailable/Committed_AS/CommitLimit/SwapTotal/Writeback`, los 3 procesos de mayor RSS y los `vmas`+`VmRSS` de cada `julia`; y un paso `if: always()` que reporta nº de muestras, mínimo de `MemAvailable`, el `vm.max_map_count` y `ulimit -v` vigentes y el `dmesg` filtrado por `oom|mmap|vmalloc`. La hipótesis declarada del próximo run es la memoria, y su salida debe **clasificarla**, no solo sobrevivir a ella |
 
 | 37876520515 | 02:52→03:56 (~62 min de build: 02:54:51→03:56:49Z) | **la hipótesis de la memoria queda FALSIFICADA por el propio instrumento**: el watchdog tomó 186 muestras y el `MemAvailable` **mínimo** fue 8 458 692 kB (líneas 22129-22130), `vm.max_map_count` pasó de 262 144 a 1 048 576 (3816-3818) y aun así el build **emitió** los dos objetos —`JULIA usr/lib/julia/sysbase-o.a` (16389, 03:46:37Z) y `JULIA usr/lib/julia/sys-o.a` (16608, 03:50:51Z)—.  Los `scudo: Can't populate more pages` siguen (68) pero con **cero** `St9bad_alloc` y cero `signal 6`.  El run muere un tramo más allá: `Failed to precompile CompilerSupportLibraries_jll [e66e0078-…]` (21999, 22047) con `ERROR: LoadError: FieldError: type Nothing has no field major` (22042, 22090) → `pkgimage.mk:28: stdlib/release.image Error 1` (22093), `Makefile:120: stdlibs-cache-release Error 2`, `build rc=2` (22095) | el stub *dummy* de upstream `stdlib/CompilerSupportLibraries_jll/src/CompilerSupportLibraries_jll.jl` **da por existente un runtime GCC que Termux no tiene**: `libgfortran_version(HostPlatform()).major` (`base/binaryplatforms.jl:454` es `VNorNothing(tags(p), …)` y está documentada como nullable) desreferencia `nothing` porque el triple ya no lleva la etiqueta, y `__init__` hace `dlopen` **sin guarda** de `libgcc_s.so.1` (57), `libstdc++.so.6` (61) y `libgomp.so.1` (63).  Medido en el teléfono: `$PREFIX/lib` no tiene `libgfortran*`, `libgcc_s*`, `libstdc++*`, `libgomp*`, `libssp*` y `pacman -Qo` responde `No package owns`.  La capa que *debería* producirlos es `deps/csl.mk:49-101`, que las copia de `$(FC) -print-search-dirs` con `[ -n "$SRC_LIB" ] && cp`: con `clang` como `FC` esa copia es un no-op **silencioso**.  Segundo defecto, este propio: 330 líneas de `MethodError: no method matching dlpath(::Nothing)` vienen de **mis** parches `_jll`, que comprobaron `handle === C_NULL` cuando `dlopen(…; throw_error = false)` devuelve `nothing` (`base/libdl.jl:119-125`; `C_NULL` es `dlopen_e`, línea 160) | Parche nuevo `packages/julia/stdlib-CompilerSupportLibraries_jll.jl.patch`: el nombre queda `""` si la versión es `nothing`, un helper `load_runtime_library` convierte la centinela `nothing` → `C_NULL`, envuelve `dlpath` en `try` y deja `LIBPATH` en `dirname(Sys.BINDIR)/lib` si nada cargó.  Centinela corregida a `nothing` en `stdlib-libblastrampoline_jll.jl.patch` y `stdlib-OpenBLAS_jll.jl.patch`.  **Brecha de gate cerrada** (es lo que permitió que esto costara un run): `scripts/unguarded-dlopen.sh` lee los *call sites* de cada nombre `absent` —dos saltos: `dlopen(ident)` y `helper(ident)`, y al helper lo juzgan sus propios `dlopen`— y `rehearse-recipe.sh` vuelve **FAIL** todo `absent` cargado sin guarda, lo exija `julia-base` o no; `soname-aliases.sh` ya no mantiene la lista a mano de `built` sino que la deriva de `deps/*.mk` (`libX.$(SHLIB_EXT)` y el paquete `$(SRCCACHE)/libX-*`), así que `libdSFMT.so`/`libunwind.so.8` pasan a `built` y no son falsos positivos.  **(Corrección del mismo día: la derivación sin más era generosa —acreditaba todo lo que un `deps/*.mk` menciona, incluidas las deps apagadas— y con ella `libunwind.so.8` pasaba a `built`, tapando un muro real.  Filtrada por `$(DEP_LIBS)` de make, `libdSFMT.so` sigue `built` y `libunwind.so.8` vuelve a `absent`, donde el cruce con `unguarded-dlopen.sh` lo nombra; ver el bullet de `Tramo siguiente`.)**  Rojo→verde en el teléfono: sin el parche `GATE: FAIL` rc=5 con tres FAIL nombrando las líneas 57/61/63; con él rc=0, los cuatro `guarded` (dos `via load_runtime_library()`) y `patches_applied=23`.  Dos notas honestas: el zram **no** tuvo efecto (`modprobe zram` → `Exec format error`, 3798, rc=1 tolerado; el swap siguió siendo el `/swapfile` de 3 G del runner) y el paso `Report what stopped the build` se cayó a sí mismo (rc=1: `grep -h '^julia pid='` sin coincidencias bajo el `-e` del runner —el medidor nunca vio un proceso `julia`—), ya corregido con `|| true` y respuesta explícita |
+
+| 37886407453 | 04:59→05:01 (2 min 24 s, **sin tocar `make`**) | el gate pasó 24 parches y **falló en el runner**: `left absent libopenlibm.so.4` (1744), `unguarded libopenlibm.so.4 stdlib/OpenLibm_jll/src/OpenLibm_jll.jl:28` (1967), `FAIL … is loaded without a guard` (2106), `patches_applied=24 … sonames=1`, `GATE: FAIL` (2420-2421) → `build` y `bundle`/`publish` `skipped`.  En el teléfono el mismo gate estaba `GATE: PASS` con `native libopenlibm.so.4` | dos cosas a la vez, y la segunda es la que costó el run.  (a) El muro es real: la receta fija `USE_SYSTEM_LIBM := 1` y `deps/Makefile:89-91` sólo construye openlibm si **ambas** `USE_SYSTEM_OPENLIBM` y `USE_SYSTEM_LIBM` valen 0, así que `DEPLIBS` no lo incluye (medido idéntico en los dos árboles) y `Make.inc:1321-1324` enlaza contra `-lm`; el stub *dummy* de upstream pide `libopenlibm.so.4` (`OpenLibm_jll.jl:24`) y lo `dlopen`ea sin guarda en `__init__` (`:28`), y el módulo está en `INDEPENDENT_STDLIBS` (`stdlib/stdlib.mk:12`) → habría abortado el precompile de `pkgimage.mk:28`, igual que `LibUnwind_jll`.  (b) El **gate local no podía verlo**: `native`/`absent` se pregunta al prefijo del host que ejecuta `soname-aliases.sh`, y en el teléfono `libopenlibm.so.4` es un fichero dejado por el `julia 1.12.6-1` publicado (`pacman -Qo`), o sea por el paquete que este build reconstruye.  La nota de 37859841658 había llamado inocua esa divergencia con un razonamiento equivocado (`USE_SYSTEM_OPENLIBM` no es la flag que manda) | (a) `packages/julia/stdlib-OpenLibm_jll.jl.patch`: guarda `throw_error = false` + `return` si responde `nothing`, misma forma que `stdlib-LibUnwind_jll.jl.patch`; descartado `USE_SYSTEM_LIBM := 0` (compilar openlibm para bionic por un módulo que nadie usa) y descartado enlazar el nombre a `$PREFIX/lib/libm.so` (otra librería respondiendo por un nombre ajeno).  (b) `rehearse-recipe.sh` pregunta ahora a una copia de `$PREFIX/lib` **sin los ficheros que posee el paquete que se construye** (`pacman -Ql`/`dpkg -L` + `cp -as`; si el paquete no está instalado o no hay gestor, no quita nada y lo dice).  Rojo→verde medido aquí con el prefijo modelado: sin el parche `absent` + `unguarded …:28`; con él `guarded …:33`, `patches_applied=25`, `sonames=0`, `GATE: PASS` (`rehearse-openlibm2.log`).  Único `native` local de dueño `julia`: ver el bullet de `Tramo siguiente` |
 
 Hallazgo estático que no costó un run (medido antes de pushear, 2026-10-09
 ~03:10 UTC): el parche `_jll` de libblastrampoline pedía la librería **solo** en
@@ -346,6 +359,56 @@ pida `dlopen` del linker del runner.
   y `GATE: FAIL` (`rehearse-unwind-red.log`); con él `patches_applied=24`,
   `sonames=0`, `guarded libunwind.so.8 …:31` y `GATE: PASS`
   (`rehearse-unwind.log`, 2026-10-08 ~22:55 UTC).
+
+- **`libopenlibm.so.4`: el muro que el teléfono no podía ver.**  El run
+  `37886407453` (creado 04:59:04Z, `GATE: FAIL` a las 05:01:25Z, 2 min 24 s, job
+  `build` `skipped`) falló en el runner con
+  `FAIL  libopenlibm.so.4 is loaded without a guard at stdlib/OpenLibm_jll/src/OpenLibm_jll.jl:28`
+  y `sonames=1`, mientras el mismo gate con los mismos 24 parches daba `GATE: PASS`
+  aquí.  La diferencia no estaba en la receta ni en la respuesta de make —los dos
+  árboles contestaron el mismo `DEPLIBS=JuliaSyntax blastrampoline libuv dsfmt llvm
+  utf8proc terminfo libwhich` y las mismas 22 filas `dep off`—: estaba en **el
+  prefijo donde corre el helper**.  `$PREFIX/lib/libopenlibm.so.4` existe en el
+  teléfono y `pacman -Qo` lo atribuye a `julia 1.12.6-1`, el paquete publicado que
+  este port reconstruye, así que el veredicto local (`native`) respondía a una
+  pregunta que el build real no tiene quién le conteste.  Y la pregunta correcta la
+  dicen las tres capas: la receta fija `USE_SYSTEM_LIBM := 1` (`build.sh:102`, en
+  Termux el `libm` es el de bionic), `deps/Makefile:89-91` sólo añade `openlibm` a
+  `DEP_LIBS` cuando **ambas** `USE_SYSTEM_OPENLIBM` y `USE_SYSTEM_LIBM` valen 0
+  (medido: `dep off openlibm`), `Make.inc:1321-1324` enlaza Julia contra `-lm`, y
+  `stdlib/OpenLibm_jll/src/OpenLibm_jll.jl:24` escribe `libopenlibm.so.4` para la
+  rama linux que `:28` `dlopen`ea **sin guarda** en `__init__` — un módulo que está
+  en `INDEPENDENT_STDLIBS` (`stdlib/stdlib.mk:12`), o sea que se precompila bajo
+  `pkgimage.mk:28`.  Nada lo usa: medido, `OpenLibm_jll` sólo aparece en su propio
+  `Project.toml`, en `stdlib/Project.toml:35` y en esa lista de instalación.
+- Fix en la capa productora, con la misma forma que libunwind:
+  `packages/julia/stdlib-OpenLibm_jll.jl.patch` (`dlopen(…; throw_error = false)` +
+  `return` si responde `nothing`, dejando `libopenlibm_handle`/`libopenlibm_path` en
+  los defaults que el propio stub declara).  Descartado `USE_SYSTEM_LIBM := 0`:
+  pondría a compilar openlibm para bionic —otro `unit` de build cuya portabilidad
+  aquí no está medida— para dar de comer a un módulo que nadie carga, y contradice el
+  motivo por el que la receta eligió el `libm` del sistema.  Descartado enlazar el
+  nombre a `$PREFIX/lib/libm.so` (existe: symlink a `/system/lib64/libm.so`), porque
+  haría que una librería distinta responda por un nombre que no es el suyo.
+- **Fidelidad del gate, que es lo que había que cerrar de verdad.**  Un `native`
+  dado por el paquete que se está reconstruyendo no es evidencia de nada, así que
+  `rehearse-recipe.sh` ya no pregunta al prefijo del dispositivo sino a una copia de
+  él **sin los ficheros que posee el paquete que se construye**: `pacman -Ql $PKG`
+  (o `dpkg -L`) → `cp -as "$PREFIX/lib"` → se quitan los poseídos.  Si el paquete no
+  está instalado, o no hay gestor de paquetes, no se quita nada y el log lo dice,
+  porque un filtro silencioso sería un veredicto que nadie puede trazar.
+  Discriminación medida: con el filtro el gate local imprime la misma fila que el
+  runner (`sysroot … 12 file(s) removed because package julia owns them`,
+  `left absent libopenlibm.so.4 … in …/sysroot`) y sobre el árbol **sin** el parche
+  el cruce da `unguarded … OpenLibm_jll.jl:28` (rojo, reproducido con un prefijo
+  sintético que carece de `libopenlibm*`); con él, `guarded … :33`,
+  `patches_applied=25`, `sonames=0`, `GATE: PASS` (`rehearse-openlibm2.log`,
+  2026-10-09 ~05:19 UTC).  Comprobado además que este nombre era el **único**
+  `native` local cuyo dueño es el paquete reconstruido: los otros ocho (`libklu.so.2`,
+  `libldl.so.3`, `librbio.so.4`, `libspqr.so.4`, `libumfpack.so.6`,
+  `libsuitesparseconfig.so.7` de `suitesparse`, `libssl.so.3` de `openssl`,
+  `libz.so.1` de `zlib`) los tiene también el sysroot del runner, así que no queda
+  otra divergencia teléfono/runner de esta clase pendiente.
 
 - **Los 8 `alias` se crean ahora antes de `make`, y en el directorio que lee el
   loader.** El tramo que sigue a `sysbase-o.a` tampoco está medido en Android:
@@ -455,14 +518,18 @@ empaquetado sigue sin medir.
 ## Pendientes
 
 1. **Fase 4 (en curso)**: que un run llegue a producir el `.deb`.  El run
-   `37870492832` cerró la hipótesis del directorio y `37876520515` falsificó la de
-   memoria: `sysbase-o.a` y `sys-o.a` se emiten y el muro quedó en el precompile de
-   stdlibs.  El próximo run mide **una** hipótesis: que con los dos stubs que
-   cargan librerías inexistentes declarados opcionales
+   `37870492832` cerró la hipótesis del directorio, `37876520515` falsificó la de
+   memoria (`sysbase-o.a` y `sys-o.a` se emiten; el muro quedó en el precompile de
+   stdlibs) y `37886407453` **no llegó a `make`**: el gate lo paró en el runner por
+   el stub `OpenLibm_jll`.  El próximo run mide **una** hipótesis: que con los tres
+   stubs que cargan librerías inexistentes declarados opcionales
    (`stdlib-CompilerSupportLibraries_jll.jl.patch`,
-   `stdlib-LibUnwind_jll.jl.patch`), `pkgimage.mk` pasa de
-   `CompilerSupportLibraries_jll` y el precompile avanza.  Mientras no exista
-   artefacto, `bundle` y `publish` siguen `skipped`.
+   `stdlib-LibUnwind_jll.jl.patch`, `stdlib-OpenLibm_jll.jl.patch`) el precompile de
+   `pkgimage.mk` pasa de `CompilerSupportLibraries_jll`, `LibUnwind_jll` y
+   `OpenLibm_jll` y llega más lejos en `INDEPENDENT_STDLIBS`.  Secundaria y ya
+   medida este mismo día: el gate local pregunta ahora al sysroot **del build**, no
+   al prefijo del teléfono, así que un `GATE: PASS` local vale lo que vale en el
+   runner.  Mientras no exista artefacto, `bundle` y `publish` siguen `skipped`.
 2. **Fase 5 — verificación en dispositivo**: instalar `.deb`/`.pkg.tar.xz`,
    correr `julia --version`, `versioninfo()`, `Pkg.test` de un paquete puro de
    Julia y la batería de smoke de `test/`; con evidencia fechada. "Compila" no
@@ -480,6 +547,13 @@ empaquetado sigue sin medir.
    guarda?", y esa pregunta la responde `scripts/unguarded-dlopen.sh` sobre los
    mismos ficheros.  Si un `absent` real bloquea un run, la derivación se aprieta
    contra `$(INSTALL_NAME_CMD)libNAME.$(SHLIB_EXT) $(build_shlibdir)/…`.
+   Boundary **de prefijo**, declarada el 2026-10-09 tras `37886407453`: el gate
+   excluye del sysroot los ficheros que posee el paquete que se construye
+   (`pacman -Ql`/`dpkg -L`), y eso cubre el caso observado; un `native` dado por una
+   librería que en el teléfono instaló *otro* paquete que en el runner no está, o
+   por un fichero suelto sin dueño, seguiría leyendo distinto en cada lado.  El
+   síntoma a vigilar es idéntico al de esta fila: `GATE: PASS` local + `left absent`
+   en el runner.
 4. **Fase 2 (opcional)**: `packages/llvm-julia` solo si el LLVM bundled resulta
    no cacheable.
 5. **Limpieza**: restos de sesiones en `$PREFIX/tmp` (`gate*.txt`,
@@ -495,6 +569,12 @@ empaquetado sigue sin medir.
    `csl-check2`, `lu-patch-*`, `lu-apply-*`, `julia-rehearse.1xLPzx`,
    `julia-rehearse.H2UWEw` y los logs `rehearse-{green,red,unwind,unwind-red}.log`,
    `verdicts-*.txt`, `absent-new.txt`, `parse-out.txt`, `lu-workdir.txt`.
+   Añadido 2026-10-09 ~05:25 UTC (el cierre de `OpenLibm_jll`): `jwork` sigue siendo
+   el árbol pristino del que se generan los parches; se borran además
+   `openlibm-patch.*`, `runner-sysroot.*` (el prefijo sintético con el que se
+   reprodujo el veredicto del runner), `openlibm-demo.*` (árbol verde + tablas
+   rojo/verde), `julia-rehearse.0eJq88`, `julia-rehearse.WWg9Gj` y los logs
+   `rehearse-openlibm{,2}.log`.
 6. **Restos de la ruta Docker** (`scripts/Dockerfile`, `run-docker.sh`,
    `build-deps-docker.sh`, `setup-ccache-docker.sh`, `build-local.sh`,
    `ndk-patches/`, `trace-dl/`, `tasks/`, `.hermes/`, `build.log` suelto): están
