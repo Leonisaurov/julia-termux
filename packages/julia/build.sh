@@ -30,6 +30,22 @@ TERMUX_PKG_DEPENDS="7zip, curl, libc++, libgit2, libgmp, libmpfr, libnghttp2, li
 # which the runtime list above already covers.
 TERMUX_PKG_BUILD_DEPENDS="binutils, blas-openblas, ca-certificates, clang, cmake, diffutils, file, findutils, gawk, git, lld, llvm, m4, make, patch, patchelf, perl, pkg-config, python, sed, tar, which, xz-utils"
 
+# The pkgimages (Julia's precompiled stdlib caches under share/julia/compiled/)
+# are emitted by Julia's own JIT, not linked by the C toolchain, so their calls
+# to bionic's memset/memcpy/memmove/sigsetjmp stay as `NOTYPE ... UND` and
+# termux_step_massage's NDK#1614 check reads them as unresolvable
+# (termux/termux-packages#9944).  They are not: the Julia process dlopen()s each
+# one and the global libc scope resolves the names.  The runtime libraries a
+# level above do NOT need this: lib/julia/sys.so and libjulia-internal.so carry
+# `FUNC ... UND memset@LIBC` (versioned), which the check's `NOTYPE ... UND`
+# pattern cannot match.  Run 37919869465 flagged exactly these 32 pkgimages and
+# nothing else, so only this path is declared - a broader list would hide a real
+# unresolved symbol in the loader or the sysimage.  Same declaration as
+# termux-user-repository's tur-on-device/julia recipe.
+TERMUX_PKG_UNDEF_SYMBOLS_FILES="
+./share/julia/compiled/*/*/*.so
+"
+
 # The *.patch files sitting next to this recipe are applied by
 # termux_step_patch_package() before configure.  patches/deps/*.patch are
 # content patches for Julia's own bundled deps; deps/*.mk reads them from
