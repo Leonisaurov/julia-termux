@@ -4,10 +4,23 @@
 # system image and never rely on dlpath() alone.
 --- a/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
 +++ b/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
-@@ -32,15 +32,49 @@
-     const libsuffix = ""
- end
+@@ -26,21 +26,58 @@
+ libopenblas_handle::Ptr{Cvoid} = C_NULL
+ libopenblas_path::String = ""
  
+-if Base.USE_BLAS64
+-    const libsuffix = "64_"
+-else
+-    const libsuffix = ""
++# The annotation is load-bearing for `juliac --trim`.  A `const` assigned inside
++# a conditional keeps a binding the trim verifier cannot narrow, so every string
++# interpolation built from it is refused as
++#   Verifier error: unresolved call ... Core._apply_iterate(Base._string, a::Any)
++# coming out of load_openblas().  Measured on the device 2026-10-10: the same
++# expression passes the verifier when the binding is typed, and a hello world
++# compiled with --trim=safe stops failing inside this stdlib's __init__.
++const libsuffix::String = Base.USE_BLAS64 ? "64_" : ""
++
 +# Everything below has to be computed inside `__init__()`, not at module top
 +# level: a top-level `const` in a stdlib is frozen into the system image, so a
 +# path built from `Sys.BINDIR` there would keep the build machine's prefix.
@@ -40,8 +53,8 @@
 +    end
 +    error("OpenBLAS_jll: none of ", join(candidates, ", "),
 +          " could be dlopen'ed; is the libopenblas package installed?")
-+end
-+
+ end
+ 
  if Sys.iswindows()
      const libopenblas = "libopenblas$(libsuffix).dll"
 -    const _libgfortran = string("libgfortran-", libgfortran_version(HostPlatform()).major, ".dll")
@@ -57,7 +70,7 @@
  end
  
  function __init__()
-@@ -62,12 +96,11 @@
+@@ -62,12 +99,11 @@
          ENV["OPENBLAS_DEFAULT_NUM_THREADS"] = "1"
      end
  
