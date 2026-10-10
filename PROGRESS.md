@@ -636,6 +636,14 @@ corren directos** con `julia -e 'using Test; include("x.jl")'`: `ccall` (todo),
 barreras, sin crash).  `Distributed` sí funciona (`addprocs` → `procs=[2]`,
 `remotecall_fetch` → 2).  Nada de eso es del port: es el seccomp/libuv del entorno.
 
+**Alcance de lo que funciona, medido (2026-10-10):** `Pkg.test` de un paquete puro pasa
+(`Pkg.add("Example")` + precompilado + `Pkg.test` → *Example tests passed*).  Un paquete
+con **artefacto binario** no: `Pkg.add("FFTW")` baja el JLL y muere en
+`dlopen failed: library "libm.so.6" not found` porque el artefacto aarch64 está compilado
+contra **glibc** (`libfftw3.so.3.7.11` NEEDED `libm.so.6`, `libpthread.so.0`, `libc.so.6`)
+y bionic no tiene esos sonames.  Es la frontera del ecosistema JLL en Android, no del port:
+paquetes puros sí, paquetes con binarios glibc no.
+
 ### Caché de CI: la clave no debe depender de lo que deriva solo
 
 La clave era `julia-deb-v1-aarch64-<HEAD de termux-packages>-<hash del índice
