@@ -1,0 +1,121 @@
+name: probe-juliac-binary
+
+# Feasibility probe, not a build.
+#
+# `juliac --output-exe` (Julia 1.12's native compilation) dies on this phone with
+# std::bad_alloc after reaching 6.45 GB RSS in 200-308 s, and the question is
+# whether that is the phone or Julia.  So this runs the same driver on a Linux
+# runner with the *upstream* tarball - nothing from this port is involved - and
+# reports the peak RSS getrusage saw, next to the device's measured number.
+# The two runners are the two answers that matter: x86_64 (what CI has) and
+# aarch64 (what the phone is).
+#
+# It is workflow_dispatch-only on purpose: build-package.yml triggers on push with a
+# paths: filter that does not list this file, so committing it does not rebuild the
+# package.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: juliac on ${{ matrix.trip }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            trip: linux-x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            trip: linux-aarch64
+    steps:
+      - name: Runner facts
+        run: |
+          set -x
+          nproc
+          free -m || true
+          awk '/MemTotal|MemAvailable|CommitLimit|Committed_AS/' /proc/meminfo
+          command -v /usr/bin/time >/dev/null || sudo apt-get install -y -qq time
+
+      - name: Upstream Julia 1.12.6 (${{ matrix.trip }})
+        run: |
+          set -euo pipefail
+          url="https://julialang-s3.julialang.org/bin/linux/${{ matrix.arch }}/1.12/julia-1.12.6-${{ matrix.trip }}.tar.gz"
+          echo "url=$url"
+          curl -fsSL "$url" -o julia.tar.gz
+          mkdir jl
+          tar -xzf julia.tar.gz -C jl --strip-components=1
+          jl/bin/julia --version
+          # Does the official distribution ship a juliac wrapper?  This port had to
+          # add one (upstream's Makefile:92 installs only the share/julia files), so
+          # the answer belongs in the log rather than in an assumption.
+          echo '--- jl/bin ---'
+          ls -l jl/bin/
+
+      - name: hello.jl
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          cat > work/hello.jl <<'EOF'
+          function (@main)(args::Vector{String})
+              println("HOLA desde un binario nativo — Julia ", VERSION)
+              println("args = ", args)
+              return 0
+          end
+          EOF
+          cat work/hello.jl
+
+      - name: juliac --output-exe, measured
+        working-directory: work
+        run: |
+          set +e
+          /usr/bin/time -v ../jl/bin/julia ../jl/share/julia/juliac/juliac.jl \
+            --output-exe hello hello.jl > juliac.log 2>&1
+          rc=$?
+          set -e
+          echo "juliac rc=$rc"
+          echo "===== tail of juliac.log ====="
+          tail -c 4000 juliac.log
+          echo "===== measurement ====="
+          grep -E 'Maximum resident set size|Elapsed \(wall clock\)|Exit status' juliac.log \
+            || echo "(no measurement was produced)"
+          echo "===== products ====="
+          ls -la
+          if [ -x ./hello ]; then
+            echo "===== THE BINARY RUNS ====="
+            ./hello alfa beta || echo "binary exited $?"
+            file ./hello
+            {
+              echo "### juliac on ${{ matrix.trip }}: **succeeded**"
+              echo
+              echo '```'
+              grep -E 'Maximum resident set size|Elapsed \(wall clock\)' juliac.log || true
+              file ./hello
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "===== NO BINARY: rc=$rc ====="
+            {
+              echo "### juliac on ${{ matrix.trip }}: **failed** (rc=$rc)"
+              echo
+              echo '```'
+              tail -c 1500 juliac.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # The probe's answer is the log, not the exit status: a failure here is a
+          # result too, so do not let it mask the measurement.
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: juliac-binary-${{ matrix.arch }}
+          path: work/hello
+          if-no-files-found: warn
+          retention-days: 7
