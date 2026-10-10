@@ -8,25 +8,32 @@ name: probe-juliac-memory
 # at 6.12 GB, and the phone dies at 6.45 GB with Android sharing its ~7.5 GB.  The
 # phone therefore needs a variant that lands under ~5 GB to have any margin.
 #
-# The levers are the ones Julia actually exposes, and juliac hardcodes two of the
-# decisions that matter, so a copy of the driver is patched in place for those:
-#   -O0                       the optimizer's share of the work
-#   --heap-size-hint=2G       the Julia-side collector (the phone's failure was a
-#                             C++ bad_alloc out of LLVM, so this may well do nothing)
-#   --output-incremental      juliac passes `--output-incremental=no`, which is the
-#                             opposite of streaming the object out as it is produced
-#   --trim=safe               reachability trimming: emits only what is reached and
-#                             adds --strip-ir --strip-metadata.  The program here is
-#                             deliberately trim-friendly (`print("HOLA\n")`, no
-#                             varargs): the first run of this matrix used
-#                             `println("…", VERSION)` and --trim refused it, which
-#                             is a property of that hello world, not of trimming.
-#   --output-incremental      measured and dropped: juliac's own buildscript creates
-#                             the global `task` in Main, and incremental compilation
-#                             rejects that with "Creating a new global in closed
-#                             module `Main` (`task`) breaks incremental compilation".
-# Every job runs the same hello world on the same artifact, so the peak RSS column
-# is directly comparable with the numbers above.
+# The levers were measured in two passes of this matrix (runs 38068408208 and
+# 38069023593), peak RSS for the same hello world on the same artifact:
+#
+#   baseline        6.83-6.86 GB  2:37-2:40  rc=0  212 MB binary, runs
+#   heaphint-2g     6.84-6.90 GB  2:41-2:43  rc=0  212 MB binary, runs
+#   o0              8.81-8.86 GB  2:03-2:07  rc=0  226 MB binary, runs
+#   trim-safe       0.41 GB       0:07       rc=1  no binary
+#   incremental     0.41 GB       0:05       rc=1  no binary
+#
+# So two levers are closed and one is still open:
+#   -O0            makes the peak *worse*, not better, while shortening wall time.
+#                  That is consistent with the phone, where the -O0 run died too.
+#   --heap-size-hint moves Julia's own heap and nothing else.  The phone's failure
+#                  was a C++ bad_alloc out of LLVM, so this was the expected null.
+#   --output-incremental  blocked by juliac itself: its buildscript creates the
+#                  global `task` in Main and incremental compilation stops with
+#                  "Creating a new global in closed module `Main` (`task`) breaks
+#                  incremental compilation".
+#   --trim         the only open one, and the only that would matter: it failed at
+#                  0.41 GB after 7 s, i.e. before doing the memory-hungry part, with
+#                  a program that is already trim-friendly (`print("HOLA\n")`, no
+#                  varargs - the first pass used `println("…", VERSION)` and --trim
+#                  refused that, which is a property of that hello world).
+#
+# This pass is therefore trim only, and it dumps the whole driver log (the message
+# sits in the middle and a head/tail window missed it twice).
 #
 # workflow_dispatch only: build-package.yml's push trigger filters on paths that do
 # not list this file.
@@ -51,21 +58,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: baseline
-            flags: ""
-            extra: ""
-            incremental: "0"
           - variant: trim-safe
             flags: "--experimental --trim=safe"
             extra: ""
             incremental: "0"
-          - variant: o0
-            flags: ""
-            extra: '"-O0"'
-            incremental: "0"
-          - variant: heaphint-2g
-            flags: ""
-            extra: '"--heap-size-hint=2G"'
+          - variant: trim-unsafe
+            flags: "--experimental --trim=unsafe"
+            extra: ""
             incremental: "0"
     steps:
       - uses: actions/checkout@v4
@@ -173,13 +172,20 @@ jobs:
           peak=$(sed -n 's/.*Maximum resident set size (kbytes): \([0-9]*\).*/\1/p' juliac.log | tail -1)
           wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time.*: \([0-9:.]*\)$/\1/p' juliac.log | tail -1)
           echo "variant=${{ matrix.variant }} rc=$rc peak_kb=${peak:-?} wall=${wall:-?}"
-          # Both ends: a trim/verification failure prints its message first and its
-          # stack last, and 1200 chars of tail hid exactly which call it could not
-          # prove the first time this ran.
-          echo '----- juliac.log head -----'
-          head -c 1500 juliac.log
-          echo '----- juliac.log tail -----'
-          tail -c 1500 juliac.log
+          # The whole log when it is small enough: a trim failure prints its message
+          # in the middle, and the head/tail window missed it twice.
+          bytes=$(wc -c < juliac.log)
+          echo "juliac.log is $bytes bytes"
+          if [ "$bytes" -le 20000 ]; then
+            echo '----- juliac.log -----'
+            cat juliac.log
+            echo '----- end -----'
+          else
+            echo '----- juliac.log head -----'
+            head -c 6000 juliac.log
+            echo '----- juliac.log tail -----'
+            tail -c 3000 juliac.log
+          fi
           size="-"
           runs="no binary"
           if [ -x ./hello ]; then
