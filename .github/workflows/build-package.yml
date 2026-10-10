@@ -383,7 +383,7 @@ jobs:
             _foreign unpack/data data
             _foreign unpack/data/data/com.termux/files usr
             _foreign "$P" bin etc include lib libexec share
-            _foreign "$P/bin" julia 'julia-*'
+            _foreign "$P/bin" julia 'julia-*' juliac
             _foreign "$P/etc" julia
             _foreign "$P/include" julia
             _foreign "$P/lib" julia 'libjulia*' 'libopenlibm*'
