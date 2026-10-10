@@ -4,7 +4,7 @@
 # system image and never rely on dlpath() alone.
 --- a/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
 +++ b/stdlib/OpenBLAS_jll/src/OpenBLAS_jll.jl
-@@ -26,21 +26,58 @@
+@@ -26,21 +26,66 @@
  libopenblas_handle::Ptr{Cvoid} = C_NULL
  libopenblas_path::String = ""
  
@@ -21,6 +21,12 @@
 +# compiled with --trim=safe stops failing inside this stdlib's __init__.
 +const libsuffix::String = Base.USE_BLAS64 ? "64_" : ""
 +
++# Precomputed at module load.  Inside load_openblas() the same interpolation is a
++# variadic string(...) call, and juliac's --trim verifier cannot resolve the
++# Core._apply_iterate(Base._string, a::Any) splat it expands to; measured on the
++# device 2026-10-10, where a faithful replica of this function passes as soon as
++# the interpolation moves out here.
++
 +# Everything below has to be computed inside `__init__()`, not at module top
 +# level: a top-level `const` in a stdlib is frozen into the system image, so a
 +# path built from `Sys.BINDIR` there would keep the build machine's prefix.
@@ -29,15 +35,17 @@
 +# jl_pathname_for_handle(), which used to return NULL on Bionic, leaving
 +# libopenblas_path == "" in the image; libblastrampoline then forwarded to "" and
 +# every Julia process died during BLAS init.
++const openblas_soname = "libopenblas$(libsuffix).so"
++
 +function load_openblas()
 +    # Termux ships OpenBLAS as a plain library in $(prefix)/lib; there is no
 +    # artifact directory.  During system-image generation Sys.BINDIR is the
 +    # staged usr/bin, so the staged copy is a candidate too, and the bare soname
 +    # covers whichever layout the loader's RUNPATH can actually see.
 +    libdir = joinpath(dirname(Sys.BINDIR), "lib")
-+    candidates = (joinpath(libdir, "libopenblas$(libsuffix).so"),
-+                  joinpath(libdir, "julia", "libopenblas$(libsuffix).so"),
-+                  "libopenblas$(libsuffix).so")
++    candidates = (joinpath(libdir, openblas_soname),
++                  joinpath(libdir, "julia", openblas_soname),
++                  openblas_soname)
 +    for candidate in candidates
 +        # A miss here is just the next candidate, and `dlopen` throws by default.
 +        handle = dlopen(candidate; throw_error=false)
@@ -70,7 +78,7 @@
  end
  
  function __init__()
-@@ -62,12 +99,11 @@
+@@ -62,12 +107,11 @@
          ENV["OPENBLAS_DEFAULT_NUM_THREADS"] = "1"
      end
  
