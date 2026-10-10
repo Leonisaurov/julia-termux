@@ -289,9 +289,53 @@ termux_step_post_make_install() {
 		termux_error_exit "ca-certificates did not install etc/tls/cert.pem"
 	ln -sfn "${TERMUX_PREFIX}/etc/tls/cert.pem" "${TERMUX_PREFIX}/share/julia/cert.pem"
 
+	# "Compilar un .jl a un binario" in 1.12 is `juliac`, and upstream ships it as
+	# share/julia/juliac/juliac.jl only: Makefile:92 lists those shared files and
+	# there is no install rule that puts a name on PATH.  The artifact therefore
+	# offers no `juliac` command, and the port installs one.  It resolves julia
+	# next to itself rather than through PATH (a wrapper that is found and then
+	# cannot find its interpreter is worse than no wrapper) and follows symlinks
+	# with a POSIX readlink loop (readlink -f needs coreutils, not guaranteed).
+	# It is deliberately thin because juliac.jl:4 calls its own interface and
+	# location unstable/experimental: when upstream moves the script, this is the
+	# one place that changes.  Device status 2026-10-10: the launch and
+	# `juliac --help` work, but the compile step (`julia --output-o`, which emits
+	# an object for the whole sysimage) dies with std::bad_alloc on this phone -
+	# 308 s untouched and 200 s with -O0 injected in a copy of the script - so the
+	# wrapper ships for the name and the interface, not because a binary has been
+	# produced here yet.
+	{
+		printf '#!%s/bin/sh\n' "${TERMUX_PREFIX}"
+		cat <<'JULIAC_LAUNCHER'
+# bin/juliac - launcher for Julia's experimental native-compilation driver.
+# Upstream 1.12 installs share/julia/juliac/juliac.jl and no bin/ entry, so the
+# name the user types is provided by this package.  PATH may hand us a bare name,
+# so resolve our own location first.
+set -eu
+self=$0
+case $self in
+*/*) ;;
+*) self=$(command -v "$self") || { echo "juliac: cannot locate julia" >&2; exit 127; } ;;
+esac
+while [ -h "$self" ]; do
+	dir=$(cd -P "$(dirname "$self")" && pwd)
+	link=$(readlink "$self") || break
+	case $link in
+	/*) self=$link ;;
+	*) self=$dir/$link ;;
+	esac
+done
+bindir=$(cd -P "$(dirname "$self")" && pwd)
+exec "$bindir/julia" --startup-file=no --history-file=no \
+	"$bindir/../share/julia/juliac/juliac.jl" "$@"
+JULIAC_LAUNCHER
+	} > "${TERMUX_PREFIX}/bin/juliac"
+	chmod 755 "${TERMUX_PREFIX}/bin/juliac"
+
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
 	for _f in "${TERMUX_PREFIX}/bin/julia" \
+		"${TERMUX_PREFIX}/bin/juliac" \
 		"${TERMUX_PREFIX}/lib/julia/sys.so" \
 		"${TERMUX_PREFIX}/lib/julia/libblastrampoline.so.5"; do
 		[ -e "${_f}" ] || termux_error_exit "install produced no ${_f}"
@@ -364,6 +408,8 @@ termux_step_pre_massage() {
 	# julia,man/man1/julia.1,metainfo/julia.appdata.xml,applications/julia.desktop}.
 	# Note the metainfo file is julia.appdata.xml, not the org.julialang.* name other
 	# desktop apps use - keeping the wrong pattern would delete the package's own file.
+	# bin/juliac is not in that dpkg list because upstream does not install it;
+	# post_make_install adds it (see there) and the julia* pattern already keeps it.
 	_prune_foreign bin 'julia*'
 	_prune_foreign etc julia
 	_prune_foreign include julia

@@ -735,6 +735,31 @@ restauró el artefacto y no recompiló.
    esta lista: está conectado al job `build` con `continue-on-error`, y aunque en
    37876520515 no tuvo efecto (`modprobe zram` → `Exec format error`), deja la
    medición de swap en el log.
+7. **`bin/juliac` debe venir ya en el paquete (2026-10-10)**: hecho lo que es del
+   port — `termux_step_post_make_install` instala el launcher y la lista de
+   integridad lo exige (`install produced no .../bin/juliac`), y `device-smoke.sh`
+   lo afirma corriendo `juliac --help` (`juliac_launcher`).  El wrapper se probó
+   fuera del paquete con prefijo reubicado, por symlink y por nombre pelado: 5/5
+   con el rc esperado.  **Upstream no lo trae**: en `release-1.12` el script vive
+   en `contrib/juliac/juliac.jl` → `share/julia/juliac/juliac.jl`, `Makefile:92` lo
+   lista como dato compartido y no hay regla de instalación que ponga un nombre en
+   `PATH` (tampoco en `cli/`, ni en el manual, ni en `NEWS.md`); el `juliac` que se
+   tipea es una adición de este port y así hay que declararlo.
+   **Pendiente de fondo, no del nombre**: compilar sigue sin andar en el teléfono.
+   Medido 2026-10-10 con un hello world (`function (@main)(args::Vector{String})`):
+   `julia share/julia/juliac/juliac.jl --output-exe hello hello.jl` muere en el paso
+   interno (`julia --output-o`, que emite el objeto del sysimage completo) con
+   `libc++abi: terminating due to uncaught exception of type St9bad_alloc` x4 →
+   `Failed to compile` a los **308 s**.  Con `-O0` inyectado en una copia del script
+   (no hay passthrough de flags de optimización: el parser rechaza todo `-…` que no
+   conozca) tarda **200 s** y falla igual.  No falta RAM nominal (12 GB, 7,5 GB
+   disponibles, swap 7,8 GB, `ulimit -d/-v` unlimited) pero `Committed_AS` = 220,9 GB
+   contra `CommitLimit` = 18,6 GB.  Queda medir en CI o con el teléfono ocioso;
+   `-O0` ya está descartado y `PackageCompiler` es más pesado, no menos.  Dato del
+   link que no hay que perder: la lib que pide (`-ljulia -ljulia-internal`) está en
+   `$PREFIX/lib/julia/`, no en `$PREFIX/lib/`, y `juliac` la resuelve por
+   `JuliaConfig`.  Ojo: esto **no** arregla los JLL (el `.so` se dlopen en runtime),
+   son problemas ortogonales.
 
 ---
 

@@ -297,6 +297,25 @@ occursin("define ", ir) || error("no LLVM IR was emitted")
 @test occursin("mul", ir)
 println("llvm emitted ", length(ir), " chars")
 '
+# bin/juliac is a port addition: upstream 1.12 ships share/julia/juliac/juliac.jl
+# and no bin/ entry (Makefile:92), so the name has to be asserted by running it -
+# a packaged tool that does not exist is a defect no other check here can see.
+# `--help` exits before any compilation, so this stays cheap: do not turn it into a
+# real compile, that path needs more memory than this phone has (see PROGRESS.md).
+if command -v juliac >/dev/null 2>&1; then
+	jlog="$WORK/out.juliac.log"
+	if timeout "${TIMEOUT:-900}" juliac --help >"$jlog" 2>&1 && grep -q 'output-exe' "$jlog"; then
+		printf 'PASS  juliac_launcher\n'
+		pass=$((pass + 1))
+	else
+		printf 'FAIL  juliac_launcher (juliac --help did not answer)\n'
+		sed -e 's|^|        |' "$jlog" | head -15
+		fail=$((fail + 1))
+	fi
+else
+	printf 'FAIL  juliac_launcher (no juliac on PATH)\n'
+	fail=$((fail + 1))
+fi
 
 if [ "$RUNTESTS" = 1 ]; then
 	if [ ! -d "$PREFIX/share/julia/test" ]; then
