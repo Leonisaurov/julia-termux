@@ -82,7 +82,14 @@ jobs:
           # runner user instead of widening them.
           sudo chown -R "$(id -u):$(id -g)" /data
           sudo chmod -R a+rX /data
-          ls -l "$ROOT/bin/" | head
+          # Never `ls … | head` in a step that runs under `set -o pipefail`: head
+          # leaves at its last line, ls takes SIGPIPE and the step dies with 141/2
+          # on a listing that was perfectly fine (the same shape as the readelf
+          # SIGPIPE this repository already lost a `make install` to).  `wc -l`
+          # reads the stream to the end, so it cannot.
+          echo "prefix bin entries: $(ls "$ROOT/bin" | wc -l)"
+          echo '--- our julia ---'
+          ls -l "$ROOT/bin/julia"
 
       - name: What the artifact ships (is there a bin/juliac?)
         run: |
@@ -96,16 +103,14 @@ jobs:
           echo "--- julia --version ---"
           "$ROOT/bin/julia" --version
           echo "rc=$?"
-          echo "--- bin/ ---"
-          ls -l "$ROOT/bin/" | grep -i juliac || echo "(no bin/juliac in this artifact)"
-          echo "--- share/julia/juliac ---"
-          ls "$ROOT/share/julia/juliac/" || echo "(absent)"
-          if command -v juliac >/dev/null 2>&1; then
-            echo "bin/juliac: YES -> $(command -v juliac)"
+          if [ -e "$ROOT/bin/juliac" ]; then
+            echo "bin/juliac: PRESENT -> $(ls -l "$ROOT/bin/juliac")"
           else
             echo "bin/juliac: absent (this artifact predates the launcher commit) - the"
             echo "            driver is invoked through the shipped script, as on the phone"
           fi
+          echo "--- share/julia/juliac ---"
+          ls "$ROOT/share/julia/juliac/" || echo "(absent)"
 
       - name: hello.jl
         run: |
