@@ -1,61 +1,111 @@
 name: probe-juliac-binary
 
-# Feasibility probe, not a build.
+# Feasibility probe, not a build.  It answers one question: does `juliac --output-exe`
+# fail on this phone because the phone runs out of RAM, or because of OUR build?
 #
-# `juliac --output-exe` (Julia 1.12's native compilation) dies on this phone with
-# std::bad_alloc after reaching 6.45 GB RSS in 200-308 s, and the question is
-# whether that is the phone or Julia.  So this runs the same driver on a Linux
-# runner with the *upstream* tarball - nothing from this port is involved - and
-# reports the peak RSS getrusage saw, next to the device's measured number.
-# The two runners are the two answers that matter: x86_64 (what CI has) and
-# aarch64 (what the phone is).
+# The upstream half is already answered (run 38019909461, the previous version of this
+# file): the official 1.12.6 tarball produced a working binary on both runners -
+# 4.48 GB peak RSS on x86_64, 6.12 GB on aarch64, ~2:30 wall - while the phone reached
+# 6.45 GB and died with std::bad_alloc.  So juliac is not broken; it needs about
+# 6.1-6.5 GB, and the phone has 7.3 GB that Android shares with everything else.
 #
-# It is workflow_dispatch-only on purpose: build-package.yml triggers on push with a
-# paths: filter that does not list this file, so committing it does not rebuild the
-# package.
+# What is still open is whether OUR artifact needs the same or more.  So this runs the
+# published julia-latest .deb - the same bytes device-smoke.sh took to 19 pass / 0 fail -
+# inside a materialised Termux prefix on a runner that has the RAM the phone lacks.
+# Nothing is compiled: the prefix comes from the termux-builder action, which is the
+# same code path the package build uses.
+#
+# workflow_dispatch only on purpose: build-package.yml triggers on push with a paths:
+# filter that does not list this file, so committing it does not rebuild the package.
 on:
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
+env:
+  # Pinned, not "latest": the release tag is mutable, so the hash is what makes this
+  # the artifact the device validated rather than whatever was published last.
+  JULIA_DEB: julia_1.12.6_aarch64.deb
+  JULIA_DEB_SHA256: 384597fe2f9012e60a8851f995e48028c6876d9d8ecbbf147a2e5c08d0ccd9df
+
 jobs:
   probe:
-    name: juliac on ${{ matrix.trip }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            arch: x64
-            trip: linux-x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-            trip: linux-aarch64
+    name: juliac with our artifact
+    runs-on: ubuntu-24.04-arm
     steps:
-      - name: Runner facts
-        run: |
-          set -x
-          nproc
-          free -m || true
-          awk '/MemTotal|MemAvailable|CommitLimit|Committed_AS/' /proc/meminfo
-          command -v /usr/bin/time >/dev/null || sudo apt-get install -y -qq time
+      - uses: actions/checkout@v4
 
-      - name: Upstream Julia 1.12.6 (${{ matrix.trip }})
+      - name: Machine capabilities
+        run: |
+          set -uo pipefail
+          uname -m
+          nproc
+          free -m
+          df -h / | tail -1
+          awk '/MemTotal|MemAvailable|CommitLimit|Committed_AS/' /proc/meminfo
+
+      # Cheap insurance, not a hypothesis: bionic's scudo refuses a mapping for the
+      # same message whether the kernel is out of RAM or out of VMAs, and the phone
+      # cannot show /proc/sys/vm/max_map_count to compare.  Neither can change the
+      # artifact being measured.
+      - name: Raise the runner's mapping limit
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "max_map_count before: $(cat /proc/sys/vm/max_map_count)"
+          sudo sysctl -w vm.max_map_count=1048576
+          echo "max_map_count after:  $(cat /proc/sys/vm/max_map_count)"
+
+      - name: Add compressed swap to the runner
+        uses: ./.github/actions/zram
+        continue-on-error: true
+
+      - name: Materialise the Termux prefix (the build's own code path)
+        uses: ./.github/actions/termux-builder
+        with:
+          recipe: packages/julia/build.sh
+
+      - name: Install OUR julia
         run: |
           set -euo pipefail
-          url="https://julialang-s3.julialang.org/bin/linux/${{ matrix.arch }}/1.12/julia-1.12.6-${{ matrix.trip }}.tar.gz"
-          echo "url=$url"
-          curl -fsSL "$url" -o julia.tar.gz
-          mkdir jl
-          tar -xzf julia.tar.gz -C jl --strip-components=1
-          jl/bin/julia --version
-          # Does the official distribution ship a juliac wrapper?  This port had to
-          # add one (upstream's Makefile:92 installs only the share/julia files), so
-          # the answer belongs in the log rather than in an assumption.
-          echo '--- jl/bin ---'
-          ls -l jl/bin/
+          ROOT=/data/data/com.termux/files/usr
+          # The host's curl deliberately: LD_PRELOAD is not set in this step, and
+          # inside the prefix bionic's resolver has no DNS on these runners.
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/julia-latest/${JULIA_DEB}" \
+            -o "$RUNNER_TEMP/$JULIA_DEB"
+          echo "${JULIA_DEB_SHA256}  $RUNNER_TEMP/$JULIA_DEB" | sha256sum -c -
+          sudo dpkg-deb -x "$RUNNER_TEMP/$JULIA_DEB" /
+          # The deb's members carry the phone prefix's 0700 modes; hand them to the
+          # runner user instead of widening them.
+          sudo chown -R "$(id -u):$(id -g)" /data
+          sudo chmod -R a+rX /data
+          ls -l "$ROOT/bin/" | head
+
+      - name: What the artifact ships (is there a bin/juliac?)
+        run: |
+          set -uo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          # PATH and TMPDIR only: no LD_PRELOAD.  libtermux-exec exists to rewrite
+          # /bin, /etc, /lib, /usr and /var paths for build scripts; with absolute
+          # paths it is not needed, and preloading a bionic library into the runner's
+          # own glibc tools is what makes them abort with "invalid ELF header".
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          echo "--- julia --version ---"
+          "$ROOT/bin/julia" --version
+          echo "rc=$?"
+          echo "--- bin/ ---"
+          ls -l "$ROOT/bin/" | grep -i juliac || echo "(no bin/juliac in this artifact)"
+          echo "--- share/julia/juliac ---"
+          ls "$ROOT/share/julia/juliac/" || echo "(absent)"
+          if command -v juliac >/dev/null 2>&1; then
+            echo "bin/juliac: YES -> $(command -v juliac)"
+          else
+            echo "bin/juliac: absent (this artifact predates the launcher commit) - the"
+            echo "            driver is invoked through the shipped script, as on the phone"
+          fi
 
       - name: hello.jl
         run: |
@@ -73,11 +123,14 @@ jobs:
       - name: juliac --output-exe, measured
         working-directory: work
         run: |
-          set +e
-          /usr/bin/time -v ../jl/bin/julia ../jl/share/julia/juliac/juliac.jl \
+          set -uo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          # The same command the phone ran, so the two numbers are comparable:
+          # /usr/bin/time -v around `julia share/julia/juliac/juliac.jl`.
+          /usr/bin/time -v "$ROOT/bin/julia" "$ROOT/share/julia/juliac/juliac.jl" \
             --output-exe hello hello.jl > juliac.log 2>&1
           rc=$?
-          set -e
           echo "juliac rc=$rc"
           echo "===== tail of juliac.log ====="
           tail -c 4000 juliac.log
@@ -91,31 +144,34 @@ jobs:
             ./hello alfa beta || echo "binary exited $?"
             file ./hello
             {
-              echo "### juliac on ${{ matrix.trip }}: **succeeded**"
+              echo "### our artifact on ubuntu-24.04-arm: **succeeded**"
               echo
               echo '```'
               grep -E 'Maximum resident set size|Elapsed \(wall clock\)' juliac.log || true
               file ./hello
               echo '```'
+              echo "Upstream aarch64 for comparison: 6.12 GB peak, 2:30 wall."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "===== NO BINARY: rc=$rc ====="
             {
-              echo "### juliac on ${{ matrix.trip }}: **failed** (rc=$rc)"
+              echo "### our artifact on ubuntu-24.04-arm: **failed** (rc=$rc)"
               echo
               echo '```'
               tail -c 1500 juliac.log
               echo '```'
+              echo "Upstream aarch64 built it at 6.12 GB peak - if this failed, the"
+              echo "difference is the artifact, not the RAM."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-          # The probe's answer is the log, not the exit status: a failure here is a
-          # result too, so do not let it mask the measurement.
+          # A failure here is a result, so it must not be reported as the job's
+          # failure: the log is the answer.
           exit 0
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: juliac-binary-${{ matrix.arch }}
+          name: juliac-binary-our-artifact
           path: work/hello
           if-no-files-found: warn
           retention-days: 7
