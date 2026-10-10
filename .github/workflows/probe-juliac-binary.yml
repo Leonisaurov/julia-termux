@@ -91,6 +91,29 @@ jobs:
           echo '--- our julia ---'
           ls -l "$ROOT/bin/julia"
 
+      - name: Give the prefix the libm shim a device always has
+        run: |
+          set -euo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          # DEP_LIBS inside libjulia.so is `julia/libm.so:@julia/libstdc++.so.6:...`,
+          # so the loader asks for $PREFIX/lib/julia/libm.so.  On a device that
+          # name is answered by the platform: bionic resolves libm.so through the
+          # generated namespace config, and the prefix carries
+          # $PREFIX/lib/libm.so -> /system/lib64/libm.so, which no .deb owns
+          # (it arrives with the Termux bootstrap - the file on this phone is
+          # dated with the other bootstrap symlinks, and `pacman -Qo` reports no
+          # owner).  A prefix materialised from .debs alone has neither, so the
+          # artifact cannot even print its version:
+          #   ERROR: Unable to load dependent library .../lib/julia/libm.so
+          # Both candidates are given the name they ask for.  Nothing is
+          # shadowed: the guard skips any name the closure already provides.
+          for d in "$ROOT/lib/julia" "$ROOT/lib"; do
+            if [ ! -e "$d/libm.so" ]; then
+              ln -sfn /system/lib64/libm.so "$d/libm.so"
+            fi
+          done
+          ls -l "$ROOT/lib/julia/libm.so" "$ROOT/lib/libm.so"
+
       - name: What the artifact ships (is there a bin/juliac?)
         run: |
           set -uo pipefail
