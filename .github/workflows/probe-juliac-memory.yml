@@ -48,7 +48,7 @@ env:
   # The artifact republished with bin/juliac (run 38026064025, "Build Julia for
   # Termux"): the release tag is mutable, so the hash is what makes this the
   # artifact every job in this matrix measured.
-  JULIA_DEB_SHA256: b1f0ecfa6344120b7b26cafa57ac0522f4e88aa88de05886aa5b4fc5c8dcb960
+  JULIA_DEB_SHA256: a51f60a15cb461ba00438f35b44ee98a9bfa3c327b5e4efc5e1f6a2ced3ec49e
 
 jobs:
   variant:
