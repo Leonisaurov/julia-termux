@@ -58,15 +58,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The last open question.  --trim=unsafe already fits the phone (431 MB,
-          # 9 s); the binary then died on the device with
-          #   Unable to find compatible target in cached code image.
-          #   Target 0 (neoverse-n2): Rejecting this target due to use of
-          #   runtime-disabled features
-          # which is the sysimage having been emitted for the runner's CPU, not a
-          # trim problem.  JULIA_CPU_TARGET=generic is what a phone needs.
-          - variant: trim-unsafe-generic
+          # The program no longer touches Base's IO.  Every trim failure so far was
+          # "unresolved call ... Base.print(Base.stdout::IO, x::Any)", i.e. printing
+          # goes through Any and trim cannot prove it.  ccall(:write) does not, so
+          # this asks the last question: does trimming fit the phone when the program
+          # itself is dispatch-free?  Both modes, because safe is the one upstream
+          # supports if the verifier accepts it.
+          - variant: write-unsafe-generic
             flags: "--experimental --trim=unsafe"
+            extra: ""
+            incremental: "0"
+          - variant: write-safe-generic
+            flags: "--experimental --trim=safe"
             extra: ""
             incremental: "0"
     steps:
@@ -145,8 +148,9 @@ jobs:
           mkdir -p work
           cat > work/hello.jl <<'EOF'
           function (@main)(args::Vector{String})
-              print("HOLA\n")
-              return 0
+              msg = "HOLA desde un binario trimmed\n"
+              n = ccall(:write, Cint, (Cint, Ptr{UInt8}, Csize_t), 1, msg, sizeof(msg) - 1)
+              n == sizeof(msg) - 1 ? return Cint(0) : return Cint(1)
           end
           EOF
 
