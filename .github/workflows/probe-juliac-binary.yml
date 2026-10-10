@@ -124,8 +124,13 @@ jobs:
           # own glibc tools is what makes them abort with "invalid ELF header".
           export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
           echo "--- julia --version ---"
-          "$ROOT/bin/julia" --version
-          echo "rc=$?"
+          # `|| rc=$?` and not a bare command followed by `echo $?`: every run block is
+          # executed by `bash -e`, so a bare failure aborts the step right there and the
+          # diagnostic never prints - which is how this probe's first juliac step managed
+          # to fail with rc=1 and no output at all (the lint's own warning).
+          rc=0
+          "$ROOT/bin/julia" --version || rc=$?
+          echo "julia --version rc=$rc"
           if [ -e "$ROOT/bin/juliac" ]; then
             echo "bin/juliac: PRESENT -> $(ls -l "$ROOT/bin/juliac")"
           else
@@ -155,10 +160,11 @@ jobs:
           ROOT=/data/data/com.termux/files/usr
           export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
           # The same command the phone ran, so the two numbers are comparable:
-          # /usr/bin/time -v around `julia share/julia/juliac/juliac.jl`.
+          # /usr/bin/time -v around `julia share/julia/juliac/juliac.jl`.  Output goes to
+          # the log, so the failure has to be captured here or it is invisible.
+          rc=0
           /usr/bin/time -v "$ROOT/bin/julia" "$ROOT/share/julia/juliac/juliac.jl" \
-            --output-exe hello hello.jl > juliac.log 2>&1
-          rc=$?
+            --output-exe hello hello.jl > juliac.log 2>&1 || rc=$?
           echo "juliac rc=$rc"
           echo "===== tail of juliac.log ====="
           tail -c 4000 juliac.log
