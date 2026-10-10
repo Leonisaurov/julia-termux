@@ -58,11 +58,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: trim-safe
-            flags: "--experimental --trim=safe"
-            extra: ""
-            incremental: "0"
-          - variant: trim-unsafe
+          # The last open question.  --trim=unsafe already fits the phone (431 MB,
+          # 9 s); the binary then died on the device with
+          #   Unable to find compatible target in cached code image.
+          #   Target 0 (neoverse-n2): Rejecting this target due to use of
+          #   runtime-disabled features
+          # which is the sysimage having been emitted for the runner's CPU, not a
+          # trim problem.  JULIA_CPU_TARGET=generic is what a phone needs.
+          - variant: trim-unsafe-generic
             flags: "--experimental --trim=unsafe"
             extra: ""
             incremental: "0"
@@ -159,6 +162,9 @@ jobs:
           # DNS here, so the registry comes from the host's git (see the sibling
           # probe) and offline keeps the driver out of the network.
           export JULIA_PKG_OFFLINE=true
+          # The runner is a neoverse-n2; the phone refuses that code with
+          # "Rejecting this target due to use of runtime-disabled features".
+          export JULIA_CPU_TARGET=generic
           if [ ! -d "$HOME/.julia/registries/General" ]; then
             mkdir -p "$HOME/.julia/registries"
             /usr/bin/git clone --depth 1 --quiet \
@@ -190,7 +196,9 @@ jobs:
           runs="no binary"
           if [ -x ./hello ]; then
             size=$(stat -c %s ./hello)
-            if ./hello > run.log 2>&1; then runs="yes: $(head -1 run.log)"; else runs="no (rc=$?)"; fi
+            if ./hello > run.log 2>&1; then runs="yes: $(head -1 run.log)"; else
+              runs="no (rc=$?): $(cat run.log | head -3 | tr '\n' ' ')"
+            fi
           fi
           {
             echo "| ${{ matrix.variant }} | ${peak:-?} KB | ${wall:-?} | rc=$rc | $size B | $runs |"
