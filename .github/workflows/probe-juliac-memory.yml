@@ -16,7 +16,15 @@ name: probe-juliac-memory
 #   --output-incremental      juliac passes `--output-incremental=no`, which is the
 #                             opposite of streaming the object out as it is produced
 #   --trim=safe               reachability trimming: emits only what is reached and
-#                             adds --strip-ir --strip-metadata
+#                             adds --strip-ir --strip-metadata.  The program here is
+#                             deliberately trim-friendly (`print("HOLA\n")`, no
+#                             varargs): the first run of this matrix used
+#                             `println("…", VERSION)` and --trim refused it, which
+#                             is a property of that hello world, not of trimming.
+#   --output-incremental      measured and dropped: juliac's own buildscript creates
+#                             the global `task` in Main, and incremental compilation
+#                             rejects that with "Creating a new global in closed
+#                             module `Main` (`task`) breaks incremental compilation".
 # Every job runs the same hello world on the same artifact, so the peak RSS column
 # is directly comparable with the numbers above.
 #
@@ -30,11 +38,10 @@ permissions:
 
 env:
   JULIA_DEB: julia_1.12.6_aarch64.deb
-  JULIA_DEB_SHA256: 384597fe2f9012e60a8851f995e48028c6876d9d8ecbbf147a2e5c08d0ccd9df
-  # Recorded here because this run is the one cited by the recipe when it lists the
-  # 211.2 MB binary; a republish of julia-latest would change the sha and this would
-  # have to move with it.
-  JULIA_DEB_LAST_BUILT: 39511ecbefcd7a6812946665d03bdd36840cfdd1f24dee707ef288c6c614ed30
+  # The artifact republished with bin/juliac (run 38026064025, "Build Julia for
+  # Termux"): the release tag is mutable, so the hash is what makes this the
+  # artifact every job in this matrix measured.
+  JULIA_DEB_SHA256: 39511ecbefcd7a6812946665d03bdd36840cfdd1f24dee707ef288c6c614ed30
 
 jobs:
   variant:
@@ -56,14 +63,6 @@ jobs:
             flags: ""
             extra: '"-O0"'
             incremental: "0"
-          - variant: incremental
-            flags: ""
-            extra: ""
-            incremental: "1"
-          - variant: o0-incremental
-            flags: ""
-            extra: '"-O0"'
-            incremental: "1"
           - variant: heaphint-2g
             flags: ""
             extra: '"--heap-size-hint=2G"'
@@ -144,7 +143,7 @@ jobs:
           mkdir -p work
           cat > work/hello.jl <<'EOF'
           function (@main)(args::Vector{String})
-              println("HOLA desde un binario nativo — Julia ", VERSION)
+              print("HOLA\n")
               return 0
           end
           EOF
@@ -174,7 +173,13 @@ jobs:
           peak=$(sed -n 's/.*Maximum resident set size (kbytes): \([0-9]*\).*/\1/p' juliac.log | tail -1)
           wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time.*: \([0-9:.]*\)$/\1/p' juliac.log | tail -1)
           echo "variant=${{ matrix.variant }} rc=$rc peak_kb=${peak:-?} wall=${wall:-?}"
-          tail -c 1200 juliac.log
+          # Both ends: a trim/verification failure prints its message first and its
+          # stack last, and 1200 chars of tail hid exactly which call it could not
+          # prove the first time this ran.
+          echo '----- juliac.log head -----'
+          head -c 1500 juliac.log
+          echo '----- juliac.log tail -----'
+          tail -c 1500 juliac.log
           size="-"
           runs="no binary"
           if [ -x ./hello ]; then
