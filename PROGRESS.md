@@ -638,11 +638,24 @@ barreras, sin crash).  `Distributed` sí funciona (`addprocs` → `procs=[2]`,
 
 **Alcance de lo que funciona, medido (2026-10-10):** `Pkg.test` de un paquete puro pasa
 (`Pkg.add("Example")` + precompilado + `Pkg.test` → *Example tests passed*).  Un paquete
-con **artefacto binario** no: `Pkg.add("FFTW")` baja el JLL y muere en
-`dlopen failed: library "libm.so.6" not found` porque el artefacto aarch64 está compilado
-contra **glibc** (`libfftw3.so.3.7.11` NEEDED `libm.so.6`, `libpthread.so.0`, `libc.so.6`)
-y bionic no tiene esos sonames.  Es la frontera del ecosistema JLL en Android, no del port:
-paquetes puros sí, paquetes con binarios glibc no.
+con **artefacto binario** no, y la causa es estructural, no del port:
+`Base.BinaryPlatforms.HostPlatform()` en este teléfono devuelve
+`Platform("aarch64","linux"; libc="glibc")` —Julia solo distingue glibc y musl, y bionic
+no es ninguna, así que cae a glibc—, el `Artifacts.toml` de `FFTW_jll` publica
+`aarch64-linux-gnu` y `aarch64-linux-musl` pero **no** `aarch64-linux-android`, y el `.so`
+que baja pide `libm.so.6`/`libpthread.so.0`/`libc.so.6` con símbolos versionados
+`@GLIBC_2.17`.  Bionic no tiene esos sonames ni implementa el versionado de símbolos de
+glibc, así que no hay symlink que lo arregle.  Frontera del ecosistema JLL en Android;
+paquetes puros sí, binarios glibc no.  (Lo que Julia trae adentro sí funciona porque la
+receta usa las libs **bionic** de Termux con `USE_SYSTEM_*=1`, no JLLs.)
+
+**Publicación (2026-10-10 01:24 UTC):** `workflow_dispatch` con `publish=true` (run
+`38012462918`, commit `e0d9b86`) deja los cuatro jobs en verde y crea la release mutable
+**`julia-latest`** («Julia 1.12.6 for Termux (aarch64)») con `julia_1.12.6_aarch64.deb`
+(84 814 100 B), `julia-1.12.6-0-aarch64.pkg.tar.xz` (84 354 776 B),
+`julia-termux-aarch64.tar.gz` (169 195 893 B), `SHA256SUMS.txt` y `notes.md`.  Los bytes
+publicados se bajaron del release y pasaron `sha256sum -c` (los tres OK), y el smoke
+corrido **sobre ese bundle publicado** da **19 pass / 0 fail, `SMOKE: PASS`**.
 
 ### Caché de CI: la clave no debe depender de lo que deriva solo
 
