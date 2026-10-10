@@ -150,7 +150,7 @@ jobs:
           function (@main)(args::Vector{String})
               msg = "HOLA desde un binario trimmed\n"
               n = ccall(:write, Cint, (Cint, Ptr{UInt8}, Csize_t), 1, msg, sizeof(msg) - 1)
-              n == sizeof(msg) - 1 ? return Cint(0) : return Cint(1)
+              return n == sizeof(msg) - 1 ? Cint(0) : Cint(1)
           end
           EOF
 
