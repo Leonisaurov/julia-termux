@@ -1,0 +1,196 @@
+name: probe-juliac-memory
+
+# One question: can the `julia --output-o` step that juliac needs be made to fit in
+# a phone's free RAM?
+#
+# Measured so far (probe-juliac-binary, runs 38019909461 and 38021823582): our
+# artifact peaks at 7.30 GB for a hello world on ubuntu-24.04-arm, upstream aarch64
+# at 6.12 GB, and the phone dies at 6.45 GB with Android sharing its ~7.5 GB.  The
+# phone therefore needs a variant that lands under ~5 GB to have any margin.
+#
+# The levers are the ones Julia actually exposes, and juliac hardcodes two of the
+# decisions that matter, so a copy of the driver is patched in place for those:
+#   -O0                       the optimizer's share of the work
+#   --heap-size-hint=2G       the Julia-side collector (the phone's failure was a
+#                             C++ bad_alloc out of LLVM, so this may well do nothing)
+#   --output-incremental      juliac passes `--output-incremental=no`, which is the
+#                             opposite of streaming the object out as it is produced
+#   --trim=safe               reachability trimming: emits only what is reached and
+#                             adds --strip-ir --strip-metadata
+# Every job runs the same hello world on the same artifact, so the peak RSS column
+# is directly comparable with the numbers above.
+#
+# workflow_dispatch only: build-package.yml's push trigger filters on paths that do
+# not list this file.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  JULIA_DEB: julia_1.12.6_aarch64.deb
+  JULIA_DEB_SHA256: 384597fe2f9012e60a8851f995e48028c6876d9d8ecbbf147a2e5c08d0ccd9df
+  # Recorded here because this run is the one cited by the recipe when it lists the
+  # 211.2 MB binary; a republish of julia-latest would change the sha and this would
+  # have to move with it.
+  JULIA_DEB_LAST_BUILT: 39511ecbefcd7a6812946665d03bdd36840cfdd1f24dee707ef288c6c614ed30
+
+jobs:
+  variant:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            flags: ""
+            extra: ""
+            incremental: "0"
+          - variant: trim-safe
+            flags: "--experimental --trim=safe"
+            extra: ""
+            incremental: "0"
+          - variant: o0
+            flags: ""
+            extra: '"-O0"'
+            incremental: "0"
+          - variant: incremental
+            flags: ""
+            extra: ""
+            incremental: "1"
+          - variant: o0-incremental
+            flags: ""
+            extra: '"-O0"'
+            incremental: "1"
+          - variant: heaphint-2g
+            flags: ""
+            extra: '"--heap-size-hint=2G"'
+            incremental: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Machine capabilities
+        run: |
+          set -uo pipefail
+          nproc
+          free -m
+          awk '/MemTotal|MemAvailable|CommitLimit|Committed_AS/' /proc/meminfo
+
+      - name: Raise the runner's mapping limit
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          sudo sysctl -w vm.max_map_count=1048576
+
+      - name: Materialise the Termux prefix (the build's own code path)
+        uses: ./.github/actions/termux-builder
+        with:
+          recipe: packages/julia/build.sh
+
+      - name: Install OUR julia
+        run: |
+          set -euo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/julia-latest/${JULIA_DEB}" \
+            -o "$RUNNER_TEMP/$JULIA_DEB"
+          echo "${JULIA_DEB_SHA256}  $RUNNER_TEMP/$JULIA_DEB" | sha256sum -c -
+          sudo dpkg-deb -x "$RUNNER_TEMP/$JULIA_DEB" /
+          sudo chown -R "$(id -u):$(id -g)" /data
+          sudo chmod -R a+rX /data
+          # The libm shim a device always has (bootstrap symlink + Android's namespace
+          # config).  Without it the artifact cannot print its version here.
+          for d in "$ROOT/lib/julia" "$ROOT/lib"; do
+            if [ ! -e "$d/libm.so" ]; then ln -sfn /system/lib64/libm.so "$d/libm.so"; fi
+          done
+          "$ROOT/bin/julia" --version
+
+      - name: Patch the driver for this variant
+        env:
+          EXTRA: ${{ matrix.extra }}
+          INCREMENTAL: ${{ matrix.incremental }}
+        run: |
+          set -euo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          DRIVER="$ROOT/share/julia/juliac/juliac.jl"
+          python3 - "$DRIVER" <<'PY'
+          import os, sys
+          path = sys.argv[1]
+          src = open(path).read()
+          extra = os.environ.get("EXTRA", "").strip()
+          incr = os.environ.get("INCREMENTAL", "0") == "1"
+          if extra:
+              anchor = 'isnothing(outname) && error("No output file specified")'
+              assert anchor in src, "driver does not look like juliac.jl"
+              src = src.replace(anchor, f'append!(julia_args, [{extra}])\n' + anchor, 1)
+              print(f"patched: append!(julia_args, [{extra}])")
+          if incr:
+              old = "--output-incremental=no"
+              assert old in src, "the incremental flag is not where it was"
+              src = src.replace(old, "--output-incremental=yes", 1)
+              print("patched: --output-incremental=no -> yes")
+          if not (extra or incr):
+              print("no patch: this variant is a command-line flag away")
+          open(path, "w").write(src)
+          PY
+          grep -n 'output-incremental\|append!(julia_args' "$DRIVER" | head -3
+
+      - name: hello.jl
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          cat > work/hello.jl <<'EOF'
+          function (@main)(args::Vector{String})
+              println("HOLA desde un binario nativo — Julia ", VERSION)
+              return 0
+          end
+          EOF
+
+      - name: juliac ${{ matrix.variant }}, measured
+        working-directory: work
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: |
+          set -uo pipefail
+          ROOT=/data/data/com.termux/files/usr
+          export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          # Pkg answers a depot with no registry by installing one, and bionic has no
+          # DNS here, so the registry comes from the host's git (see the sibling
+          # probe) and offline keeps the driver out of the network.
+          export JULIA_PKG_OFFLINE=true
+          if [ ! -d "$HOME/.julia/registries/General" ]; then
+            mkdir -p "$HOME/.julia/registries"
+            /usr/bin/git clone --depth 1 --quiet \
+              https://github.com/JuliaRegistries/General.git \
+              "$HOME/.julia/registries/General"
+          fi
+          rc=0
+          # shellcheck disable=SC2086
+          /usr/bin/time -v "$ROOT/bin/julia" "$ROOT/share/julia/juliac/juliac.jl" \
+            $FLAGS --output-exe hello hello.jl > juliac.log 2>&1 || rc=$?
+          peak=$(sed -n 's/.*Maximum resident set size (kbytes): \([0-9]*\).*/\1/p' juliac.log | tail -1)
+          wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time.*: \([0-9:.]*\)$/\1/p' juliac.log | tail -1)
+          echo "variant=${{ matrix.variant }} rc=$rc peak_kb=${peak:-?} wall=${wall:-?}"
+          tail -c 1200 juliac.log
+          size="-"
+          runs="no binary"
+          if [ -x ./hello ]; then
+            size=$(stat -c %s ./hello)
+            if ./hello > run.log 2>&1; then runs="yes: $(head -1 run.log)"; else runs="no (rc=$?)"; fi
+          fi
+          {
+            echo "| ${{ matrix.variant }} | ${peak:-?} KB | ${wall:-?} | rc=$rc | $size B | $runs |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SUMMARY_ROW ${{ matrix.variant }} peak_kb=${peak:-?} wall=${wall:-?} rc=$rc size=$size runs=$runs"
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: juliac-${{ matrix.variant }}
+          path: work/hello
+          if-no-files-found: warn
+          retention-days: 7
