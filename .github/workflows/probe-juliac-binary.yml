@@ -180,7 +180,12 @@ jobs:
           # it is here so the driver's precompile step finds a registry present.
           if [ ! -d "$HOME/.julia/registries/General" ]; then
             mkdir -p "$HOME/.julia/registries"
-            git clone --depth 1 --quiet \
+            # /usr/bin/git and not `git`: PATH already has $PREFIX/bin first, so a bare
+            # name resolves to the prefix's bionic git - the same one the closure
+            # installed as a build dep - and that one has no resolver either.  The
+            # host's glibc git answers github because nothing preloads libtermux-exec
+            # in this step.  (First attempt called `git` and got exit 128.)
+            /usr/bin/git clone --depth 1 --quiet \
               https://github.com/JuliaRegistries/General.git \
               "$HOME/.julia/registries/General"
           fi
