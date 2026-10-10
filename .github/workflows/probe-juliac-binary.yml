@@ -158,7 +158,19 @@ jobs:
         run: |
           set -uo pipefail
           ROOT=/data/data/com.termux/files/usr
+          # juliac's first act is `Pkg.precompile()` in a second process, and Pkg
+          # answers a depot with no registries by cloning
+          # https://github.com/JuliaRegistries/General.git.  From inside bionic there
+          # is no DNS on these runners (the termux-builder action documents it and
+          # routes every fetch through the host's curl), so that clone fails and the
+          # driver exits before compiling anything:
+          #   ERROR: failed to clone from .../General.git
+          #   failed to resolve address for github.com: No address associated with hostname
+          # Offline says the same thing the environment already says, and the phone
+          # passes this step only because it does have a resolver.
+          export JULIA_PKG_OFFLINE=true
           export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
+          echo "JULIA_PKG_OFFLINE=$JULIA_PKG_OFFLINE"
           # The same command the phone ran, so the two numbers are comparable:
           # /usr/bin/time -v around `julia share/julia/juliac/juliac.jl`.  Output goes to
           # the log, so the failure has to be captured here or it is invisible.
