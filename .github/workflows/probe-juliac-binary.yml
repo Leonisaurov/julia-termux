@@ -171,6 +171,20 @@ jobs:
           export JULIA_PKG_OFFLINE=true
           export PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
           echo "JULIA_PKG_OFFLINE=$JULIA_PKG_OFFLINE"
+          # Offline is not enough on its own: Pkg answers a depot with *no* registry
+          # by installing one, and that install is the clone above - it happens
+          # before offline is consulted.  The phone's depot carries the registry
+          # (~/.julia/registries/General.tar.gz + General.toml), so give this depot
+          # the same thing, fetched with the host's git, which does resolve names.
+          # The environment has no packages, so this registry is never searched;
+          # it is here so the driver's precompile step finds a registry present.
+          if [ ! -d "$HOME/.julia/registries/General" ]; then
+            mkdir -p "$HOME/.julia/registries"
+            git clone --depth 1 --quiet \
+              https://github.com/JuliaRegistries/General.git \
+              "$HOME/.julia/registries/General"
+          fi
+          ls -ld "$HOME/.julia/registries/General"
           # The same command the phone ran, so the two numbers are comparable:
           # /usr/bin/time -v around `julia share/julia/juliac/juliac.jl`.  Output goes to
           # the log, so the failure has to be captured here or it is invisible.
