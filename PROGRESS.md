@@ -761,6 +761,37 @@ restauró el artefacto y no recompiló.
    `JuliaConfig`.  Ojo: esto **no** arregla los JLL (el `.so` se dlopen en runtime),
    son problemas ortogonales.
 
+   **RESUELTO 2026-10-10: es RAM, no Julia y no el port.**  El probe
+   `.github/workflows/probe-juliac-binary.yml` corrió `juliac --output-exe` con
+   **nuestro** artefacto publicado (`julia-latest`, sha256 pineado al .deb que el
+   smoke del teléfono llevó a 19/0) dentro de un prefijo Termux materializado por
+   el action `termux-builder` en `ubuntu-24.04-arm`: run **38021823582**,
+   `juliac rc=0`, 2:40 de reloj, **7,30 GB de RSS**, y el binario resultante
+   (212.311.104 B, `ELF 64-bit LSB pie executable, ARM aarch64, interpreter
+   /system/bin/linker64, for Android 24`, con debug_info) **imprime y corre**
+   (`HOLA desde un binario nativo — Julia 1.12.6`).  La mitad upstream ya estaba
+   medida en el primer run del probe (**38019909461**): tarball oficial 1.12.6,
+   4,48 GB en x86_64 y **6,12 GB** en aarch64, ambos rc=0.
+   Contabilidad: el teléfono murió a los **6,45 GB** con 7,5 GB disponibles y
+   Android repartiendo la RAM; nuestro artefacto pide **~1,2 GB más** que el build
+   oficial (7,30 vs 6,12 GB, +19%) — no es un techo del port pero sí una diferencia
+   que conviene mirar si algún día se quiere `juliac` **en** el teléfono.  Mientras
+   tanto: `juliac` es usable donde haya ≥8 GB libres, y en el dispositivo no.
+
+   El probe costó 6 iteraciones y todas fueron **del entorno del runner**, no del
+   código del port: (1) `ls | head` con `pipefail` mató el step por SIGPIPE;
+   (2) el prefijo materializado solo con `.deb` no tiene el `libm.so` que en un
+   dispositivo responden el namespace de Android y el symlink unowned del bootstrap
+   (`$PREFIX/lib/libm.so` → `/system/lib64/libm.so`), así que el artefacto ni
+   imprimía su versión; (3) `bash -e` se tragaba el rc de `juliac` porque su salida
+   iba redirigida al log; (4) `juliac` empieza con `Pkg.precompile()`, que clona el
+   registro General — el bionic del runner no resuelve DNS; (5) `JULIA_PKG_OFFLINE`
+   no alcanza: con un depot **sin** registro Pkg instala uno igual, antes de
+   consultar offline; (6) el clone falló con rc=128 porque `PATH` ya tenía
+   `$PREFIX/bin` delante y `git` resolvía al git **biónico** del prefijo, que
+tampoco tiene resolvedor — el del host (`/usr/bin/git`) sí.  Ninguna de las seis
+tocó `packages/julia` ni `scripts/`:
+
 ---
 
 ## Notas para el próximo agente
