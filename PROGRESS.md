@@ -790,7 +790,62 @@ restauró el artefacto y no recompiló.
    consultar offline; (6) el clone falló con rc=128 porque `PATH` ya tenía
    `$PREFIX/bin` delante y `git` resolvía al git **biónico** del prefijo, que
 tampoco tiene resolvedor — el del host (`/usr/bin/git`) sí.  Ninguna de las seis
-tocó `packages/julia` ni `scripts/`:
+tocó `packages/julia` ni `scripts/`: son del entorno del runner.
+
+   **Y SÍ HAY FORMA DE QUE OCUPE MENOS: `--trim` baja el pico 16×.**  Medido el
+   2026-10-10 con el probe `probe-juliac-memory.yml` (mismo hello world, mismo
+   artefacto, `ubuntu-24.04-arm`):
+
+   | variante | pico RSS | reloj | rc | binario | corre |
+   |---|---|---|---|---|---|
+   | sin flags | 6,86 GB | 2:40 | 0 | 212 MB | sí |
+   | `--heap-size-hint=2G` | 6,90 GB | 2:43 | 0 | 212 MB | sí |
+   | `-O0` | **8,86 GB** | 2:03 | 0 | 226 MB | sí |
+   | `--output-incremental=yes` | — | 0:05 | 1 | — | — |
+   | `--trim=safe` | 0,43 GB | 0:07 | 1 | — | — |
+   | **`--trim=unsafe` + `JULIA_CPU_TARGET=generic`** | **0,43 GB** | **0:09** | **0** | **1,67 MB** | **sí, EN EL TELÉFONO** |
+
+   Tres de esas filas cierran palancas y una abre la puerta:
+
+   - **`-O0` empeora el pico** (8,86 vs 6,86 GB) aunque acorta el reloj.  Es lo
+     mismo que se vio en el teléfono, donde la corrida con `-O0` también murió:
+     menos optimización no es menos memoria.
+   - **`--heap-size-hint` no mueve nada** (6,90 vs 6,86 GB): el fallo es un
+     `bad_alloc` de C++ salido de LLVM, no del colector de Julia.
+   - **`--output-incremental` está bloqueado por el propio driver**: su buildscript
+     crea el global `task` en `Main` y la compilación incremental corta con
+     *"Creating a new global in closed module `Main` (`task`) breaks incremental
+     compilation"*.
+   - **`--trim` sí**: 0,43 GB y 9 s — **16× menos RAM y 127× menos binario**, y ese
+     binario **corrió en el teléfono** (se bajó el artefacto del run 38070301714 y
+     se ejecutó aquí: imprime y devuelve 0).  Con eso, compilar **en** el teléfono
+     deja de ser un problema de RAM.
+
+   Las dos condiciones, medidas (no supuestas):
+
+   1. **El programa no puede tener dispatch dinámico que el verificador no pueda
+      probar.**  Con `print`/`println` de Base, `--trim` falla con
+      *"Verifier error: unresolved call from statement
+      `Base.print(Base.stdout::IO, x::Any)`"* — porque imprimir pasa por `Any`.  El
+      programa que sí funciona escribe con `ccall(:write, …)` y no toca la IO de
+      Base.  Con eso, `--trim=unsafe` compila y ejecuta.
+      Bajo `--trim=unsafe`, una llamada no probada **no emite código** y el binario
+      no tiene JIT: el intento con `print` murió con
+      `Core.MissingCodeError(mi=print(Base.IOStream, Core.String) from print(Core.IO, Any))`
+      y `fatal: error thrown and no exception handler available`.
+   2. **`JULIA_CPU_TARGET=generic`.**  El mismo binario compilado para la CPU del
+      runner se rechaza en el teléfono: *"Unable to find compatible target in
+      cached code image. Target 0 (neoverse-n2): Rejecting this target due to use of
+      runtime-disabled features"*.  Es ortogonal a `trim` y se arregla con esa
+      variable.
+
+   Lo que **no** está resuelto: `--trim=safe`, que es el camino que upstream
+   soporta, **también rechaza el programa sin `print`** — su verifier error #1 es
+   ahora `Core._apply_iterate(Base.iterate, Base._string, a::Any)` en
+   `load_openblas() @ OpenBLAS_jll/src/OpenBLAS_jll.jl:49` y `__init__()
+   @ …:101`, o sea **el init de un JLL del propio sysimage**, no el programa del
+   usuario.  Mientras eso siga así, la puerta de los 0,43 GB pasa por
+   `--trim=unsafe` y sus supuestos.
 
 ---
 
