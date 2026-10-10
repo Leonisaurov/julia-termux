@@ -847,6 +847,52 @@ tocó `packages/julia` ni `scripts/`: son del entorno del runner.
    usuario.  Mientras eso siga así, la puerta de los 0,43 GB pasa por
    `--trim=unsafe` y sus supuestos.
 
+   **RESUELTO 2026-10-10: `--trim=safe` compila y su binario corre en el teléfono.**
+   El muro era el init de `OpenBLAS_jll` y la causa, aislada en el dispositivo con
+   réplicas del mismo molde (**7 s por corrida**: el paso de `trim` entra en el
+   teléfono, así que esto nunca necesitó un runner):
+
+   | forma | verifier |
+   |---|---|
+   | `baremodule` con la interpolación **dentro** de la llamada: `joinpath(libdir, "libopenblas$(suf).so")` | **2 errores** |
+   | el mismo soname **precalculado** como `const` de módulo | **limpio** |
+
+   Una interpolación se expande a un `string(...)` variádico, y dentro de la
+   función trimmed el verificador no puede resolver el splat
+   `Core._apply_iterate(Base._string, a::Any)` en que se convierte.  En carga de
+   módulo la misma expresión se evalúa fuera del código verificado.
+
+   Correcciones que este tramo obligó a hacer, porque la primera hipótesis se
+   midió y **no** resistió:
+
+   - **“un `const` tipado dentro del `if` es la causa” era falso.**  Se parcheó así,
+     se construyó (release `b1f0ecfa…`) y el error siguió, idéntico, en la misma
+     sentencia: lo único que probó el parche es que llegó al sysimage (las líneas
+     se corrieron `49→52` y `101→104`).
+   - La causa real es la **interpolación dentro de la función**, y el fix es
+     **subir el soname a un `const` de módulo** (`const openblas_soname =
+     "libopenblas$(libsuffix).so"`) y usar ese nombre en la tupla de candidatos.
+   - Un ensayo **fiel de toda la función** (bucle, `dlopen`, `dlpath`, el `@warn` y
+     el `error()` final incluidos) con el soname subido da **cero** errores de
+     verifier, así que el build se gastó con el fix ya validado en su forma.
+   - Se descartaron por medidos: `joinpath` de 3 argumentos con strings concretos,
+     `string` de 3 argumentos sobre strings concretos y el ternario anotado — los
+     tres pasan el verificador, ninguno necesitaba tocarse.
+   - El código del stdlib **vive en el sysimage** (`Base.in_sysimage(PkgId(
+     OpenBLAS_jll)) == true`): editar el `.jl` instalado no cambia nada, por eso el
+     fix va en `packages/julia/stdlib-OpenBLAS_jll.jl.patch`, regenerado desde el
+     árbol `v1.12.6` con el resto de los cambios del port replicados.
+
+   Resultado medido con el artefacto construido con el fix (run `38081345995`):
+
+   | variante | pico RSS | reloj | binario | corre |
+   |---|---|---|---|---|
+   | `--trim=safe` + `CPU_TARGET=generic` | 441.480 KB (431 MB) | 0:08.91 | 1.665.136 B | sí, EN EL TELÉFONO |
+   | `--trim=unsafe` + `CPU_TARGET=generic` | 442.196 KB (432 MB) | 0:08.94 | 1.663.704 B | sí |
+
+   O sea: **la puerta quedó en el modo soportado**, a 0,43 GB en vez de 6,86 GB y
+   con un binario de 1,67 MB en vez de 212 MB.
+
 ---
 
 ## Notas para el próximo agente
