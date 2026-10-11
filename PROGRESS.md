@@ -941,6 +941,33 @@ tocó `packages/julia` ni `scripts/`: son del entorno del runner.
    PASS  juliac_trim (34 s, 1627408 bytes)
    ```
 
+   **Y el launcher pasó a tener su propio sitio (2026-10-10).**  Se hizo el cambio que
+   había quedado pendiente y, de paso, se cortó el acoplamiento que obligaba a
+   recompilar julia por tocar el launcher:
+
+   - `packages/juliac/juliac` es la **fuente**, y la receta la **instala verbatim** (el
+     shebang absoluto incluido, sin plantilla): lo que el CI hashea es lo que corre el
+     usuario.
+   - Vive **fuera de `packages/julia/`** a propósito: la clave de caché del artefacto es
+     `hashFiles('packages/julia/**')`, así que editar el launcher ya no la invalida.
+   - Cuando la caché da **hit**, el job de build reinstala el launcher actual en el
+     `.deb` restaurado (`dpkg-deb -R/-b`, con `Installed-Size` recalculado) y la
+     inspección compara los bytes del paquete contra el fichero del repo: no pueden
+     divergir sin que el CI se ponga rojo.
+   - El CI tiene ahora su **parte de juliac**: ese reempaquetado, y un paso que compila
+     un hello con `--trim=safe` **contra el `.deb`** y corre el binario — lo que habría
+     cazado en CI la regresión del soname de OpenBLAS en vez de en el teléfono.
+   - **`JULIA_CC` por defecto en el launcher**: `clang -Wl,--allow-shlib-undefined` (o
+     `$PREFIX/bin/clang` si está al lado de julia).  Hace falta porque `juliac` prueba
+     `gcc` **antes** que `clang`, y porque el link necesita ver las
+     `_Unwind_*@LIBC_R` que el stub de `ndk-multilib` esconde.  Un `JULIA_CC` del
+     usuario manda (medido con una julia falsa: sin la variable pone el default, con
+     ella lo respeta).
+
+   Costo declarado: mover el launcher fuera de la receta **es** un cambio de receta, así
+   que el primer build es completo (~65 min); a partir de ahí, tocar el launcher es una
+   corrida con caché.
+
 ---
 
 ## Notas para el próximo agente

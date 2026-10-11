@@ -1,0 +1,55 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# bin/juliac - launcher for Julia's experimental native-compilation driver.
+#
+# Upstream 1.12 installs share/julia/juliac/juliac.jl and no bin/ entry (Makefile:92
+# lists those shared files and no install rule puts a name on PATH), so the name the
+# user types is provided by this port.  PATH may hand us a bare name, so resolve our
+# own location first, following symlinks without readlink -f (coreutils is not
+# guaranteed on a phone).
+#
+# The shebang is the absolute Termux prefix on purpose and this file is installed
+# verbatim: what CI hashes here is what a user runs.
+#
+# This file lives outside packages/julia/ so that a change to it does not change the
+# artifact cache key of the julia build.  The recipe installs it, and the build job
+# re-installs it into a cache-restored .deb, so editing the launcher costs a
+# cache-hit run rather than a recompile.
+#
+# JULIA_CC: juliac takes its linker from that variable, and without it it picks gcc
+# (it tries gcc before clang).  Neither is right here, so the default is clang with
+# --allow-shlib-undefined, because:
+#   - libjulia.so references the Android platform's versioned unwinder symbols
+#     (_Unwind_*@LIBC_R), which /system/lib64/libc.so answers (54 LIBC_R versions).
+#   - on a phone with ndk-multilib, $PREFIX/aarch64-linux-android/lib/libc.so is a
+#     stub with none of them (0 against that 54) and clang prefers the stub, so the
+#     link dies with `_Unwind_*@LIBC_R undefined`.  --allow-shlib-undefined is GNU
+#     ld's default for executables and is exactly what is wanted here; passing
+#     -L/system/lib64 works as well (measured, 2026-10-10).
+# Export JULIA_CC to override.
+set -eu
+self=$0
+case $self in
+*/*) ;;
+*) self=$(command -v "$self") || { echo "juliac: cannot locate julia" >&2; exit 127; } ;;
+esac
+while [ -h "$self" ]; do
+	dir=$(cd -P "$(dirname "$self")" && pwd)
+	link=$(readlink "$self") || break
+	case $link in
+	/*) self=$link ;;
+	*) self=$dir/$link ;;
+	esac
+done
+bindir=$(cd -P "$(dirname "$self")" && pwd)
+# The compiler this julia was built with, by absolute path when it is where julia
+# is; juliac is a linker driver, so a missing compiler is its own error to report.
+if [ -z "${JULIA_CC:-}" ]; then
+	if [ -x "$bindir/clang" ]; then
+		JULIA_CC="$bindir/clang -Wl,--allow-shlib-undefined"
+	else
+		JULIA_CC="clang -Wl,--allow-shlib-undefined"
+	fi
+fi
+export JULIA_CC
+exec "$bindir/julia" --startup-file=no --history-file=no \
+	"$bindir/../share/julia/juliac/juliac.jl" "$@"

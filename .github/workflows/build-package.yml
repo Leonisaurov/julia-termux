@@ -194,6 +194,12 @@ jobs:
           rm -rf "$RUNNER_TEMP/tp/packages/$PKG"
           cp -a "packages/$PKG" "$RUNNER_TEMP/tp/packages/$PKG"
           test -f "$RUNNER_TEMP/tp/packages/$PKG/build.sh"
+          # The juliac launcher lives outside packages/$PKG so that editing it does not
+          # change the cache key below, which is the whole point of keeping it apart.
+          # The recipe installs it from its sibling directory.
+          rm -rf "$RUNNER_TEMP/tp/packages/juliac"
+          cp -a packages/juliac "$RUNNER_TEMP/tp/packages/juliac"
+          test -f "$RUNNER_TEMP/tp/packages/juliac/juliac"
           echo "staged $(find "$RUNNER_TEMP/tp/packages/$PKG" -name '*.patch' | wc -l) patch files"
           # A bump of any library in the Termux repository changes the binary we
           # produce, so the repository state belongs in the cache key.  The bootstrap
@@ -227,6 +233,37 @@ jobs:
           key: julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}
           restore-keys: |
             julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-
+
+      # The juliac half of the CI, and the reason the launcher does not live under
+      # packages/julia/: the cache key is hashFiles('packages/julia/**'), so a cache
+      # hit can carry the previous launcher.  Re-install the current one and rebuild
+      # the .deb around it, and editing the launcher costs this run instead of a
+      # ~65-minute recompile.  dpkg-deb -R/-b is a round trip; the payload's 0700
+      # modes are kept and Installed-Size is recomputed so the control file stays
+      # true.  The inspection below then compares the shipped file with the source,
+      # so the two can never drift.
+      - name: Install the juliac launcher from its own source
+        if: steps.cache.outputs.cache-matched-key != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          DEB=$(ls output/julia_*_aarch64.deb 2>/dev/null || true)
+          [ -n "$DEB" ] || { echo "the restored cache holds no julia .deb"; exit 1; }
+          P=data/data/com.termux/files/usr
+          W=$(mktemp -d "$RUNNER_TEMP/repack.XXXXXX")
+          dpkg-deb -R "$DEB" "$W"
+          was=$(sha256sum "$W/$P/bin/juliac" 2>/dev/null | cut -d' ' -f1 || echo absent)
+          install -m 700 packages/juliac/juliac "$W/$P/bin/juliac"
+          size=$(du -sk "$W/data" | cut -f1)
+          sed -i "s/^Installed-Size: .*/Installed-Size: $size/" "$W/DEBIAN/control"
+          dpkg-deb -b "$W" "$DEB"
+          rm -rf "$W"
+          now=$(sha256sum packages/juliac/juliac | cut -d' ' -f1)
+          echo "launcher in the restored .deb: $was"
+          echo "launcher installed now:        $now"
+          [ "$was" = "$now" ] || echo "(the cached artifact carried a different launcher - that is what this step is for)"
+          dpkg-deb -I "$DEB" | grep -E 'Installed-Size|Package:|Version:'
 
       - name: Probe the loader's library resolution
         if: steps.cache.outputs.cache-matched-key == ''
@@ -355,6 +392,13 @@ jobs:
           dpkg-deb -x "$DEB" unpack
           P=unpack/data/data/com.termux/files/usr
           fail=0
+          # The launcher is the one artefact here whose source lives outside the
+          # recipe, so nothing else would notice drift between the two.
+          if cmp -s packages/juliac/juliac "$P/bin/juliac"; then
+            printf 'OK    bin/juliac is byte-for-byte packages/juliac/juliac\n'
+          else
+            printf 'FAIL  bin/juliac differs from packages/juliac/juliac\n'; fail=1
+          fi
           for f in "$P/bin/julia" "$P"/lib/julia/sys.so "$P"/lib/julia/libblastrampoline.so*; do
             if [ -e "$f" ]; then printf 'OK    %s\n' "${f#"$P"/}"
             else printf 'FAIL  %s absent from the package\n' "${f#"$P"/}"; fail=1; fi
@@ -441,6 +485,46 @@ jobs:
           du -sh "$P" | sed 's/^/  /'
           find unpack -name '*.so*' | wc -l | sed 's/^/  shared objects: /'
           exit "$fail"
+
+      # The juliac half again, this time doing the thing the port ships it for: a
+      # program compiled with the supported --trim=safe, and the binary running.  It
+      # runs against the .deb - what ships, cached or freshly built - and not the
+      # build tree, so it stays true on a cache hit.  It is what would have caught the
+      # OpenBLAS soname regression in CI instead of on the device.
+      - name: juliac compiles with --trim=safe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          DEB=$(ls output/julia_*_aarch64.deb 2>/dev/null || true)
+          [ -n "$DEB" ] || { echo "no julia .deb to check"; exit 1; }
+          # PATH and TMPDIR only: libtermux-exec rewrites /usr paths, and the host's
+          # git is needed below for the registry.  Same reasoning as the probe.
+          export PATH="$TERMUX_PREFIX/bin:$PATH" TMPDIR="$TERMUX_PREFIX/tmp"
+          dpkg-deb -x "$DEB" /
+          # juliac's first act is Pkg.precompile(), and Pkg answers a depot with no
+          # registry by installing one; bionic has no DNS on these runners, so the
+          # registry comes from the host's git.  It is never searched - the environment
+          # has no packages - it only has to be present.
+          if [ ! -d "$HOME/.julia/registries/General" ]; then
+            mkdir -p "$HOME/.julia/registries"
+            /usr/bin/git clone --depth 1 --quiet \
+              https://github.com/JuliaRegistries/General.git \
+              "$HOME/.julia/registries/General"
+          fi
+          W=$(mktemp -d "$RUNNER_TEMP/juliac-check.XXXXXX")
+          # Dispatch-free on purpose: `print` goes through Any and the trim verifier
+          # refuses it, so the program writes with ccall.  See PROGRESS.md.
+          printf '%s\n' \
+            'function (@main)(args::Vector{String})' \
+            '    ccall(:write, Cint, (Cint, Ptr{UInt8}, Csize_t), 1, "juliac ok", 9)' \
+            '    return Cint(0)' \
+            'end' > "$W/hello.jl"
+          ( cd "$W" && JULIA_PKG_OFFLINE=true \
+              "$TERMUX_PREFIX/bin/juliac" --experimental --trim=safe --output-exe hello hello.jl )
+          out=$("$W/hello")
+          [ "$out" = "juliac ok" ] || { echo "the trimmed binary printed: [$out]"; exit 1; }
+          echo "juliac --trim=safe built a $(stat -c %s "$W/hello") byte binary and it ran"
 
       - name: Save the artifact cache
         if: success() && steps.cache.outputs.cache-matched-key == ''

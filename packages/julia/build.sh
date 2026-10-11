@@ -292,45 +292,19 @@ termux_step_post_make_install() {
 	# "Compilar un .jl a un binario" in 1.12 is `juliac`, and upstream ships it as
 	# share/julia/juliac/juliac.jl only: Makefile:92 lists those shared files and
 	# there is no install rule that puts a name on PATH.  The artifact therefore
-	# offers no `juliac` command, and the port installs one.  It resolves julia
-	# next to itself rather than through PATH (a wrapper that is found and then
-	# cannot find its interpreter is worse than no wrapper) and follows symlinks
-	# with a POSIX readlink loop (readlink -f needs coreutils, not guaranteed).
-	# It is deliberately thin because juliac.jl:4 calls its own interface and
-	# location unstable/experimental: when upstream moves the script, this is the
-	# one place that changes.  Device status 2026-10-10: the launch and
-	# `juliac --help` work, but the compile step (`julia --output-o`, which emits
-	# an object for the whole sysimage) dies with std::bad_alloc on this phone -
-	# 308 s untouched and 200 s with -O0 injected in a copy of the script - so the
-	# wrapper ships for the name and the interface, not because a binary has been
-	# produced here yet.
-	{
-		printf '#!%s/bin/sh\n' "${TERMUX_PREFIX}"
-		cat <<'JULIAC_LAUNCHER'
-# bin/juliac - launcher for Julia's experimental native-compilation driver.
-# Upstream 1.12 installs share/julia/juliac/juliac.jl and no bin/ entry, so the
-# name the user types is provided by this package.  PATH may hand us a bare name,
-# so resolve our own location first.
-set -eu
-self=$0
-case $self in
-*/*) ;;
-*) self=$(command -v "$self") || { echo "juliac: cannot locate julia" >&2; exit 127; } ;;
-esac
-while [ -h "$self" ]; do
-	dir=$(cd -P "$(dirname "$self")" && pwd)
-	link=$(readlink "$self") || break
-	case $link in
-	/*) self=$link ;;
-	*) self=$dir/$link ;;
-	esac
-done
-bindir=$(cd -P "$(dirname "$self")" && pwd)
-exec "$bindir/julia" --startup-file=no --history-file=no \
-	"$bindir/../share/julia/juliac/juliac.jl" "$@"
-JULIAC_LAUNCHER
-	} > "${TERMUX_PREFIX}/bin/juliac"
-	chmod 755 "${TERMUX_PREFIX}/bin/juliac"
+	# offers no `juliac` command, and the port installs one.
+	#
+	# The launcher's source is not here but in packages/juliac/juliac, and it is
+	# installed verbatim: what the CI hashes is what a user runs.  It lives outside
+	# packages/julia/ on purpose, so that editing the launcher does not change the
+	# artifact cache key (hashFiles('packages/julia/**')) and cost a recompile - the
+	# build job's "Install the juliac launcher from its own source" step does this
+	# same install against a cache-restored .deb.  See PROGRESS.md.
+	_juliac_src="${TERMUX_PKG_BUILDER_DIR}/../juliac/juliac"
+	[ -f "${_juliac_src}" ] ||
+		termux_error_exit "the juliac launcher is not at ${_juliac_src}"
+	install -m 755 "${_juliac_src}" "${TERMUX_PREFIX}/bin/juliac"
+	unset _juliac_src
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
