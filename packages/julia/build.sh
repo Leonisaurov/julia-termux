@@ -322,7 +322,8 @@ termux_step_post_make_install() {
 	[ -f "${_pkgdir}/src/Operations.jl" ] ||
 		termux_error_exit "Pkg sources are not installed at ${_pkgdir}"
 	patch -p1 -d "${TERMUX_PREFIX}/share/julia/stdlib/${_versdir}" \
-		-i "${TERMUX_PKG_BUILDER_DIR}/patches/Pkg-Operations.jl.patch"
+		-i "${TERMUX_PKG_BUILDER_DIR}/patches/Pkg-Operations.jl.patch" ||
+		termux_error_exit "the Pkg override patch did not apply"
 	"${TERMUX_PREFIX}/bin/julia" --startup-file=no -e 'using Pkg; Pkg.activate(mktempdir())' ||
 		termux_error_exit "the patched Pkg does not run"
 	unset _versdir _pkgdir
