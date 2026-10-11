@@ -324,8 +324,25 @@ termux_step_post_make_install() {
 	patch -p1 -d "${TERMUX_PREFIX}/share/julia/stdlib/${_versdir}" \
 		-i "${TERMUX_PKG_BUILDER_DIR}/patches/Pkg-Operations.jl.patch" ||
 		termux_error_exit "the Pkg override patch did not apply"
+	# julia cannot even start here without the name a device's bootstrap provides:
+	# libjulia.so's DEP_LIBS asks for $PREFIX/lib/julia/libm.so, a phone answers it with
+	# $PREFIX/lib/libm.so -> /system/lib64/libm.so (a bootstrap symlink no .deb owns), and a
+	# prefix materialised from .debs - the runner's - has neither.  Run 38130225817 died
+	# exactly there, with the patch already applied.  The link exists only for this check
+	# and is removed again, so the payload stays what upstream ships; the workflow's juliac
+	# step does the same for the same reason.
+	_needlibm=""
+	for _d in "${TERMUX_PREFIX}/lib/julia" "${TERMUX_PREFIX}/lib"; do
+		if [ ! -e "${_d}/libm.so" ]; then
+			ln -sfn /system/lib64/libm.so "${_d}/libm.so"
+			_needlibm="${_needlibm} ${_d}/libm.so"
+		fi
+	done
 	"${TERMUX_PREFIX}/bin/julia" --startup-file=no -e 'using Pkg; Pkg.activate(mktempdir())' ||
 		termux_error_exit "the patched Pkg does not run"
+	# shellcheck disable=SC2086 # the list is built above, one path per link
+	[ -z "${_needlibm}" ] || rm -f ${_needlibm}
+	unset _needlibm _d
 	unset _versdir _pkgdir
 
 	# Fail here rather than in the artifact smoke test: a sysimage-less or

@@ -346,6 +346,20 @@ y de ahí a `select_downloadable_artifacts`, y guarda el uuid junto a la raíz. 
 aplica con el comando exacto de la receta, el archivo parcheado **parsea** (`Meta.parseall`)
 y el `Pkg` parcheado resuelve el override.
 
+**El build lo cazó, y por una razón de entorno** (run `38130225817`, 58 min): el parche
+aplicó (`patching file Pkg/src/Operations.jl`) y el chequeo falló con
+
+```
+ERROR: Unable to load dependent library /data/data/com.termux/files/usr/lib/julia/libm.so
+ERROR: the patched Pkg does not run
+```
+
+porque el paso corre la **julia instalada** en el runner, cuyo prefijo no tiene el `libm.so`
+que en el teléfono pone el bootstrap (el mismo muro que el paso de juliac del workflow ya
+resolvía).  El paso ahora crea el nombre, corre el chequeo y **lo quita**, así el payload
+queda como el de upstream.  Fail-closed: el build se detuvo en vez de publicar un `Pkg`
+roto.
+
 **Dónde se aplica y por qué no es un `*.patch` del nivel superior**: `Pkg` es un
 **submodule** — el tarball de la release trae solo `stdlib/Pkg.version` — así que cuando
 `termux_step_patch_package()` corre **no hay archivo que parchear** (medido: `can't find
