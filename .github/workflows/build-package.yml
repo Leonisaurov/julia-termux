@@ -550,6 +550,21 @@ jobs:
           # that file is deliberate, LD_PRELOAD would rewrite /usr/bin/git into the
           # prefix's bionic git, which has no DNS.
           export PATH="$PREFIX/bin:$PATH" TMPDIR="$PREFIX/tmp"
+          # A prefix materialised from .debs has neither the bootstrap's
+          # $PREFIX/lib/libm.so -> /system/lib64/libm.so nor the device's
+          # /linkerconfig/ld.config.txt that answers libm.so by name - and libjulia.so's
+          # DEP_LIBS asks for julia/libm.so, so on a runner the artifact cannot even
+          # start:
+          #   ERROR: Unable to load dependent library .../lib/julia/libm.so
+          # Run 38119700706 failed here, on a tree the same tree on the phone runs.  The
+          # probes give the prefix the same two names for the same reason; the guard
+          # skips anything the closure already provides, so nothing is shadowed.
+          # On the device neither link is needed ($PREFIX/lib/libm.so is there and so is
+          # the linker config), which is why nothing else in this port has to do it.
+          for _d in "$PREFIX/lib/julia" "$PREFIX/lib"; do
+            [ -e "$_d/libm.so" ] || ln -sfn /system/lib64/libm.so "$_d/libm.so"
+          done
+          unset _d
           # No extraction here, and that is the fix for two failures: `dpkg-deb -x"$DEB" /`
           # died on the runner with
           #   tar: .: Cannot utime: Operation not permitted

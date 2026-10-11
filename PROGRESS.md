@@ -364,6 +364,12 @@ Lo que quedó, y es lo que evita que vuelva a pasar:
   coinciden con `ps`, y un busy loop de 3 s va de 95 a 269 ticks.
 - **`Upload the artifact` es `always()`** con `if-no-files-found: warn`: el `.deb` de un
   run fallido es justo lo que hay que mirar, y se perdió dos veces con el run.
+- **El chequeo le da al prefijo el `libm.so` que el bootstrap le da al teléfono.**  Un
+  prefijo armado solo con `.deb` no tiene `$PREFIX/lib/libm.so -> /system/lib64/libm.so`
+  ni el `/linkerconfig/ld.config.txt` que en el teléfono responde `libm.so` por nombre, y
+  `libjulia.so` pide `julia/libm.so`: en el runner el artefacto no arranca
+  (`ERROR: Unable to load dependent library .../lib/julia/libm.so`, run `38119700706`).
+  Los `probe-*` ya lo hacían, por el mismo motivo y con la misma guarda.
 
 ### Tramo siguiente (`sys-o.a` + precompile): riesgos ya medidos
 
