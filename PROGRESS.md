@@ -320,6 +320,28 @@ y `Warning: git information unavailable`.  NO es ruido `error: linker cannot loa
 itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
+### Un stall del runner, no del build (run 38105032022, 2026-10-11)
+
+El run que iba a publicar el launcher desde `packages/juliac/` clavó el paso
+`Build the package` **más de dos horas**, con el build ya compilado y el log sin nada
+más que el warning de bionic (`failed to find generated linker configuration from
+/linkerconfig/ld.config.txt`) cada tanto.  Evidencia de que es el runner y no la receta:
+
+- los seis builds completos del mismo workflow tardaron **57.0, 58.3, 58.4, 59.8, 61.0 y
+  62.2 min** (spread ±5%, mismo pool de 4 vCPU / 15.9 GB / 3 GB de zram), y el run
+  **38101288622** -receta idéntica a esta, con el launcher ya stageado en `packages/juliac/`
+  e instalado con `install`- completó todo el build en 59.8 min;
+- "cada cierto tiempo aparece un warning" es un **estancamiento** (un exec cada tanto),
+  no un bucle de execs;
+- el warning no puede venir del paso: `build-package.yml:341` lo filtra con
+  `grep -vE 'linkerconfig|ld.config.txt'`.
+
+La mejora que sale de esto no es un reintento ciego, es que un stall deje de ser
+invisible: el paso pasa por `timeout 5400` (1.5x la peor corrida sana) y el sampler
+anota el disco (`df -h`) junto a la memoria.  Antes, un stall así lo mataba el timeout
+de 300 min del job, que **no** corre los pasos de fallo: se llevaba `build.log` (el único
+registro de qué estaba haciendo) y el `memwatch.log`.
+
 ### Tramo siguiente (`sys-o.a` + precompile): riesgos ya medidos
 
 > **Cerrado el 2026-10-09.**  `sysbase-o.a` y `sys-o.a` se emiten (37876520515,

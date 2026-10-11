@@ -325,6 +325,12 @@ jobs:
             {
               date -u '+%FT%TZ'
               grep -E 'MemAvailable|Committed_AS|CommitLimit|SwapTotal|Writeback' /proc/meminfo
+              # A stall is the other failure mode this sampler has to be able to
+              # name, and a full or throttled disk looks exactly like a silent one:
+              # run 38105032022 sat with the build compiled and only the occasional
+              # bionic linker warning for 2h22m.  `sed -n 2p` reads to the end, so
+              # unlike `head` it cannot decide the sample with a SIGPIPE.
+              df -h "$RUNNER_TEMP" | sed -n 2p
               ps -eo pid,rss,comm --sort=-rss | sed -n '2,4p'
               for p in $(pgrep -x julia | head -3); do
                 printf 'julia pid=%s vmas=%s rss=%skB\n' "$p" \
@@ -336,11 +342,21 @@ jobs:
             sleep 20
           done &
           watch_pid=$!
-          "$RUNNER_TEMP/run-build.sh" 2>&1 |
+          # 5400 s is 1.5x the 57-62 min this step has taken in all six green runs,
+          # which sit within 5% of each other - so a longer wall is not a slow
+          # runner, it is a stall, and this workflow has now met one: run
+          # 38105032022 held this step for over two hours with the build already
+          # compiled and nothing but an occasional linker warning in the log.  The
+          # job's own 300-minute timeout would have ended the job without running
+          # the failure steps, taking $RUNNER_TEMP/build.log - the only record of
+          # what it was doing - down with it.  Cut it here instead: rc=124 says
+          # stalled, and the log survives for the report below.
+          timeout --signal=TERM --kill-after=30 5400 "$RUNNER_TEMP/run-build.sh" 2>&1 |
             tee "$RUNNER_TEMP/build.log" |
             grep -vE 'linkerconfig|ld.config.txt'
           rc=${PIPESTATUS[0]}
           kill "$watch_pid" 2>/dev/null || true
+          [ "$rc" -eq 124 ] && echo "build rc=124: cut at 90 minutes, the step stalled"
           echo "build rc=$rc"
           ls -l "$GITHUB_WORKSPACE/output"
           exit "$rc"
