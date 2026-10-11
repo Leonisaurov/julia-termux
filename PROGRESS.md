@@ -363,6 +363,24 @@ verificado, instalado en `~/.local/opt/fftw-bionic` y vuelto a medir: `libfftw3_
 depot queda con solo `Overrides.toml` — o sea, **no bajó nada**.  El workflow tarda ~4 min
 (dos pasadas de configure de ~2 min) y publica el tarball con su `.sha256`.
 
+El workflow que lo construye es ahora **uno solo para los tres artefactos**:
+`build-bionic-artifact.yml` con un input `recipe` (fftw, lerc, gettext-runtime) resuelto en un
+paso que mapea script, directorio de salida, tag y nota de release, con concurrencia **por
+receta** (un dispatch de lerc no cancela un fftw en curso) y sin tocar `packages/julia/**`.
+`scripts/build-lerc-bionic.sh` (Esri LERC 4.2.0, sha256 `a1fb593e…`) y
+`scripts/build-gettext-runtime-bionic.sh` (gettext 1.0, sha256 `85d99b79…`) se sumaron al de
+FFTW, cada uno con su test de aceptación: LERC hace un round trip por la API C y gettext-runtime
+llama `gettext`/`dgettext` desde un programa bionic.  Las tres releases están publicadas
+(`fftw-bionic`, `lerc-bionic`, `gettext-runtime-bionic`) y las tres se verificaron **bajándolas
+al dispositivo**.
+
+Dos trampas nuevas del entorno del runner, las dos de la primera corrida del workflow
+generalizado: cmake agarra el **ninja del host** (`/usr/local/bin/ninja`, glibc) y muere con el
+`LD_PRELOAD` bionic (`invalid ELF header`) —el mismo muro que `/bin/sh`, un nivel más abajo—, y
+el prefijo del CI no tiene `gettext`, así que los symlinks del dir compuesto colgaban (el input
+`packages` de la acción, pedido desde un paso de resolución que ahora corre **antes** de
+materializar el prefijo, lo resuelve).
+
 Antes fallaron tres corridas, todas por el entorno del runner y ninguna por el build (las tres
 quedaron en `AGENTS.md`): normalizar el outdir antes de crearlo, el `/bin/sh` glibc con el
 `LD_PRELOAD` bionic (*invalid ELF header*, rc=127), y la caché del tarball recomputada tras el
