@@ -45,19 +45,25 @@ OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 
 # 1. The tarball, before the prefix is anywhere near this process.  On the CI runners
 #    bionic has no DNS (the termux-builder action documents it and routes its own fetches
-#    through the host's curl), so the host's curl is the one that resolves.  The cache
-#    lives outside the workdir because the re-exec below replaces this process.
-CACHE="${TMPDIR:-/tmp}/fftw-${FFTW_VERSION}.tar.gz"
-if [ ! -f "$CACHE" ]; then
+#    through the host's curl), so the host's curl is the one that resolves - and it only
+#    works while LD_PRELOAD is still clear.  The cache path is therefore decided here and
+#    exported: after the re-exec below TMPDIR is the prefix's, so a path recomputed there
+#    would look empty, fetch again, and this time run the host's curl with the bionic
+#    preload inherited (measured: "invalid ELF header", exit 127).
+if [ -z "${FFTW_BIONIC_CACHE:-}" ]; then
+	FFTW_BIONIC_CACHE="${TMPDIR:-/tmp}/fftw-${FFTW_VERSION}.tar.gz"
+fi
+if [ ! -f "$FFTW_BIONIC_CACHE" ]; then
 	CURL=curl
 	if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "${TERMUX_BUILDER_HOSTBIN}/curl" ]; then
 		CURL="${TERMUX_BUILDER_HOSTBIN}/curl"
 	fi
 	echo "== fetching fftw $FFTW_VERSION (sha256 pinned)"
-	"$CURL" -sSL --fail -o "$CACHE.part" "$FFTW_URL"
-	mv "$CACHE.part" "$CACHE"
+	"$CURL" -sSL --fail -o "$FFTW_BIONIC_CACHE.part" "$FFTW_URL"
+	mv "$FFTW_BIONIC_CACHE.part" "$FFTW_BIONIC_CACHE"
 fi
-echo "$FFTW_SHA256  $CACHE" | sha256sum -c -
+echo "$FFTW_SHA256  $FFTW_BIONIC_CACHE" | sha256sum -c -
+export FFTW_BIONIC_CACHE
 
 # 2. Re-exec under the prefix's own bash before touching the toolchain, the way
 #    build-package.sh is launched.  Sourcing the action's environment puts the bionic
@@ -86,7 +92,7 @@ for pass in double float; do
 	src="$WORK/src-$pass"
 	build="$WORK/build-$pass"
 	mkdir -p "$src" "$build"
-	tar xzf "$CACHE" -C "$src" --strip-components=1
+	tar xzf "$FFTW_BIONIC_CACHE" -C "$src" --strip-components=1
 	extra=()
 	[ "$pass" = float ] && extra+=(--enable-float)
 	echo "== building $pass"
