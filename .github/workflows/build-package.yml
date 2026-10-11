@@ -331,12 +331,21 @@ jobs:
               # bionic linker warning for 2h22m.  `sed -n 2p` reads to the end, so
               # unlike `head` it cannot decide the sample with a SIGPIPE.
               df -h "$RUNNER_TEMP" | sed -n 2p
-              ps -eo pid,rss,comm --sort=-rss | sed -n '2,4p'
-              for p in $(pgrep -x julia | head -3); do
-                printf 'julia pid=%s vmas=%s rss=%skB\n' "$p" \
-                  "$(wc -l < "/proc/$p/maps" 2>/dev/null)" \
-                  "$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null)"
-              done
+              # /proc directly: no `ps`, no `pgrep`.  Run 38105032022 stalled for three
+              # hours and this sampler saw no julia process at all - `pgrep -x julia`
+              # matched nothing in 578 samples and the last sample has no `ps` output
+              # either, while the device's own ps/pgrep answer fine.  A diagnostic must
+              # not be the thing that goes missing.  Fields 14+15 of /proc/<pid>/stat
+              # are utime+stime in clock ticks, which is what tells a stall's two
+              # shapes apart: a *spinner*, whose number grows by the sample interval,
+              # and a process waiting on something, whose number does not move.  RSS
+              # alone can never say which one it was.  Split at the comm's parentheses
+              # and then at whitespace, not over the whole line: comm can hold a space
+              # (or be empty, which the device shows for one kernel thread), and the
+              # field numbers below are counted from the closing paren.
+              awk '{ split($0, a, "[()]"); split(a[3], f, " ");
+                     printf "proc pid=%s comm=%s rss_kb=%s cpu_ticks=%s\n", $1, a[2], f[22] * 4, f[12] + f[13] }' \
+                /proc/[0-9]*/stat 2>/dev/null | sort -t= -k5 -n -r | sed -n '1,4p'
               echo '---'
             } >> "$RUNNER_TEMP/memwatch.log" 2>/dev/null
             sleep 20
@@ -377,11 +386,11 @@ jobs:
           if [ -s "$watch" ]; then
             echo "samples: $(grep -c -- '---' "$watch" || true)  (taken 20 s apart)"
             echo "lowest MemAvailable observed (kB): $(awk '/MemAvailable/ {print $2}' "$watch" | sort -n | head -1 || true)"
-            echo "largest julia observed:"
-            grep -h '^julia pid=' "$watch" | sort -t= -k4 -n -r | head -3 ||
-              echo "  the sampler never saw a julia process run"
+            echo "the busiest processes in the samples (cpu_ticks is utime+stime, so a spinner's number grows by the 20 s between samples):"
+            grep -h '^proc pid=' "$watch" | sort -t= -k5 -n -r | head -4 ||
+              echo "  the sampler took no process sample"
             echo "tail of the samples:"
-            tail -12 "$watch"
+            tail -40 "$watch"
           else
             echo "no memory samples were taken (cache hit, or the build step did not run)"
           fi
@@ -502,6 +511,23 @@ jobs:
           find unpack -name '*.so*' | wc -l | sed 's/^/  shared objects: /'
           exit "$fail"
 
+      # The cache is saved here, between the inspection and the juliac check, and the
+      # order is the point: what it holds is a ~60-minute build, and the inspection
+      # above is what makes that worth keeping - it is the fail-closed gate on the
+      # payload.  The juliac check below is a contract on behaviour; it runs on a cache
+      # hit as well, so a bug in it must not throw away the build it was checking.
+      # Run 38101288622 did exactly that: it compiled this recipe end to end, passed the
+      # inspection, and lost the cache because a check step after it failed - which is
+      # why the two runs that followed had to compile julia again from scratch, and one
+      # of them stalled for three hours.  A red check still blocks publication, because
+      # the publish job needs this one.
+      - name: Save the artifact cache
+        if: success() && steps.cache.outputs.cache-matched-key == ''
+        uses: actions/cache/save@v4
+        with:
+          path: output
+          key: julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}
+
       # The juliac half again, this time doing the thing the port ships it for: a
       # program compiled with the supported --trim=safe, and the binary running.  It
       # runs against the .deb - what ships, cached or freshly built - and not the
@@ -543,13 +569,6 @@ jobs:
           out=$("$W/hello")
           [ "$out" = "juliac ok" ] || { echo "the trimmed binary printed: [$out]"; exit 1; }
           echo "juliac --trim=safe built a $(stat -c %s "$W/hello") byte binary and it ran"
-
-      - name: Save the artifact cache
-        if: success() && steps.cache.outputs.cache-matched-key == ''
-        uses: actions/cache/save@v4
-        with:
-          path: output
-          key: julia-deb-v2-aarch64-${{ hashFiles('packages/julia/**') }}-${{ steps.tp.outputs.sha }}-${{ steps.tp.outputs.repo_stamp }}
 
       - name: Where the time went
         if: always()
