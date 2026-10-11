@@ -355,6 +355,20 @@ depot: sin descarga
 
 y el test en C: `dc[1] = -4.000 9.657` (el binomio 1 de la DFT de 0..7).
 
+Publicado y verificado con el **artefacto publicado**, no con el build a mano (run
+`38153266624`, release `fftw-bionic`): 1.555.734 B, sha256
+`3c3e8f5081a111befb7f68d46e9aa1f8dd8168cde43d35f64bb62a4918907ec0`.  Bajado en el teléfono,
+verificado, instalado en `~/.local/opt/fftw-bionic` y vuelto a medir: `libfftw3_path` y
+`libfftw3f_path` apuntan ahí, `fft/ifft`, `rfft`, `plan/apply` y `dct/idct` dan correcto, y el
+depot queda con solo `Overrides.toml` — o sea, **no bajó nada**.  El workflow tarda ~4 min
+(dos pasadas de configure de ~2 min) y publica el tarball con su `.sha256`.
+
+Antes fallaron tres corridas, todas por el entorno del runner y ninguna por el build (las tres
+quedaron en `AGENTS.md`): normalizar el outdir antes de crearlo, el `/bin/sh` glibc con el
+`LD_PRELOAD` bionic (*invalid ELF header*, rc=127), y la caché del tarball recomputada tras el
+re-exec —que la hacía re-bajar usando el curl del host ya con el preload—; más un `tar | head`
+bajo `pipefail` que mató una corrida **después** de construir y subir el artefacto.
+
 Lo que **no** tiene: los wrappers Fortran (`dfftw_*`/`sfftw_*`), que fftw genera con un
 compilador Fortran y este entorno no tiene.  Son los 102 símbolos que el clasificador
 reporta como único gap contra el artefacto oficial, y ningún consumidor de Julia los usa
