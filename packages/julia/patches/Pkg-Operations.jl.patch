@@ -1,0 +1,46 @@
+--- a/Pkg/src/Operations.jl
++++ b/Pkg/src/Operations.jl
+@@ -874,7 +874,7 @@
+     end
+ end
+ 
+-function collect_artifacts(pkg_root::String; platform::AbstractPlatform = HostPlatform(), include_lazy::Bool = false)
++function collect_artifacts(pkg_root::String; platform::AbstractPlatform = HostPlatform(), include_lazy::Bool = false, pkg_uuid::Union{Nothing,Base.UUID} = nothing)
+     # Check to see if this package has an (Julia)Artifacts.toml
+     artifacts_tomls = Tuple{String, Base.TOML.TOMLDict}[]
+     for f in artifact_names
+@@ -898,7 +898,7 @@
+                 end
+             else
+                 # Otherwise, use the standard selector from `Artifacts`
+-                artifacts = select_downloadable_artifacts(artifacts_toml; platform, include_lazy)
++                artifacts = select_downloadable_artifacts(artifacts_toml; platform, include_lazy, pkg_uuid)
+                 push!(artifacts_tomls, (artifacts_toml, artifacts))
+             end
+             break
+@@ -926,13 +926,13 @@
+     env = ctx.env
+     io = ctx.io
+     fancyprint = can_fancyprint(io)
+-    pkg_roots = String[]
++    pkg_roots = Tuple{Union{Base.UUID,Nothing},String}[]
+     for (uuid, pkg) in env.manifest
+         pkg = manifest_info(env.manifest, uuid)
+         pkg_root = source_path(env.manifest_file, pkg, julia_version)
+-        pkg_root === nothing || push!(pkg_roots, pkg_root)
++        pkg_root === nothing || push!(pkg_roots, (uuid, pkg_root))
+     end
+-    push!(pkg_roots, dirname(env.project_file))
++    push!(pkg_roots, (nothing, dirname(env.project_file)))
+     download_jobs = Dict{SHA1, Function}()
+ 
+     print_lock = Base.ReentrantLock() # for non-fancyprint printing
+@@ -948,7 +948,7 @@
+     ansi_enablecursor = "\e[?25h"
+     ansi_disablecursor = "\e[?25l"
+ 
+-    all_collected_artifacts = reduce(vcat, map(pkg_root -> collect_artifacts(pkg_root; platform, include_lazy), pkg_roots))
++    all_collected_artifacts = reduce(vcat, map(pkg_root -> collect_artifacts(pkg_root[2]; platform, include_lazy, pkg_uuid = pkg_root[1]), pkg_roots))
+     used_artifact_tomls = Set{String}(map(first, all_collected_artifacts))
+     longest_name_length = maximum(all_collected_artifacts; init = 0) do (artifacts_toml, artifacts)
+         maximum(textwidth, keys(artifacts); init = 0)

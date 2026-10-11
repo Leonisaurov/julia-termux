@@ -320,6 +320,42 @@ y `Warning: git information unavailable`.  NO es ruido `error: linker cannot loa
 itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
+### El lado del consumo: `Pkg` honra los overrides por UUID+nombre (2026-10-11)
+
+Con el override **por hash** un JLL se resuelve contra la librería bionic del sistema sin
+bajar su artefacto glibc.  El problema es que ese hash cambia con cada versión del JLL, así
+que no se puede publicar una vez.  La forma **estable** (UUID+nombre) **no** evitaba la
+descarga, y la causa está en el código de `Pkg`:
+
+`Pkg/src/Operations.jl:download_artifacts()` recorre el manifest y guarda **solo la ruta**
+(`pkg_roots::Vector{String}`), así que al llamar `collect_artifacts(pkg_root)` →
+`Artifacts.select_downloadable_artifacts(artifacts_toml; platform, include_lazy)` **se
+pierde el uuid**: `process_overrides()` nunca corre, no se genera la entrada de hash, y
+`ensure_artifact_installed()` ve `artifact_exists(hash) == false` → baja.
+
+Medido en el dispositivo, A/B con el mismo override y el mismo JLL (`libpng_jll`, con el
+artefacto apartado del depot con `mv`):
+
+| | resultado |
+|---|---|
+| `Pkg` original + `[uuid]` / `libpng = "…/usr"` | `Installing 1 artifacts` / `Installed artifact libpng 316.6 KiB` → **bajó** |
+| `Pkg` parcheado, mismo override | **no bajó** |
+
+`packages/julia/patches/Pkg-Operations.jl.patch` pasa el `pkg_uuid` a `collect_artifacts`
+y de ahí a `select_downloadable_artifacts`, y guarda el uuid junto a la raíz.  Verificado:
+aplica con el comando exacto de la receta, el archivo parcheado **parsea** (`Meta.parseall`)
+y el `Pkg` parcheado resuelve el override.
+
+**Dónde se aplica y por qué no es un `*.patch` del nivel superior**: `Pkg` es un
+**submodule** — el tarball de la release trae solo `stdlib/Pkg.version` — así que cuando
+`termux_step_patch_package()` corre **no hay archivo que parchear** (medido: `can't find
+file to patch`).  Se aplica en `termux_step_post_make_install`, sobre la copia instalada
+(que es lo que se shipa), y después corre `julia -e 'using Pkg; Pkg.activate(mktempdir())'`:
+si el parche rompió algo el **build falla** en vez de publicar, y la caché precompilada que
+lleva el paquete no queda vieja.  El gate local no rehereza `post_make_install`, así que
+este paso se verifica en el build; el conteo del nivel superior sigue en 26 y el gate sigue
+`PASS`.
+
 ### Un stall, dos bugs de chequeo y el costo de verificarlos (2026-10-11)
 
 Tres runs seguidos para publicar un launcher que ya funcionaba, y la lección no está en

@@ -306,6 +306,27 @@ termux_step_post_make_install() {
 	install -m 755 "${_juliac_src}" "${TERMUX_PREFIX}/bin/juliac"
 	unset _juliac_src
 
+	# Pkg's sources are a git submodule: the release tarball ships only
+	# stdlib/Pkg.version, so when termux_step_patch_package() runs there is no file to
+	# patch and this cannot be one of the *.patch files next to this recipe (that
+	# selection is maxdepth 1, which is why it lives in patches/).  It is applied here,
+	# to the installed tree - which is what ships - and then Pkg is run once so a broken
+	# patch fails the build instead of shipping, and so the precompiled cache the
+	# package carries is not stale.  What it fixes: an Overrides.toml entry keyed by
+	# UUID+name - the version-stable form - did not stop an artifact download, because
+	# Pkg's download path never handed pkg_uuid to Artifacts.select_downloadable_artifacts(),
+	# so process_overrides() never turned the name into a hash override.  Measured A/B on
+	# the device; see PROGRESS.md.
+	_versdir="v${TERMUX_PKG_VERSION%.*}"
+	_pkgdir="${TERMUX_PREFIX}/share/julia/stdlib/${_versdir}/Pkg"
+	[ -f "${_pkgdir}/src/Operations.jl" ] ||
+		termux_error_exit "Pkg sources are not installed at ${_pkgdir}"
+	patch -p1 -d "${TERMUX_PREFIX}/share/julia/stdlib/${_versdir}" \
+		-i "${TERMUX_PKG_BUILDER_DIR}/patches/Pkg-Operations.jl.patch"
+	"${TERMUX_PREFIX}/bin/julia" --startup-file=no -e 'using Pkg; Pkg.activate(mktempdir())' ||
+		termux_error_exit "the patched Pkg does not run"
+	unset _versdir _pkgdir
+
 	# Fail here rather than in the artifact smoke test: a sysimage-less or
 	# codegen-less julia installs cleanly and then does not run.
 	for _f in "${TERMUX_PREFIX}/bin/julia" \
