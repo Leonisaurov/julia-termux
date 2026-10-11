@@ -59,12 +59,17 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
+          # A report, not a check: the first run failed here (tar exits 2 on a glob that
+          # matched nothing) and buried the real failure under it.
           {
             echo "## fftw-bionic"
             echo "- output:"
-            ls -l output/ 2>/dev/null | sed 's/^/      /'
+            ls -l output/ 2>/dev/null | sed 's/^/      /' || true
             echo "- the artifact, as tar sees it:"
-            tar tzf output/fftw-bionic-*.tar.gz 2>/dev/null | head -12 | sed 's/^/      /'
+            for t in output/fftw-bionic-*.tar.gz; do
+              [ -f "$t" ] || { echo "      (no tarball)"; continue; }
+              tar tzf "$t" | head -12 | sed 's/^/      /'
+            done
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the artifact

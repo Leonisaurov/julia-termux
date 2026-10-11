@@ -37,6 +37,10 @@ FFTW_URL="https://fftw.org/fftw-${FFTW_VERSION}.tar.gz"
 SONAME_REAL_SUFFIX="3.7.11"
 
 OUT="${1:?usage: build-fftw-bionic.sh <outdir>}"
+# Create the parent before normalising through `cd`: the first CI run normalised an
+# outdir whose parent did not exist yet, the substitution came back empty, and the build
+# tried to write /fftw-bionic.
+mkdir -p "$(dirname "$OUT")"
 OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fftw-bionic.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
