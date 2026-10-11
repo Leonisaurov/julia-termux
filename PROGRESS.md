@@ -893,6 +893,43 @@ tocó `packages/julia` ni `scripts/`: son del entorno del runner.
    O sea: **la puerta quedó en el modo soportado**, a 0,43 GB en vez de 6,86 GB y
    con un binario de 1,67 MB en vez de 212 MB.
 
+   **Y compila EN el teléfono (2026-10-10, medido acá).**  Con el paquete con el fix
+   instalado (`pacman -U` del bundle de `38076829471`):
+
+   ```
+   $ juliac --experimental --trim=safe --output-exe hello hello.jl
+   juliac rc=0 en 55 s          -> binario de 1.628.472 B
+   $ ./hello
+   COMPILADO EN EL TELEFONO con --trim=safe        rc=0
+   ```
+
+   Un detalle del entorno que hubo que resolver en el camino, y que **no** aparece en
+   CI: el link fallaba con
+
+   ```
+   ld.lld: error: undefined reference: _Unwind_GetRegionStart@LIBC_R
+   >>> referenced by /data/data/com.termux/files/usr/lib/libjulia.so
+   ```
+
+   Las referencias versionadas `_Unwind_*@LIBC_R` las provee el `libc` de Android
+   (`/system/lib64/libc.so` las define, 54 versiones `LIBC_R`), y clang las busca
+   primero en `$PREFIX/aarch64-linux-android/lib/libc.so` — que en este teléfono es
+   un **stub de `ndk-multilib`** que **no** define `LIBC_R` ni `_Unwind_*`, así que
+   tapa al `libc` real (`llvm-readelf --version-info` da 0).  En el runner ese
+   paquete no está instalado y por eso allá el mismo link pasa.  Dos arreglos
+   medidos acá: `-L/system/lib64` (que ponga el libc real en el camino) o
+   `-Wl,--allow-shlib-undefined` (que es el default de GNU ld para ejecutables, y lo
+   que corresponde: `libjulia.so` referencia símbolos que la plataforma resuelve al
+   cargar).  Como `juliac` respeta `JULIA_CC` (que parte por shell-split), se usa sin
+   tocar nada:
+
+   ```
+   JULIA_CC="clang -Wl,--allow-shlib-undefined" juliac --experimental --trim=safe ...
+   ```
+
+   Queda como **decisión pendiente** si el wrapper `bin/juliac` del port debe traer
+   ese default (implica otro build completo), o si alcanza con documentarlo.
+
 ---
 
 ## Notas para el próximo agente
