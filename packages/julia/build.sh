@@ -50,6 +50,29 @@ TERMUX_PKG_UNDEF_SYMBOLS_FILES="
 # termux_step_patch_package() before configure.  patches/deps/*.patch are
 # content patches for Julia's own bundled deps; deps/*.mk reads them from
 # $(SRCDIR)/patches/, because deps/Makefile redefines SRCDIR to deps/ itself.
+# The triplet the sysimage embeds as Base.BUILD_TRIPLET, and therefore what
+# Base.BinaryPlatforms.HostPlatform() reports.
+#
+# It is a shell variable handed to make on the command line, not a Make.user line: the
+# "X := Y" lines inside termux_step_configure go into Make.user, and Make.inc would read its own
+# default first and win that race, while a command-line variable beats Make.inc's assignment.
+# It is not written with make syntax here either - shellcheck reads "NAME := value" as a command
+# and fails the CI lint at -S error (measured, run 38167513434).
+#
+# Make.inc:1380 derives the triplet from the host compiler's -dumpmachine through
+# contrib/normalize_triplet.py, and this build runs on an Ubuntu arm64 runner, so that answers
+# aarch64-linux-gnu and the host platform came out glibc - which is why every JLL cheerfully
+# downloads the glibc artifact and then cannot load it.  The port's normalize_triplet patch
+# rewrites an android triplet to -gnu for the opposite reason (measured: the sysimage build died
+# when the triplet could not be parsed at all, run 37841320064); base-binaryplatforms.jl.patch now
+# teaches the grammar android => libc="bionic", so that rewrite is no longer what we want and the
+# value is set here instead of derived.
+#
+# Keep it in the form the script would emit: arch-platform-libc[-callabi][-libgfortranN][-cxxNN].
+# No libgfortran tag on purpose: Bionic has no libgfortran, and base/Makefile asks the loader for
+# it without ALLOW_FAILURE when the tag is present.
+BUILD_TRIPLET_OVERRIDE="BB_TRIPLET_LIBGFORTRAN_CXXABI=aarch64-linux-android-cxx11"
+
 termux_step_pre_configure() {
 	mkdir -p "${TERMUX_PKG_SRCDIR}/deps/patches"
 	# shellcheck disable=SC2086
@@ -95,23 +118,6 @@ LOCALBASE=${TERMUX_PREFIX}
 USE_BINARYBUILDER := 0
 JULIA_CPU_TARGET := generic
 
-# The triplet the sysimage embeds as `Base.BUILD_TRIPLET`, and therefore what
-# Base.BinaryPlatforms.HostPlatform() reports.
-#
-# Make.inc:1380 derives it from `$(HOSTCC) -dumpmachine` through contrib/normalize_triplet.py,
-# and this build runs on an *Ubuntu arm64* runner, so that answers aarch64-linux-gnu and the
-# host platform came out glibc - which is why every JLL cheerfully downloads the glibc artifact
-# and then cannot load it.  The port's contrib-normalize_triplet.py.patch rewrites an android
-# triplet to -gnu for the opposite reason (measured: the sysimage build died when the triplet
-# could not be parsed at all, run 37841320064); base-binaryplatforms.jl.patch now teaches the
-# grammar `-android` => libc="bionic", so the rewrite is no longer what we want and the value is
-# set here instead of derived.  A command-line variable overrides the makefile's `:=`, so the
-# script is not even called.
-#
-# Keep it in the form the script would emit: arch-platform-libc[-callabi][-libgfortranN][-cxxNN].
-# No libgfortran tag on purpose: Bionic has no libgfortran, and base/Makefile asks the loader for
-# it without ALLOW_FAILURE when the tag is present.
-BUILD_TRIPLET_OVERRIDE := BB_TRIPLET_LIBGFORTRAN_CXXABI=aarch64-linux-android-cxx11
 
 # Julia 1.12 pins LLVM 18.1.7 with Julia's own patches and a JL_LLVM_18.1
 # symbol version; Termux only offers LLVM 21, so build it from deps/llvm.mk.

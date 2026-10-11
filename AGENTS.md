@@ -158,3 +158,24 @@ darle ese nombre y quitarlo después, para no cambiar el payload.  Los pasos que
 `termux_step_post_make_install` (chequeo del parche de `Pkg`) y el paso `juliac compiles
 with --trim=safe` del workflow.  Costó el run `38130225817`: 58 min de build que murieron en
 el chequeo, con el parche ya aplicado.
+
+## El lint del CI corre shellcheck; el gate local no
+
+`build-package.yml` corre `shellcheck -S error scripts/*.sh packages/*/*.sh` y **falla** con eso,
+pero `scripts/rehearse-recipe.sh` no lo invoca (shellcheck no está instalado en el teléfono), así
+que hay una clase de error que pasa local y muere en CI a los 2 minutos.  Caso medido: escribir
+`BUILD_TRIPLET_OVERRIDE := BB_TRIPLET_LIBGFORTRAN_CXXABI=…` en `packages/julia/build.sh` — una
+asignación con sintaxis **de Makefile** dentro de un script de shell — da
+*"This is interpreted as a command name containing '='. Bad assignment"* (run 38167513434).
+Antes de empujar algo que toque un `build.sh`, correr `shellcheck -S error` si está disponible, o
+mirar que ninguna línea nueva use `X := Y` (y que los backticks en comentarios no abran nada).
+
+## En la receta, `X := Y` es contenido de `Make.user`, no shell
+
+Las líneas `ALGO := valor` de `packages/julia/build.sh` viven dentro del heredoc
+`cat > Make.user <<-EOF` de `termux_step_configure`, así que son **Makefile**.  Una variable de
+shell para pasarle a `make` en la línea de comandos tiene que estar en el **nivel superior** del
+script (antes de las funciones), o no existe cuando `termux_step_make` la usa: con `set -u` eso
+aborta el build.  Verificado con `grep -n` que la definición quede por encima de
+`cat > Make.user`, no con un chequeo contra el `EOF` (el heredoc *empieza* antes, y comparar
+contra el `EOF` da un falso OK).
