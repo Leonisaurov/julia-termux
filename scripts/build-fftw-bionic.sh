@@ -42,26 +42,40 @@ OUT="${1:?usage: build-fftw-bionic.sh <outdir>}"
 # tried to write /fftw-bionic.
 mkdir -p "$(dirname "$OUT")"
 OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/fftw-bionic.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
 
-echo "== fetching fftw $FFTW_VERSION (sha256 pinned)"
-# The fetch comes first, before the prefix is on PATH: on the CI runners bionic has no DNS
-# (the termux-builder action documents it), so the host's curl is the one that resolves.
-CURL=curl
-if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "${TERMUX_BUILDER_HOSTBIN}/curl" ]; then
-	CURL="${TERMUX_BUILDER_HOSTBIN}/curl"
+# 1. The tarball, before the prefix is anywhere near this process.  On the CI runners
+#    bionic has no DNS (the termux-builder action documents it and routes its own fetches
+#    through the host's curl), so the host's curl is the one that resolves.  The cache
+#    lives outside the workdir because the re-exec below replaces this process.
+CACHE="${TMPDIR:-/tmp}/fftw-${FFTW_VERSION}.tar.gz"
+if [ ! -f "$CACHE" ]; then
+	CURL=curl
+	if [ -n "${TERMUX_BUILDER_HOSTBIN:-}" ] && [ -x "${TERMUX_BUILDER_HOSTBIN}/curl" ]; then
+		CURL="${TERMUX_BUILDER_HOSTBIN}/curl"
+	fi
+	echo "== fetching fftw $FFTW_VERSION (sha256 pinned)"
+	"$CURL" -sSL --fail -o "$CACHE.part" "$FFTW_URL"
+	mv "$CACHE.part" "$CACHE"
 fi
-"$CURL" -sSL --fail -o "$WORK/fftw.tar.gz" "$FFTW_URL"
-echo "$FFTW_SHA256  $WORK/fftw.tar.gz" | sha256sum -c -
+echo "$FFTW_SHA256  $CACHE" | sha256sum -c -
 
-# Now the toolchain: clang, make, patchelf, nm.  It brings libtermux-exec with it, which
-# is what lets configure and the Makefiles resolve /bin/sh and /usr/bin/env the way they
-# assume; on a phone there is no such file and the prefix is already the PATH.
-if [ -n "${TERMUX_BUILDER_ENV:-}" ] && [ -f "$TERMUX_BUILDER_ENV" ]; then
+# 2. Re-exec under the prefix's own bash before touching the toolchain, the way
+#    build-package.sh is launched.  Sourcing the action's environment puts the bionic
+#    libtermux-exec in LD_PRELOAD; the runner's /bin/sh is glibc, and its loader reads
+#    that preload as an ELF, resolves its DT_NEEDED "libc.so" against Debian's linker
+#    script and dies with "invalid ELF header" (measured: exit 127 in the first CI run).
+#    Run by the prefix's bash the preload is real, /bin/sh inside configure resolves into
+#    the prefix, and the FHS paths the Makefiles assume work.
+if [ -n "${TERMUX_BUILDER_ENV:-}" ] && [ -f "$TERMUX_BUILDER_ENV" ] &&
+	[ "${FFTW_BIONIC_REEXEC:-0}" != 1 ]; then
 	# shellcheck disable=SC1090 # the path is the action's, not a file in this repo
 	. "$TERMUX_BUILDER_ENV"
+	export FFTW_BIONIC_REEXEC=1
+	exec "${TERMUX_BUILDER_ROOT:-/data/data/com.termux/files/usr}/bin/bash" "$0" "$@"
 fi
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/fftw-bionic.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -72,7 +86,7 @@ for pass in double float; do
 	src="$WORK/src-$pass"
 	build="$WORK/build-$pass"
 	mkdir -p "$src" "$build"
-	tar xzf "$WORK/fftw.tar.gz" -C "$src" --strip-components=1
+	tar xzf "$CACHE" -C "$src" --strip-components=1
 	extra=()
 	[ "$pass" = float ] && extra+=(--enable-float)
 	echo "== building $pass"
@@ -80,7 +94,7 @@ for pass in double float; do
 		cd "$build"
 		"$src/configure" --prefix="$OUT" --enable-shared --disable-static \
 			--enable-threads --with-combined-threads --enable-neon --disable-fortran \
-			"${extra[@]}" CFLAGS="-O3 -fPIC" > "$WORK/configure-$pass.log"
+			"${extra[@]}" CC=clang CFLAGS="-O3 -fPIC" > "$WORK/configure-$pass.log"
 		make -j2 > "$WORK/make-$pass.log"
 		make install >> "$WORK/make-$pass.log"
 	)
