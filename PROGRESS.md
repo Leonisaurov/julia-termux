@@ -320,6 +320,46 @@ y `Warning: git information unavailable`.  NO es ruido `error: linker cannot loa
 itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
+### El primer JLL bionic: FFTW (2026-10-11)
+
+`FFTW_jll` era el único `needs-jll` del seed clasificado: el artefacto oficial es glibc (no
+carga: `libm.so.6`) y el `fftw` de Termux usa el layout de upstream (threads en
+`libfftw3_threads.so`, sin codelets NEON) mientras el JLL y su consumidor esperan el layout
+oficial (threads fusionado en `libfftw3`).
+
+`scripts/build-fftw-bionic.sh` + `.github/workflows/build-fftw-bionic.yml` (separado a
+propósito: minutos en vez de una hora, y no toca `packages/julia/**`, así que no puede
+invalidar la caché del artefacto de julia) construyen la librería nativa con el clang
+bionic y la empaquetan como el oficial:
+
+- dos pasadas de configure (fftw construye **una precisión por vez**): `--enable-shared
+  --disable-static --enable-threads --with-combined-threads --enable-neon --disable-fortran`,
+  la segunda con `--enable-float`;
+- el layout se arma a mano porque **libtool ignora `-version-info` en este host** (su
+  `config.guess` no conoce el triplete Android; medido: el `.la` salió
+  `library_names='libfftw3.so libfftw3.so'` aunque el Makefile tenía
+  `SHARED_VERSION_INFO = 10:11:7`): archivo real `.so.3.7.11`, `patchelf --set-soname
+  libfftw3.so.3` y los dos symlinks;
+- el test de aceptación no es "compiló": un programa bionic que carga la librería **por
+  soname**, llama `fftw_init_threads()`, pone 2 threads y hace una DFT — las tres cosas que
+  FFTW.jl hace y que fallaban.
+
+Medido en el dispositivo, con el artefacto instalado y el artefacto glibc **apartado del
+depot**:
+
+```
+libfftw3_path = .../fftw-bionic/lib/libfftw3.so
+fft/ifft ok = true   rfft ok = true   FFTW.get_num_threads() = 2
+depot: sin descarga
+```
+
+y el test en C: `dc[1] = -4.000 9.657` (el binomio 1 de la DFT de 0..7).
+
+Lo que **no** tiene: los wrappers Fortran (`dfftw_*`/`sfftw_*`), que fftw genera con un
+compilador Fortran y este entorno no tiene.  Son los 102 símbolos que el clasificador
+reporta como único gap contra el artefacto oficial, y ningún consumidor de Julia los usa
+(FFTW.jl va por el API C).
+
 ### El lado del consumo: `Pkg` honra los overrides por UUID+nombre (2026-10-11)
 
 Con el override **por hash** un JLL se resuelve contra la librería bionic del sistema sin

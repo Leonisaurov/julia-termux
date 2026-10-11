@@ -1,0 +1,93 @@
+# The bionic FFTW artifact for FFTW_jll - the first JLL this port can consume without
+# downloading anything.
+#
+# Separate from build-package.yml on purpose, and that is the whole point of it: it takes
+# minutes instead of an hour, it does not touch packages/julia/** (so it cannot invalidate
+# that artifact's cache), and its own concurrency group means a change here can never
+# cancel a julia build.
+#
+# What it produces is the artifact, not a package: an Overrides.toml entry points
+# FFTW_jll's artifact at it, which stops the glibc download and makes the library load.
+# See scripts/build-fftw-bionic.sh for why the official artifact cannot work here and for
+# the measurement of the result.
+name: build-fftw-bionic
+
+on:
+  push:
+    paths:
+      - .github/workflows/build-fftw-bionic.yml
+      - scripts/build-fftw-bionic.sh
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: upload the artifact to the fftw-bionic release
+        type: boolean
+        default: false
+
+concurrency:
+  group: fftw-bionic
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/zram
+        continue-on-error: true
+
+      # The same prefix the julia build uses, so the same clang, make, patchelf and
+      # binutils.  This resolves the recipe's dependency closure; it does not build it.
+      - name: Materialise the Termux prefix
+        uses: ./.github/actions/termux-builder
+        with:
+          recipe: packages/julia/build.sh
+
+      - name: Build the artifact
+        run: |
+          set -euo pipefail
+          # The artifact root is a subdirectory: the tarball is written next to it, or it would
+          # be packaged inside itself.
+          bash scripts/build-fftw-bionic.sh "$GITHUB_WORKSPACE/output/fftw-bionic"
+
+      - name: Where the time went
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## fftw-bionic"
+            echo "- output:"
+            ls -l output/ 2>/dev/null | sed 's/^/      /'
+            echo "- the artifact, as tar sees it:"
+            tar tzf output/fftw-bionic-*.tar.gz 2>/dev/null | head -12 | sed 's/^/      /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fftw-bionic
+          path: |
+            output/fftw-bionic-*.tar.gz
+            output/fftw-bionic-*.tar.gz.sha256
+          if-no-files-found: warn
+
+      - name: Publish to the fftw-bionic release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          gh release view fftw-bionic -R "$REPO" >/dev/null 2>&1 || gh release create \
+            fftw-bionic -R "$REPO" --title "fftw-bionic (artifact)" --notes \
+            "The bionic FFTW artifact FFTW_jll can load on Termux.  Not a package: an Overrides.toml entry points the JLL's artifact here.  See scripts/build-fftw-bionic.sh."
+          gh release upload fftw-bionic -R "$REPO" --clobber \
+            output/fftw-bionic-*.tar.gz output/fftw-bionic-*.tar.gz.sha256
+          gh release view fftw-bionic -R "$REPO" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) bytes"'
