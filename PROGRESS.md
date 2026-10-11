@@ -1161,3 +1161,14 @@ tocó `packages/julia` ni `scripts/`: son del entorno del runner.
 - `~/.termux-build` del runner es cache de trabajo; `gh run view <id> --json
   status,conclusion` es la fuente de verdad, `gh run watch` devolvió 0 en runs
   fallidos.
+
+## 2026-10-11 — Registro propio publicado; el patch de plataforma sigue sin publicar
+
+- El fork `Leonisaurov/JLLWrappers.jl` (1.8.2) y el registro `Leonisaurov/TermuxRegistry` están
+  publicados y verificados en el dispositivo: un env limpio resuelve el JLLWrappers del fork.
+- El paquete con el patch de plataforma (corrida 38168561427) sigue **sin publicar**: con
+  `HostPlatform()` en bionic, `Artifacts.artifact_meta` no encuentra entrada para el artefacto y el
+  JLL muere antes de elegir wrapper.  Hace falta un patch fail-closed en la stdlib `Artifacts`
+  (reintentar la entrada glibc del mismo arch/os **sólo si ese hash está overridden**) y un rebuild.
+  Diagnóstico completo en `../Yggdrasil-termux/docs/13` §13.9.
+- `julia-latest` y el dispositivo siguen con el paquete que funciona (glibc, 37/37, consumidores).
