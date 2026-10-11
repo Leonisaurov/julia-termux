@@ -498,9 +498,11 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           DEB=$(ls output/julia_*_aarch64.deb 2>/dev/null || true)
           [ -n "$DEB" ] || { echo "no julia .deb to check"; exit 1; }
-          # PATH and TMPDIR only: libtermux-exec rewrites /usr paths, and the host's
-          # git is needed below for the registry.  Same reasoning as the probe.
-          export PATH="$TERMUX_PREFIX/bin:$PATH" TMPDIR="$TERMUX_PREFIX/tmp"
+          # PATH and TMPDIR only, and $PREFIX (the value the action publishes in
+          # GITHUB_ENV) rather than the sourced env file's TERMUX_PREFIX: not sourcing
+          # that file is deliberate, LD_PRELOAD would rewrite /usr/bin/git into the
+          # prefix's bionic git, which has no DNS.
+          export PATH="$PREFIX/bin:$PATH" TMPDIR="$PREFIX/tmp"
           dpkg-deb -x "$DEB" /
           # juliac's first act is Pkg.precompile(), and Pkg answers a depot with no
           # registry by installing one; bionic has no DNS on these runners, so the
@@ -521,7 +523,7 @@ jobs:
             '    return Cint(0)' \
             'end' > "$W/hello.jl"
           ( cd "$W" && JULIA_PKG_OFFLINE=true \
-              "$TERMUX_PREFIX/bin/juliac" --experimental --trim=safe --output-exe hello hello.jl )
+              "$PREFIX/bin/juliac" --experimental --trim=safe --output-exe hello hello.jl )
           out=$("$W/hello")
           [ "$out" = "juliac ok" ] || { echo "the trimmed binary printed: [$out]"; exit 1; }
           echo "juliac --trim=safe built a $(stat -c %s "$W/hello") byte binary and it ran"
