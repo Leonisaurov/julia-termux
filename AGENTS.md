@@ -147,3 +147,14 @@ están **sin demostrar**. Donde `PROGRESS.md` dice "compila", no escribas
 | cómo se materializa el prefijo en el runner | `.github/actions/termux-builder/action.yml` |
 | el gate local completo | `scripts/rehearse-recipe.sh` |
 | derivación de sonames / triplet / alias versionados / directorio buscado por el loader / guardas de `dlopen` | `scripts/symlinked-libraries.sh`, `scripts/embedded-triplet.sh`, `packages/julia/soname-aliases.sh`, `scripts/unguarded-dlopen.sh`, `scripts/runtime-library-dir.sh` |
+
+## El prefijo del runner no tiene el `libm.so` del teléfono
+
+`libjulia.so` pide `$PREFIX/lib/julia/libm.so`.  En un teléfono eso lo responde
+`$PREFIX/lib/libm.so -> /system/lib64/libm.so` (symlink del **bootstrap**, ningún `.deb` lo
+posee) y un prefijo armado solo con `.deb` —el del runner— no tiene ninguno de los dos.
+Cualquier paso, de la receta o del workflow, que **ejecute la julia instalada** tiene que
+darle ese nombre y quitarlo después, para no cambiar el payload.  Los pasos que lo hacen:
+`termux_step_post_make_install` (chequeo del parche de `Pkg`) y el paso `juliac compiles
+with --trim=safe` del workflow.  Costó el run `38130225817`: 58 min de build que murieron en
+el chequeo, con el parche ya aplicado.
