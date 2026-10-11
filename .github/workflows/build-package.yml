@@ -258,6 +258,11 @@ jobs:
           size=$(du -sk "$W/data" | cut -f1)
           sed -i "s/^Installed-Size: .*/Installed-Size: $size/" "$W/DEBIAN/control"
           dpkg-deb -b "$W" "$DEB"
+          # This path skipped the build, so the prefix holds no julia - and the check a
+          # few steps down runs julia from there.  Put the payload back, from the tree
+          # already unpacked here instead of a second extraction (extracting into / is
+          # what the check used to do and could not, see there).
+          cp -a "$W/$P/." "$PREFIX/"
           rm -rf "$W"
           now=$(sha256sum packages/juliac/juliac | cut -d' ' -f1)
           echo "launcher in the restored .deb: $was"
@@ -545,7 +550,18 @@ jobs:
           # that file is deliberate, LD_PRELOAD would rewrite /usr/bin/git into the
           # prefix's bionic git, which has no DNS.
           export PATH="$PREFIX/bin:$PATH" TMPDIR="$PREFIX/tmp"
-          dpkg-deb -x "$DEB" /
+          # No extraction here, and that is the fix for two failures: `dpkg-deb -x"$DEB" /`
+          # died on the runner with
+          #   tar: .: Cannot utime: Operation not permitted
+          #   dpkg-deb: error: tar subprocess returned error exit status 2
+          # two seconds into run 38115541330, after a 62-minute build that had already
+          # passed the inspection - and on the device, where the same tar can run, it
+          # answers `tar: /: Cannot open: Permission denied`: tar's opinion about the
+          # extraction root is not something either place can offer.  It is also not
+          # needed.  On a full build the recipe's `make install` left julia in the
+          # prefix; on a cache hit the repack step put the payload back from the tree it
+          # had already unpacked.  Either way this runs the tree the .deb was built from,
+          # which is what the inspection above just asserted byte for byte.
           # juliac's first act is Pkg.precompile(), and Pkg answers a depot with no
           # registry by installing one; bionic has no DNS on these runners, so the
           # registry comes from the host's git.  It is never searched - the environment
@@ -608,12 +624,16 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload the artifact
-        if: success()
+        # always(), with a warning instead of an error when there is nothing: the
+        # artifact of a *failed* run is the thing worth looking at, and twice now
+        # (38101288622, 38115541330) the .deb was thrown away with the run after a
+        # check step failed - leaving nothing to inspect or re-verify locally.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: julia-deb
           path: output/julia_*_aarch64.deb
-          if-no-files-found: error
+          if-no-files-found: warn
 
   bundle:
     name: Repackage for pacman and bundle

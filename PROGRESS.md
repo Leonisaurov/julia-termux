@@ -320,27 +320,50 @@ y `Warning: git information unavailable`.  NO es ruido `error: linker cannot loa
 itself`: ese era la causa de 37811196090, y aparecerá igual en todo proceso que
 pida `dlopen` del linker del runner.
 
-### Un stall del runner, no del build (run 38105032022, 2026-10-11)
+### Un stall, dos bugs de chequeo y el costo de verificarlos (2026-10-11)
 
-El run que iba a publicar el launcher desde `packages/juliac/` clavó el paso
-`Build the package` **más de dos horas**, con el build ya compilado y el log sin nada
-más que el warning de bionic (`failed to find generated linker configuration from
-/linkerconfig/ld.config.txt`) cada tanto.  Evidencia de que es el runner y no la receta:
+Tres runs seguidos para publicar un launcher que ya funcionaba, y la lección no está en
+la receta sino en **cuánto cuesta que falle un test**.
 
-- los seis builds completos del mismo workflow tardaron **57.0, 58.3, 58.4, 59.8, 61.0 y
-  62.2 min** (spread ±5%, mismo pool de 4 vCPU / 15.9 GB / 3 GB de zram), y el run
-  **38101288622** -receta idéntica a esta, con el launcher ya stageado en `packages/juliac/`
-  e instalado con `install`- completó todo el build en 59.8 min;
-- "cada cierto tiempo aparece un warning" es un **estancamiento** (un exec cada tanto),
-  no un bucle de execs;
-- el warning no puede venir del paso: `build-package.yml:341` lo filtra con
-  `grep -vE 'linkerconfig|ld.config.txt'`.
+**El stall fue del runner, no del build.**  El run `38105032022` clavó `Build the
+package` más de dos horas con el build ya compilado.  El `build.log` que se sube al
+cancelar (5,4 MB) termina en la **precompilación de stdlibs**: 106 pkgimages y ahí se
+corta.  Comparando con un build verde, los dos únicos que faltan son `REPL -O3` y
+`Pkg → REPLExt -O3` - o sea, se colgó en REPL, el más pesado (su hermana tardó 69,8 s).
+Los seis builds completos del workflow tardan **57,0 / 58,3 / 58,4 / 59,8 / 61,0 /
+62,2 min** (spread ±5%, mismo pool de 4 vCPU / 15,9 GB / 3 GB de zram), y el run
+`38115541330` completó **la misma receta** en 62 min: la receta no es lo que se cuelga.
+El sampler tomó **578 muestras** y midió `lowest MemAvailable = 8.976.276 kB` (~9 GB
+libres) y `no OOM line in dmesg`: nada de memoria, el workload quedó idle.
 
-La mejora que sale de esto no es un reintento ciego, es que un stall deje de ser
-invisible: el paso pasa por `timeout 5400` (1.5x la peor corrida sana) y el sampler
-anota el disco (`df -h`) junto a la memoria.  Antes, un stall así lo mataba el timeout
-de 300 min del job, que **no** corre los pasos de fallo: se llevaba `build.log` (el único
-registro de qué estaba haciendo) y el `memwatch.log`.
+**Dos bugs míos costaron dos builds de 60 min**, los dos en pasos *de verificación*, no
+en el artefacto:
+
+| run | qué pasó | causa |
+|---|---|---|
+| `38101288622` | build ✅ + inspección ✅, perdió la caché | mi paso de juliac falló por `TERMUX_PREFIX` (variable que no existe ahí) **y el `Save the artifact cache` estaba después del chequeo** |
+| `38115541330` | build ✅ (62 min) + inspección ✅, falló a los 2 s | `dpkg-deb -x "$DEB" /` → `tar: .: Cannot utime: Operation not permitted`.  En el teléfono el mismo tar responde `tar: /: Cannot open: Permission denied`: la opinión de tar sobre la raíz de extracción no la da ninguno de los dos entornos |
+
+Lo que quedó, y es lo que evita que vuelva a pasar:
+
+- **La caché se guarda entre la inspección y el chequeo de juliac.**  La inspección es
+  la guarda fail-closed sobre el payload (lo que hace que valga la pena cachear); el
+  chequeo de juliac es un contrato de *comportamiento* que además corre con caché, así
+  que un bug suyo no puede tirar el build que estaba verificando.  Un chequeo en rojo
+  sigue bloqueando la publicación (el job publish depende de éste).
+- **El chequeo ya no extrae nada.**  En un build completo `make install` dejó julia en
+  el prefijo; en un cache hit el reempaquetado copia el payload desde el árbol que ya
+  tenía desempacado (`cp -a "$W/$P/." "$PREFIX/"`).  Verificado en el teléfono corriendo
+  el texto exacto de los dos pasos del YAML: rc=0 y `juliac --trim=safe built a 1627000
+  byte binary and it ran`.
+- **El sampler nombra al culpable.**  Nunca pudo decir qué proceso se colgó: `pgrep -x
+  julia` no matcheó nada en 578 muestras y la última muestra no tiene ni salida de `ps`,
+  mientras que en el teléfono ambos responden bien.  Ahora lee `/proc/<pid>/stat` directo
+  y anota `utime+stime`, que es lo que separa un **spin** (el número crece con el
+  intervalo de muestreo) de una **espera** (no se mueve).  Verificado: `comm` y `rss_kb`
+  coinciden con `ps`, y un busy loop de 3 s va de 95 a 269 ticks.
+- **`Upload the artifact` es `always()`** con `if-no-files-found: warn`: el `.deb` de un
+  run fallido es justo lo que hay que mirar, y se perdió dos veces con el run.
 
 ### Tramo siguiente (`sys-o.a` + precompile): riesgos ya medidos
 
