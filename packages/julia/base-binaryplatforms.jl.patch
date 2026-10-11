@@ -1,0 +1,31 @@
+--- a/base/binaryplatforms.jl
++++ b/base/binaryplatforms.jl
+@@ -214,7 +214,7 @@
+     throw_libc_mismatch() = throw(ArgumentError("Invalid os/libc combination: $(tags["os"])/$(tags["libc"])"))
+     if tags["os"] == "linux"
+         # Linux always has a `libc` entry
+-        if tags["libc"] ∉ ("glibc", "musl")
++        if tags["libc"] ∉ ("glibc", "musl", "bionic")
+             throw_libc_mismatch()
+         end
+     else
+@@ -576,6 +576,11 @@
+         return ""
+     elseif lc === "glibc"
+         return "-gnu"
++    elseif lc === "bionic"
++        # The canonical triplet of a bionic platform is `…-android`: it is what the C compiler on
++        # the device reports (`clang -dumpmachine` = aarch64-unknown-linux-android24) and what
++        # this port bakes into BUILD_TRIPLET, so rendering it as "-bionic" would not round trip.
++        return "-android"
+     else
+         return string("-", lc)
+     end
+@@ -653,6 +658,7 @@
+     "libc_nothing" => "",
+     "glibc" => "-gnu",
+     "musl" => "-musl",
++    "bionic" => "-android",
+ )
+ const call_abi_mapping = Dict(
+     "call_abi_nothing" => "",

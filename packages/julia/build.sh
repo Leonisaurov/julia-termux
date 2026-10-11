@@ -95,6 +95,24 @@ LOCALBASE=${TERMUX_PREFIX}
 USE_BINARYBUILDER := 0
 JULIA_CPU_TARGET := generic
 
+# The triplet the sysimage embeds as `Base.BUILD_TRIPLET`, and therefore what
+# Base.BinaryPlatforms.HostPlatform() reports.
+#
+# Make.inc:1380 derives it from `$(HOSTCC) -dumpmachine` through contrib/normalize_triplet.py,
+# and this build runs on an *Ubuntu arm64* runner, so that answers aarch64-linux-gnu and the
+# host platform came out glibc - which is why every JLL cheerfully downloads the glibc artifact
+# and then cannot load it.  The port's contrib-normalize_triplet.py.patch rewrites an android
+# triplet to -gnu for the opposite reason (measured: the sysimage build died when the triplet
+# could not be parsed at all, run 37841320064); base-binaryplatforms.jl.patch now teaches the
+# grammar `-android` => libc="bionic", so the rewrite is no longer what we want and the value is
+# set here instead of derived.  A command-line variable overrides the makefile's `:=`, so the
+# script is not even called.
+#
+# Keep it in the form the script would emit: arch-platform-libc[-callabi][-libgfortranN][-cxxNN].
+# No libgfortran tag on purpose: Bionic has no libgfortran, and base/Makefile asks the loader for
+# it without ALLOW_FAILURE when the tag is present.
+BUILD_TRIPLET_OVERRIDE := BB_TRIPLET_LIBGFORTRAN_CXXABI=aarch64-linux-android-cxx11
+
 # Julia 1.12 pins LLVM 18.1.7 with Julia's own patches and a JL_LLVM_18.1
 # symbol version; Termux only offers LLVM 21, so build it from deps/llvm.mk.
 USE_SYSTEM_LLVM := 0
@@ -231,14 +249,14 @@ termux_step_make() {
 	# Precompilation spawns one Julia process per task; keep it at the same
 	# width as the make parallelism so the runner's memory is not oversubscribed.
 	export JULIA_NUM_PRECOMPILE_TASKS="${TERMUX_PKG_MAKE_PROCESSES}"
-	make -j"${TERMUX_PKG_MAKE_PROCESSES}"
+	make -j"${TERMUX_PKG_MAKE_PROCESSES}" "${BUILD_TRIPLET_OVERRIDE}"
 }
 
 termux_step_make_install() {
 	cd "${TERMUX_PKG_SRCDIR}"
 	# The install target fixes rpaths and rewrites the loader's DEP_LIBS
 	# string; it is not parallel-safe.
-	make -j1 install prefix="${TERMUX_PREFIX}" DESTDIR=
+	make -j1 install prefix="${TERMUX_PREFIX}" DESTDIR= "${BUILD_TRIPLET_OVERRIDE}"
 }
 
 termux_step_post_make_install() {
