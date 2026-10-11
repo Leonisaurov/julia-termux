@@ -68,7 +68,9 @@ jobs:
             echo "- the artifact, as tar sees it:"
             for t in output/fftw-bionic-*.tar.gz; do
               [ -f "$t" ] || { echo "      (no tarball)"; continue; }
-              tar tzf "$t" | head -12 | sed 's/^/      /'
+              # sed, not head: head closes the pipe and pipefail turns that SIGPIPE
+              # into a failed step (this run built the artifact and then failed here).
+              tar tzf "$t" | sed -n '1,12p' | sed 's/^/      /'
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
