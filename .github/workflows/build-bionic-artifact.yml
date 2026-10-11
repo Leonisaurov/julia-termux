@@ -1,0 +1,159 @@
+# The bionic artifacts this port consumes instead of the glibc ones: FFTW, LERC and
+# gettext-runtime.  Each of them exists because the system cannot satisfy its JLL, and each is
+# described in Yggdrasil-termux/tools/jlls-built-artifacts.txt with the evidence.
+#
+# Deliberately separate from the julia build: minutes instead of an hour, its own concurrency
+# group per recipe, and it never touches packages/julia/** (so it cannot invalidate that
+# artifact's cache).  What it produces is an artifact, not a package: an Overrides.toml entry
+# points the JLL at it, which stops the glibc download and makes the library load.
+#
+# The scripts carry the reasoning and the acceptance tests; this workflow only materialises the
+# same prefix the julia build uses and runs one of them.  See scripts/build-*-bionic.sh.
+
+name: build-bionic-artifact
+
+on:
+  push:
+    paths:
+      - .github/workflows/build-bionic-artifact.yml
+      - scripts/build-fftw-bionic.sh
+      - scripts/build-lerc-bionic.sh
+      - scripts/build-gettext-runtime-bionic.sh
+  workflow_dispatch:
+    inputs:
+      recipe:
+        description: which bionic artifact to build
+        type: choice
+        options:
+          - fftw
+          - lerc
+          - gettext-runtime
+        default: fftw
+      publish:
+        description: upload the artifact to its release
+        type: boolean
+        default: false
+
+concurrency:
+  # One group per recipe: a dispatch for lerc cannot cancel a running fftw build.
+  group: bionic-artifact-${{ inputs.recipe || 'fftw' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/zram
+        continue-on-error: true
+
+      # The same prefix the julia build uses, so the same clang, make, patchelf and
+      # binutils.  This resolves the recipe's dependency closure; it does not build it.
+      - name: Materialise the Termux prefix
+        uses: ./.github/actions/termux-builder
+        with:
+          recipe: packages/julia/build.sh
+
+      # One place that knows how each recipe maps to its script, its output directory, its
+      # release tag and its release note.  Everything below reads these, so adding an artifact
+      # is adding a branch here.
+      - name: Resolve the recipe
+        id: recipe
+        env:
+          RECIPE: ${{ inputs.recipe || 'fftw' }}
+        run: |
+          set -euo pipefail
+          case "$RECIPE" in
+            fftw)
+              script=scripts/build-fftw-bionic.sh
+              root=output/fftw-bionic
+              name=fftw-bionic
+              tag=fftw-bionic
+              note="The bionic FFTW artifact FFTW_jll can load on Termux.  Termux's fftw has upstream's split threads layout and no NEON codelets, so this is built from fftw 3.3.11 with --with-combined-threads --enable-neon.  Not a package: an Overrides.toml entry points the JLL's artifact here."
+              ;;
+            lerc)
+              script=scripts/build-lerc-bionic.sh
+              root=output/lerc-bionic
+              name=lerc-bionic
+              tag=lerc-bionic
+              note="The bionic LERC artifact LERC_jll needs on Termux: Termux packages no libLerc at all, and Libtiff (which libwebp needs) depends on it.  Built from Esri LERC 4.2.0 with the bionic clang++.  Not a package: an Overrides.toml entry points the JLL's artifact here."
+              ;;
+            gettext-runtime)
+              script=scripts/build-gettext-runtime-bionic.sh
+              root=output/gettext-runtime-bionic
+              name=gettext-runtime-bionic
+              tag=gettext-runtime-bionic
+              note="The composed override directory GettextRuntime_jll needs on Termux: Termux's gettext 1.0 ships libasprintf but not libintl, and Glib (which Cairo and HarfBuzz need) depends on this JLL.  libintl.so is built here from gettext 1.0; the rest are symlinks to the system.  Not a package: an Overrides.toml entry points the JLL's artifact here."
+              ;;
+            *)
+              echo "unknown recipe: $RECIPE" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "script=$script"
+            echo "root=$root"
+            echo "name=$name"
+            echo "tag=$tag"
+            echo "note=$note"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the artifact
+        run: |
+          set -euo pipefail
+          # The artifact root is a subdirectory: the tarball is written next to it, or it would
+          # be packaged inside itself.
+          bash "${{ steps.recipe.outputs.script }}" "$GITHUB_WORKSPACE/${{ steps.recipe.outputs.root }}"
+
+      - name: Where the time went
+        if: always()
+        env:
+          NAME: ${{ steps.recipe.outputs.name }}
+        run: |
+          set -uo pipefail
+          # A report, not a check: the first run failed here (tar exits 2 on a glob that
+          # matched nothing) and buried the real failure under it.
+          {
+            echo "## $NAME"
+            echo "- output:"
+            ls -l output/ 2>/dev/null | sed 's/^/      /' || true
+            echo "- the artifact, as tar sees it:"
+            for t in output/$NAME-*.tar.gz; do
+              [ -f "$t" ] || { echo "      (no tarball)"; continue; }
+              # sed, not head: head closes the pipe and pipefail turns that SIGPIPE
+              # into a failed step (a run built the artifact and then failed here).
+              tar tzf "$t" | sed -n '1,12p' | sed 's/^/      /'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.recipe.outputs.name }}
+          if-no-files-found: warn
+          path: |
+            output/${{ steps.recipe.outputs.name }}-*.tar.gz
+            output/${{ steps.recipe.outputs.name }}-*.tar.gz.sha256
+
+      - name: Publish to its release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.recipe.outputs.tag }}
+          NOTE: ${{ steps.recipe.outputs.note }}
+          NAME: ${{ steps.recipe.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create \
+            "$TAG" -R "$REPO" --title "$TAG (artifact)" --notes "$NOTE"
+          gh release upload "$TAG" -R "$REPO" --clobber \
+            output/$NAME-*.tar.gz output/$NAME-*.tar.gz.sha256
+          gh release view "$TAG" -R "$REPO" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) bytes"'

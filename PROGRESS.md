@@ -327,7 +327,7 @@ carga: `libm.so.6`) y el `fftw` de Termux usa el layout de upstream (threads en
 `libfftw3_threads.so`, sin codelets NEON) mientras el JLL y su consumidor esperan el layout
 oficial (threads fusionado en `libfftw3`).
 
-`scripts/build-fftw-bionic.sh` + `.github/workflows/build-fftw-bionic.yml` (separado a
+`scripts/build-fftw-bionic.sh` + `.github/workflows/build-bionic-artifact.yml` (separado a
 propósito: minutos en vez de una hora, y no toca `packages/julia/**`, así que no puede
 invalidar la caché del artefacto de julia) construyen la librería nativa con el clang
 bionic y la empaquetan como el oficial:
