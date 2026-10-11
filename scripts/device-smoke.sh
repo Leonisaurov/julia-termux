@@ -300,8 +300,6 @@ println("llvm emitted ", length(ir), " chars")
 # bin/juliac is a port addition: upstream 1.12 ships share/julia/juliac/juliac.jl
 # and no bin/ entry (Makefile:92), so the name has to be asserted by running it -
 # a packaged tool that does not exist is a defect no other check here can see.
-# `--help` exits before any compilation, so this stays cheap: do not turn it into a
-# real compile, that path needs more memory than this phone has (see PROGRESS.md).
 if command -v juliac >/dev/null 2>&1; then
 	jlog="$WORK/out.juliac.log"
 	if timeout "${TIMEOUT:-900}" juliac --help >"$jlog" 2>&1 && grep -q 'output-exe' "$jlog"; then
@@ -315,6 +313,52 @@ if command -v juliac >/dev/null 2>&1; then
 else
 	printf 'FAIL  juliac_launcher (no juliac on PATH)\n'
 	fail=$((fail + 1))
+fi
+
+# ... and that it actually builds.  `--help` only proves the name exists; the point
+# of the port shipping this driver is that a phone can compile, and it can, because
+# --trim brings the peak down from 6.86 GB to 0.43 GB (measured; 6.45 GB of it was
+# where the untrimmed run died here).  A regression in the sysimage - the OpenBLAS
+# soname that used to make --trim=safe refuse the stdlib's own __init__, for
+# instance - is only visible by compiling something.
+#
+# JULIA_CC is set because the link needs a linker that can see the Android libc's
+# versioned unwind symbols: on a phone with ndk-multilib,
+# $PREFIX/aarch64-linux-android/lib/libc.so is a stub without them (0 LIBC_R
+# versions against 54 in /system/lib64/libc.so) and clang prefers the stub, so every
+# link against libjulia.so dies with `_Unwind_*@LIBC_R undefined`.  The flag is GNU
+# ld's default for executables, and juliac takes its compiler from JULIA_CC.
+if command -v juliac >/dev/null 2>&1; then
+	jtdir="$WORK/juliac-trim"
+	mkdir -p "$jtdir"
+	cat > "$jtdir/hello.jl" <<'JULIAC_TRIM'
+function (@main)(args::Vector{String})
+    msg = "trim ok\n"
+    n = ccall(:write, Cint, (Cint, Ptr{UInt8}, Csize_t), 1, msg, sizeof(msg) - 1)
+    return n == sizeof(msg) - 1 ? Cint(0) : Cint(1)
+end
+JULIAC_TRIM
+	jlog="$WORK/out.juliac_trim.log"
+	# Captured, never piped: a pipeline here would make the check's verdict depend on
+	# whichever end of it the shell reports (see the SIGPIPE note in the recipe).
+	jrc=0
+	jout=""
+	t0=$(date +%s)
+	( cd "$jtdir" && JULIA_CC="${JULIA_CC:-clang -Wl,--allow-shlib-undefined}" \
+		timeout "${JULIAC_TIMEOUT:-600}" juliac --experimental --trim=safe \
+		--output-exe hello hello.jl ) >"$jlog" 2>&1 || jrc=$?
+	t1=$(date +%s)
+	if [ "$jrc" -eq 0 ] && [ -x "$jtdir/hello" ]; then
+		jout=$("$jtdir/hello" 2>&1) || jrc=$?
+	fi
+	if [ "$jrc" -eq 0 ] && [ "$jout" = "trim ok" ]; then
+		printf 'PASS  juliac_trim (%s s, %s bytes)\n' "$((t1 - t0))" "$(stat -c %s "$jtdir/hello")"
+		pass=$((pass + 1))
+	else
+		printf 'FAIL  juliac_trim (rc=%s, output=%s)\n' "$jrc" "${jout:-none}"
+		sed -e 's|^|        |' "$jlog" | tail -20
+		fail=$((fail + 1))
+	fi
 fi
 
 if [ "$RUNTESTS" = 1 ]; then

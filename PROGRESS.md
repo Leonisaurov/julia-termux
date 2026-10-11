@@ -927,8 +927,19 @@ tocó `packages/julia` ni `scripts/`: son del entorno del runner.
    JULIA_CC="clang -Wl,--allow-shlib-undefined" juliac --experimental --trim=safe ...
    ```
 
-   Queda como **decisión pendiente** si el wrapper `bin/juliac` del port debe traer
-   ese default (implica otro build completo), o si alcanza con documentarlo.
+   Decisión tomada: **documentarlo y verificarlo en el smoke**, no en el wrapper.
+   `scripts/device-smoke.sh` compila ahora un hello con `--trim=safe` y **corre el
+   binario** (`juliac_trim`), poniendo `JULIA_CC` con el flag cuando el entorno no lo
+   trae, porque eso es lo que un teléfono con `ndk-multilib` necesita.  El wrapper
+   queda thin: no inyecta flags de link en programas ajenos.
+
+   Medido con el bundle publicado (mismo `.pkg.tar.xz` de la release, checksums
+   verificados): **21 pass / 0 fail**, `SMOKE: PASS`, con
+
+   ```
+   PASS  juliac_launcher
+   PASS  juliac_trim (34 s, 1627408 bytes)
+   ```
 
 ---
 
