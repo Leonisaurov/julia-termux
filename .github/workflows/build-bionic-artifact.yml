@@ -52,13 +52,6 @@ jobs:
       - uses: ./.github/actions/zram
         continue-on-error: true
 
-      # The same prefix the julia build uses, so the same clang, make, patchelf and
-      # binutils.  This resolves the recipe's dependency closure; it does not build it.
-      - name: Materialise the Termux prefix
-        uses: ./.github/actions/termux-builder
-        with:
-          recipe: packages/julia/build.sh
-
       # One place that knows how each recipe maps to its script, its output directory, its
       # release tag and its release note.  Everything below reads these, so adding an artifact
       # is adding a branch here.
@@ -74,6 +67,7 @@ jobs:
               root=output/fftw-bionic
               name=fftw-bionic
               tag=fftw-bionic
+              packages=
               note="The bionic FFTW artifact FFTW_jll can load on Termux.  Termux's fftw has upstream's split threads layout and no NEON codelets, so this is built from fftw 3.3.11 with --with-combined-threads --enable-neon.  Not a package: an Overrides.toml entry points the JLL's artifact here."
               ;;
             lerc)
@@ -81,6 +75,7 @@ jobs:
               root=output/lerc-bionic
               name=lerc-bionic
               tag=lerc-bionic
+              packages=
               note="The bionic LERC artifact LERC_jll needs on Termux: Termux packages no libLerc at all, and Libtiff (which libwebp needs) depends on it.  Built from Esri LERC 4.2.0 with the bionic clang++.  Not a package: an Overrides.toml entry points the JLL's artifact here."
               ;;
             gettext-runtime)
@@ -88,6 +83,7 @@ jobs:
               root=output/gettext-runtime-bionic
               name=gettext-runtime-bionic
               tag=gettext-runtime-bionic
+              packages=gettext
               note="The composed override directory GettextRuntime_jll needs on Termux: Termux's gettext 1.0 ships libasprintf but not libintl, and Glib (which Cairo and HarfBuzz need) depends on this JLL.  libintl.so is built here from gettext 1.0; the rest are symlinks to the system.  Not a package: an Overrides.toml entry points the JLL's artifact here."
               ;;
             *)
@@ -99,9 +95,21 @@ jobs:
             echo "script=$script"
             echo "root=$root"
             echo "name=$name"
+            echo "packages=$packages"
             echo "tag=$tag"
             echo "note=$note"
           } >> "$GITHUB_OUTPUT"
+
+      # The same prefix the julia build uses, so the same clang, make, patchelf and
+      # binutils.  This resolves the recipe's dependency closure; it does not build it.
+      - name: Materialise the Termux prefix
+        uses: ./.github/actions/termux-builder
+        with:
+          recipe: packages/julia/build.sh
+          # The composed gettext-runtime directory symlinks to the system's libasprintf and to
+          # its gettext/envsubst/ngettext, so those have to be in the prefix here; the julia
+          # recipe's closure does not include gettext (measured in CI, run 38165179267).
+          packages: ${{ steps.recipe.outputs.packages }}
 
       - name: Build the artifact
         run: |

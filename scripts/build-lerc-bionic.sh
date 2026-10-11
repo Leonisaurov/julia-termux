@@ -66,14 +66,17 @@ mkdir -p "$WORK/src" "$WORK/build"
 tar xzf "$LERC_BIONIC_CACHE" -C "$WORK/src" --strip-components=1
 
 echo "== configuring and building"
-cmake -G Ninja \
+# Makefiles, not Ninja: cmake found the *host's* ninja at /usr/local/bin (glibc) and died on the
+# bionic LD_PRELOAD with "invalid ELF header" - the same trap as /bin/sh, one level down
+# (measured in CI, run 38165175966).  `make` resolves through the prefix like everything else.
+cmake -G "Unix Makefiles" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
 	-DCMAKE_INSTALL_PREFIX="$OUT" \
 	-DBUILD_SHARED_LIBS=ON \
 	-S "$WORK/src" -B "$WORK/build" > "$WORK/cmake.log"
-ninja -C "$WORK/build" > "$WORK/build.log"
-ninja -C "$WORK/build" install >> "$WORK/build.log"
+make -C "$WORK/build" -j2 > "$WORK/build.log"
+make -C "$WORK/build" install >> "$WORK/build.log"
 
 echo "== checking what it is"
 for lib in libLerc; do
